@@ -1,0 +1,45 @@
+# Prometheus Adapter ConfigMap — maps Prometheus metrics to the Custom Metrics API
+# so the HPA can scale on http_requests_per_second (see values.yaml's
+# autoscaling.customMetric, disabled by default — this service's write
+# volume is driven by tenant lifecycle events (signup/conversion/trial
+# expiry), not sustained high RPS, so CPU/memory scaling is the default;
+# enable this only if RP-1/RP-4 traffic justifies RPS-based scaling in a
+# given deployment).
+#
+# Deploy into the namespace where prometheus-adapter runs (typically kube-system
+# or monitoring). This rule fragment is generic (matches any service's
+# http_requests_total) — merge with any existing prometheus-adapter ConfigMap
+# rather than replacing it; every gincommon-based IAM service shares this
+# same fragment.
+#
+# Reference:
+#   https://github.com/kubernetes-sigs/prometheus-adapter/blob/master/docs/config.md
+#
+# After applying, verify the metric is visible:
+#   kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1 | jq '.resources[].name' | grep rps
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-adapter-config
+  namespace: monitoring   # adjust to match your prometheus-adapter deployment namespace
+  labels:
+    app.kubernetes.io/name: prometheus-adapter
+    app.kubernetes.io/component: metrics
+data:
+  config.yaml: |
+    rules:
+      # Expose per-pod RPS as http_requests_per_second so the HPA can use
+      # type: Pods / metric: http_requests_per_second.
+      # Computed from the Prometheus counter http_requests_total scraped by
+      # the ServiceMonitor (serviceMonitor.enabled: true in Helm values).
+      - seriesQuery: 'http_requests_total{namespace!="",pod!=""}'
+        resources:
+          overrides:
+            namespace:
+              resource: namespace
+            pod:
+              resource: pod
+        name:
+          matches: "^(.*)_total$"
+          as: "${1}_per_second"
+        metricsQuery: 'sum(rate(<<.Series>>{<<.LabelMatchers>>}[2m])) by (<<.GroupBy>>)'

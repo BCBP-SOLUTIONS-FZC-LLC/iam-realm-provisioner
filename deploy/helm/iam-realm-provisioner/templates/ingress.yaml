@@ -1,0 +1,45 @@
+{{- if and .Values.ingress.enabled (eq (.Values.ingress.type | default "Ingress") "Ingress") }}
+# NOTE: /metrics is served on its own dedicated port (service.metricsPort,
+# not service.httpPort) and is never routed through this Ingress — it's not
+# reachable here regardless of path rules below. See networkpolicy.yaml
+# for the NetworkPolicy rule restricting it to the monitoring namespace.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "iam-realm-provisioner.fullname" . }}
+  labels:
+    {{- include "iam-realm-provisioner.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- range .Values.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType | default "Prefix" }}
+            backend:
+              service:
+                name: {{ include "iam-realm-provisioner.fullname" $ }}
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}

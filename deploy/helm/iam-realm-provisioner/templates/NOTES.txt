@@ -1,0 +1,68 @@
+iam-realm-provisioner {{ .Chart.Version }} deployed.
+
+This service is the single writer to the Keycloak Admin API and the system
+of record for tenant identity lifecycle (RP-1..RP-16), the three inbound
+SQS consumers (membership-realm-q, tenant-realm-q, billing-realm-q), and
+the iam.tenant.events topic's 9 published events.
+
+━━ REQUIRED ACTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{{ if not .Values.existingSecret -}}
+!  Credentials are stored in Helm release history (base64, not encrypted).
+   Migrate to External Secrets Operator or AWS Secrets Manager CSI:
+     existingSecret: "iam-realm-provisioner-secrets"
+   Then remove secretValues from your values file.
+
+{{ end -}}
+{{ if not .Values.networkPolicy.enabled -}}
+!  networkPolicy.enabled is false. :9090/metrics is unauthenticated and
+   reachable by any pod in the cluster. Enable in production:
+     networkPolicy.enabled: true
+   Ensure the ingress controller namespace label matches:
+     ingressControllerNamespaceSelector: {{ .Values.networkPolicy.ingressControllerNamespaceSelector | toJson }}
+
+{{ end -}}
+{{ if .Values.ingress.enabled -}}
+!  Ingress is enabled. Only /api/v1 (RP-1..RP-16) is routed. :9090/metrics
+   is not referenced by this Ingress, but remains reachable cluster-wide
+   unless networkPolicy.enabled=true.
+
+{{ end -}}
+!  This service authenticates to OpenBao (per-tenant IdP secrets +
+   Keycloak admin credential, §12) via this pod's ServiceAccount JWT
+   against OpenBao's Kubernetes auth method — confirm an OpenBao role
+   named .Values.env.BAO_AUTH_ROLE ({{ .Values.env.BAO_AUTH_ROLE }}) is
+   bound to this namespace/ServiceAccount (see deploy/openbao/role.tf.example)
+   before traffic hits RP-6/RP-7.
+
+━━ CRONJOBS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{{ if .Values.cronJobs.trialExpiry.enabled -}}
+  {{ .Values.cronJobs.trialExpiry.jobName }}            {{ .Values.cronJobs.trialExpiry.schedule }}    (RP-C1, §8.7)
+{{ end -}}
+{{ if .Values.cronJobs.trialHardDelete.enabled -}}
+  {{ .Values.cronJobs.trialHardDelete.jobName }}       {{ .Values.cronJobs.trialHardDelete.schedule }}    (RP-C2, §8.7)
+{{ end -}}
+{{ if .Values.cronJobs.subscriptionLapse.enabled -}}
+  {{ .Values.cronJobs.subscriptionLapse.jobName }}      {{ .Values.cronJobs.subscriptionLapse.schedule }}    (RP-C3, §8.8/§8.9 — no-ops until SubscriptionStatusReader is wired)
+{{ end -}}
+{{ if .Values.cronJobs.realmConfigReconcile.enabled -}}
+  {{ .Values.cronJobs.realmConfigReconcile.jobName }} {{ .Values.cronJobs.realmConfigReconcile.schedule }}   (RP-C4, §8.10)
+{{ end -}}
+{{ if .Values.cronJobs.outboxPrune.enabled -}}
+  {{ .Values.cronJobs.outboxPrune.jobName }}              {{ .Values.cronJobs.outboxPrune.schedule }}    (maintenance, not LLD-pinned)
+{{ end -}}
+{{ if .Values.cronJobs.processedEventsPrune.enabled -}}
+  {{ .Values.cronJobs.processedEventsPrune.jobName }}   {{ .Values.cronJobs.processedEventsPrune.schedule }}   (maintenance, not LLD-pinned)
+{{ end -}}
+
+Check CronJob status:
+  kubectl get cronjobs -l app.kubernetes.io/name={{ include "iam-realm-provisioner.name" . }} -n {{ .Release.Namespace }}
+
+━━ VERIFY DEPLOYMENT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  kubectl rollout status deployment/{{ include "iam-realm-provisioner.fullname" . }} -n {{ .Release.Namespace }}
+  kubectl get pods -l {{ include "iam-realm-provisioner.selectorLabels" . | replace ": " "=" | replace "\n" "," }}
+
+Readiness: https://{{ if .Values.ingress.hosts }}{{ (first .Values.ingress.hosts).host }}{{ else }}<host>{{ end }}/readyz
+Metrics:   (cluster-internal only) http://<pod-ip>:{{ .Values.service.metricsPort }}/metrics

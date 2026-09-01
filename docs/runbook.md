@@ -1,0 +1,161 @@
+# Operator Runbook — iam-realm-provisioner
+
+Full procedures for the headline scenarios listed in LLD §22. This service is the single writer to the Keycloak Admin API and the system of record for tenant identity lifecycle — most incidents here are either "Keycloak is unhappy" or "something didn't land locally after Keycloak succeeded." Grafana dashboard: "IAM — Realm Provisioner". Metric prefix: `iam_realm_provisioner_*` (frozen, §23). Alert rules: `deploy/monitoring/app-alerts.yml`.
+
+---
+
+## 1. Keycloak Admin API degraded
+
+**Symptom:** `keycloak_call_failures_total` alert firing (rate > 5% for 5m), provisioning endpoints returning `502`/`realm_provisioning_failed`.
+
+**Diagnosis:**
+1. Check `iam_realm_provisioner_keycloak_call_duration_seconds{op}` and `iam_realm_provisioner_keycloak_call_failures_total{op}` broken down by operation — is it one op (e.g. `create_realm`) or everything?
+2. Check `iam_realm_provisioner_admin_token_refresh_total{trigger="401"}` — a spike here means the admin credential was rotated (client secret changed in OpenBao/Keycloak) and the cached token is stale everywhere, not that Keycloak itself is down.
+3. Check the client-side rate limiter budget (`KEYCLOAK_RATE_LIMIT_RPS`, default 20) — a burst of retries from callers can self-inflict 429s that look like a Keycloak outage.
+4. Check Keycloak's own health/logs directly if reachable.
+
+**Recovery:**
+- **This service's provisioning flows are Keycloak-effect-first and idempotent.** No manual reconciliation is needed for a transient Keycloak outage — once Keycloak recovers, callers retry the same request with the same `Idempotency-Key` and the operation completes normally. Do not manually clear `provisioning_operations` rows to "unstick" a caller during an outage; let the retry mechanism work.
+- If the root cause is credential rotation, verify the new secret is correctly written to OpenBao at `BAO_KEYCLOAK_ADMIN_PATH` (`iam/realm-provisioner/keycloak-admin`) and that this service has been restarted or its token cache naturally expires (see §6.1 Keycloak admin-token cache).
+- If the root cause is the rate limiter, raise `KEYCLOAK_RATE_LIMIT_RPS` only after confirming Keycloak itself can absorb the increased load.
+
+---
+
+## 2. Realm-config not landing
+
+**Symptom:** `realm_config_pending_gauge > 0` sustained for 30m+ (warning alert — RP-INV-6 risk: the stored config value and the actual Keycloak realm setting have diverged).
+
+**Diagnosis:**
+```sql
+SELECT tenant_id, setting, status, last_error, updated_at
+FROM realm_config_reconciliations
+WHERE status = 'failed'
+ORDER BY updated_at DESC;
+```
+Inspect `last_error` for each failing row — it is either a Keycloak-side error (permission, realm not found, malformed value) or a setting-validity issue on this service's side.
+
+**Recovery:**
+- The `realm-config-reconcile` job (RP-C4, runs every ~10 minutes per §11.1) automatically retries `pending` rows. A row that stays `failed` after several retry ticks needs manual intervention — fix the underlying Keycloak-side issue (e.g. grant a missing permission, correct a malformed realm-config value at the source) and let the next tick retry it, or re-run the job directly:
+  ```bash
+  make run-reconciler JOB=realm-config-reconcile
+  ```
+- **A persistent failure here is a known, flagged divergence — never a silent one** (RP-INV-6). Do not manually UPDATE the realm-config row to `applied` unless you have independently confirmed the Keycloak realm actually reflects the setting; doing so would hide a real divergence rather than fix it.
+
+---
+
+## 3. Offboarding export failed
+
+**Symptom:** `realm_export_total{result="fail"}` — this is a **critical** alert (compliance-blocking).
+
+**Diagnosis:** Check S3/KMS access from this service's pod — `REALM_EXPORT_BUCKET` and `REALM_EXPORT_KMS_KEY` (env vars). Common causes: IAM policy drift (see `deploy/iam/policy.json`), KMS key policy not granting this service's role `kms:GenerateDataKey`/`kms:Decrypt`, or the bucket having been renamed/deleted.
+
+**Recovery:**
+- **The tenant realm is NOT deleted until a confirmed export succeeds** (RP-EVT-4) — the tenant stays in `suspended` state, so there is no data-loss risk from this failure by design. There is no urgency to "unblock" the tenant record; the urgency is fixing the export path.
+- Fix the S3/KMS access issue, then re-run the offboarding trigger for the affected tenant (whatever kicked off the original export — the lapse sweep, or an operator-triggered offboard). The realm is deleted only after the corresponding `TenantOffboarded` event with a populated `export_s3_key` has been produced.
+
+---
+
+## 4. Late conversion reversal (> 7 days)
+
+**Symptom:** `POST .../tenants/:id/revert-conversion` returns `409 revert_window_expired` with `details.converted_at`.
+
+**Recovery:** This is by design — reversal past the 7-day window is not a self-service API operation. The manual procedure:
+1. Recreate the shared-realm tenant row (the trial/shared-realm identity that existed before conversion).
+2. Migrate the tenant's users back from the dedicated realm to the shared realm, using the same `KeycloakAdmin.MigrateUser` primitive the forward conversion path used (global user-ID uniqueness still applies — the dedicated-realm user must be deleted before recreating it in the shared realm).
+3. Tear down the dedicated realm (`KeycloakAdmin.DeleteRealm`) only after every user has been confirmed migrated back.
+4. Emit a corrective audit trail entry — this reversal happens outside the normal event-producing code path, so there is no automatic `TenantConverted`-reversal event; document the action out-of-band (audit log / ticket) per RP-8.
+
+This is intentionally an operator-run manual procedure, not an API endpoint — it is rare, higher-risk than the forward path, and benefits from a human confirming state at each step.
+
+---
+
+## 5. Stuck `in_progress` idempotency key
+
+**Symptom:** A caller retries a request and gets `409 operation_in_progress` indefinitely — a prior attempt crashed mid-flow and left a `provisioning_operations` row in `status='in_progress'`.
+
+**Diagnosis:**
+```sql
+SELECT idempotency_key, operation, tenant_id, status, created_at, updated_at
+FROM provisioning_operations
+WHERE status = 'in_progress' AND updated_at < now() - interval '1 hour';
+```
+
+**Recovery:**
+- **Because every flow is Keycloak-effect-first, the default and safe recovery is to do nothing and let the caller retry with the same `Idempotency-Key`.** The retry re-attempts the Keycloak step; if Keycloak already completed it from the crashed attempt, the operation's own idempotent checks (e.g. realm-already-exists, user-already-migrated) should let it proceed to the local commit.
+- **Only force-clear a stuck key after confirming no Keycloak partial state remains** — i.e. you have manually verified in Keycloak that the realm/user/IdP the operation was creating does not exist in a half-configured state. If Keycloak state does exist but the local row doesn't reflect it, prefer fixing the local row to match reality over deleting Keycloak state, since Keycloak is the harder-to-reverse side.
+- Force-clearing (only after the above check):
+  ```sql
+  UPDATE provisioning_operations SET status = 'failed', last_error = 'operator-cleared: stuck in_progress, verified no Keycloak partial state'
+  WHERE idempotency_key = '<key>';
+  ```
+  This allows a subsequent request with a **new** `Idempotency-Key` to proceed cleanly (the old key's row now correctly reflects `failed`, so it won't be replayed as a stale success).
+
+---
+
+## 6. Pre-migration IdP portability audit
+
+**Symptom / trigger:** Ahead of a planned regional cutover, an operator needs assurance that no tenant's IdP configuration has a region-portability problem (HLD §11.6).
+
+**Procedure:**
+```bash
+curl -X POST https://<host>/api/v1/internal/audit/idp-region-portability
+```
+This is RP-13. The report must show zero failing tenants (or documented waivers for any WARN-level acknowledgement) before proceeding with the cutover. If `failing_tenants` is non-empty, resolve each tenant's IdP configuration against the §11.6 checklist (CRITICAL checks 1-2/4-6/10-12 block outright; WARN checks 7-9/13 require a recorded admin acknowledgement) before re-running the audit.
+
+Note: as of this build, an empty `failing_tenants` array serializes as JSON `null` rather than `[]` — a cosmetic gap, not a correctness issue; treat `null` and `[]` as equivalent ("no failing tenants") when reading the report.
+
+---
+
+## 7. Outbox relay lag / SQS consumer stuck / DLQ buildup
+
+Not a numbered LLD headline item, but a common operational need given the outbox + 3-consumer architecture.
+
+**Outbox relay lag:**
+- Check `outbox_dead_letters_total` (from `platform-events`) — an increase over 30m is a warning alert. Rows land in `outbox_dead_letters` after `OUTBOX_MAX_ATTEMPTS` (default 5) failed publish attempts.
+- Check `OUTBOX_POLL_INTERVAL` (default 500ms) and `OUTBOX_BATCH_SIZE` (default 50) — under sustained high write volume, a too-small batch size can cause the relay to fall behind; check whether unpublished `outbox_events` rows are accumulating faster than the relay drains them.
+- A dead-lettered event needs manual inspection of its payload and `last_error`, then either a manual republish (via `platform-events` tooling) or acceptance that the event is unrecoverable (document why — every produced event has downstream consumers).
+
+**Stuck SQS consumer / DLQ buildup:**
+- Each inbound queue (`membership-realm-q`, `tenant-realm-q`, `billing-realm-q`) has its own `-dlq` with `maxReceiveCount=5`. DLQ depth > 0 is a warning alert.
+- A message lands in the DLQ after 5 failed processing attempts — inspect the message body and this service's logs (structured, includes `tenant_id`/`operation`/`trace_id`) for the actual error. Common causes: a malformed payload from the producer, a downstream dependency (e.g. Org & Membership for the I-8 residual-MFA check) being unavailable, or a genuine bug in the consumer handler.
+- Once the root cause is fixed, messages can be manually redriven from the DLQ back to the source queue (standard SQS redrive, `aws sqs start-message-move-task` or console redrive) — this service's consumers are safe to reprocess a message because of `processed_events` dedup (see below).
+
+**Manually replaying a `processed_events`-deduped event:**
+- If a message was correctly processed but its downstream effect needs to be re-triggered for some other operational reason (rare — e.g. verifying an effect after a suspected partial failure), find and delete its row from `processed_events` first, then redrive/republish the message:
+  ```sql
+  DELETE FROM processed_events
+  WHERE consumer = '<membership|tenant|billing>' AND event_id = '<event-id>';
+  ```
+  Do this only when you have a specific reason to believe the original processing did not fully take effect (e.g. a downstream write rolled back after the event was recorded as processed) — replaying a genuinely-already-applied event is safe for most handlers (they're idempotent upserts) but should still be a deliberate action, not routine.
+
+---
+
+## 8. Reconciler job health (RP-C1..RP-C4 + retention jobs)
+
+Six jobs run via `cmd/reconciler --job=<name>`, each as its own K8s CronJob:
+
+| Job | LLD ref | Purpose | Health signal |
+|---|---|---|---|
+| `trial-expiry` | RP-C1 | Soft-expires trials past `trial_ends_at` + `TRIAL_GRACE_DAYS` | `iam_realm_provisioner_trial_expiry_processed_total`, `iam_realm_provisioner_trial_expiry_deferred_total` (should stay near 0 — sustained >0 for 1h is a warning alert) |
+| `trial-hard-delete` | RP-C2 | Hard-deletes trial realms past `RETENTION_DAYS` after expiry | Check job's own exit code / K8s CronJob history; no dedicated metric beyond the shared provision/lapse counters |
+| `subscription-lapse` | RP-C3 | Reads subscription status and suspends/offboards lapsed tenants | `iam_realm_provisioner_lapse_processed_total{transition=suspend\|offboard}` — **see the open item below** |
+| `realm-config-reconcile` | RP-C4 | Retries `pending`/`failed` realm-config rows | `iam_realm_provisioner_realm_config_pending_gauge` (see scenario 2 above) |
+| `outbox-prune` | — | Deletes published `outbox_events` older than `OUTBOX_RETENTION_DAYS` (default 8) | Check K8s CronJob history; a growing `outbox_events` table row count is the symptom of this job not running |
+| `processed-events-prune` | — | Deletes `processed_events` rows older than `PROCESSED_EVENTS_TTL_DAYS` (default 8) | Same as above, for `processed_events` |
+
+General health check for any job: K8s CronJob's `lastScheduleTime`/`lastSuccessfulTime` and pod logs. All jobs accept `RECONCILER_BATCH_LIMIT` (default 100) and `RECONCILER_TIMEOUT` (default 5m) — a job repeatedly timing out at the batch limit under a large backlog may need a temporarily larger `RECONCILER_BATCH_LIMIT` or more frequent scheduling, not a code change.
+
+**Instrumentation note:** every reconciler job must *increment* its `*_deferred_total` counter on every defer, not merely register it at startup — otherwise the "deferred > 0 sustained" alert can never fire even when the job is genuinely stuck deferring the same rows repeatedly. Verify this behavior if a new deferred-style job is added.
+
+---
+
+## 9. Emergency operator suspension (RP-14)
+
+**Procedure:** `POST .../tenants/:id/suspend` with `source=operator`. This disables the tenant's realm in Keycloak immediately (login blocked) and produces `TenantSuspended{source: "operator"}`. Use for security incidents (compromised tenant, abuse) rather than billing-driven lapses, which flow through `subscription-lapse` instead. Reactivate via `POST .../tenants/:id/reactivate` (RP-10) with the matching `source`.
+
+---
+
+## Open items — operational impact
+
+- **RP-C3 / `SubscriptionStatusReader`.** The frozen LLD specifies that the subscription-lapse job reads tenant subscription status from Org & Membership, but does not name the concrete endpoint. As shipped, the `SubscriptionStatusReader` port exists but has no adapter wired into `cmd/reconciler/main.go` — **running `subscription-lapse` today will fail fast at startup (missing dependency) rather than silently no-op or guess at a contract.** Do not attempt to work around this by pointing it at an unconfirmed O&M endpoint; coordinate with the O&M team to confirm the contract first, then wire the adapter. Until then, RP-C3-driven suspension/offboarding does not run — subscription lapses must be handled via the manual `RP-14`/offboarding path if genuinely needed before the adapter ships.
+- **OpenBao integration is untested outside a real Kubernetes cluster.** The Kubernetes ServiceAccount JWT the auth flow depends on (`/v1/auth/kubernetes/login`) only exists inside a real cluster with the correct service account bound (see `deploy/openbao/role.tf.example`). In any local-dev or CI environment without that binding, RP-6 (configure IdP)/RP-7 (delete IdP) will return `500` on the OpenBao write/delete step. This is expected local-dev/CI behavior, not a production defect — verify OpenBao connectivity as part of any staging/production rollout checklist before relying on IdP configuration endpoints.

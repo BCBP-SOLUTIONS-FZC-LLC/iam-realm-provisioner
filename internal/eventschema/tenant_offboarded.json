@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TenantOffboardedPayload",
+  "description": "Payload of TenantOffboarded (LLD §7.5, §8.9, RP-INV-5). Emitted by RP-C3 only after the dedicated realm's export to S3 is confirmed durable AND the realm has been deleted (RP-EVT-4). Terminal — no transition out is permitted after this.",
+  "type": "object",
+  "required": ["tenant_id", "realm", "export_s3_key", "offboarded_at"],
+  "additionalProperties": true,
+  "properties": {
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "realm": { "type": "string" },
+    "export_s3_key": { "type": "string" },
+    "offboarded_at": { "type": "string", "format": "date-time" }
+  }
+}

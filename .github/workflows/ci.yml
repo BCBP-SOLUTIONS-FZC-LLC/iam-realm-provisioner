@@ -1,0 +1,258 @@
+# CI for https://github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner
+#
+# Flow:
+#
+#   validate-test ──────┐
+#   build-image ────────┤──► pr-summary (PR events only) / push-gate (push events only)
+#   validate-quality ───┘
+#
+# This repo ships TWO binaries from ONE image (§13 - see Dockerfile's header
+# comment): /iam-realm-provisioner-server (HTTP API RP-1..RP-16 + the three
+# inbound SQS consumers + the outbox.Runner) is the image's default
+# ENTRYPOINT; /iam-realm-provisioner-reconciler (the RP-C1..RP-C4 CronJob
+# entry points) is invoked from the same image with an overridden entrypoint
+# and --job=<name> (deploy/helm/templates/cronjobs.yaml). build-image is
+# therefore a single job, not a matrix - it builds one image and runs the
+# smoke-tests script twice (once per binary/entrypoint) against it.
+#
+# paths-ignore skips this entire (expensive) pipeline for commits that only
+# touch Markdown docs or hand-maintained architecture diagrams.
+name: CI
+
+"on":
+  push:
+    branches: [main, master]
+    paths-ignore: ['**.md', 'docs/architecture/**']
+  pull_request:
+    branches: [main, master]
+    paths-ignore: ['**.md', 'docs/architecture/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  BUILDKIT_PROGRESS: plain
+
+jobs:
+  # ── runs in parallel with validate-quality + build-image ─────────────────
+  validate-test:
+    name: Validate / Test
+    uses: ./.github/workflows/validate-test.yml
+    secrets: inherit
+
+  # ── runs in parallel with validate-test + build-image ────────────────────
+  validate-quality:
+    name: Validate / Quality
+    uses: ./.github/workflows/validate-quality.yml
+    secrets: inherit
+
+  # ── runs in parallel with validate-test + validate-quality ───────────────
+  # Lints the Dockerfile first (hadolint failure exits before the expensive
+  # build ever starts), builds to the GHA/registry cache, runs a Trivy CVE
+  # scan + smoke tests for both binaries, and - on push events only -
+  # pushes + signs the image.
+  build-image:
+    name: Build image
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [validate-test]
+    env:
+      IMAGE: ghcr.io/bcbp-solutions-fzc-llc/iam-realm-provisioner
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+        with:
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Hadolint
+        uses: hadolint/hadolint-action@v3.3.0
+        with:
+          dockerfile: Dockerfile
+
+      - name: Check .dockerignore exists
+        run: test -f .dockerignore
+
+      - name: Prepare Docker build
+        id: cache
+        env:
+          REGISTRY_REF: ${{ env.IMAGE }}:buildcache
+          CAN_PUSH: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        run: bash .github/scripts/docker-build-prep.sh
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.1.0
+
+      - name: Build image → local + cache
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: iam-realm-provisioner-ci-test
+          pull: ${{ github.event_name != 'pull_request' }}
+          cache-from: ${{ steps.cache.outputs.from }}
+          cache-to: ${{ steps.cache.outputs.to }}
+          build-args: |
+            BUILD_VERSION=${{ github.sha }}
+            SOURCE_DATE_EPOCH=${{ steps.cache.outputs.SOURCE_DATE_EPOCH }}
+          secrets: |
+            go_private_token=${{ secrets.GO_PRIVATE_TOKEN }}
+
+      - name: Cache Trivy DB
+        uses: actions/cache@v6.0.0
+        with:
+          path: /tmp/trivy-cache
+          key: trivy-db-${{ runner.os }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Trivy scan — CRITICAL / HIGH / UNKNOWN
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: iam-realm-provisioner-ci-test
+          format: table
+          exit-code: '1'
+          severity: CRITICAL,HIGH,UNKNOWN
+          ignore-unfixed: true
+          cache-dir: /tmp/trivy-cache
+
+      - name: Trivy scan — SARIF upload
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: iam-realm-provisioner-ci-test
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: '0'
+          ignore-unfixed: true
+          cache-dir: /tmp/trivy-cache
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v4.37.0
+        continue-on-error: true
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Smoke tests (server)
+        env:
+          IMAGE_TAG: iam-realm-provisioner-ci-test
+          BINARY: server
+        run: bash .github/scripts/smoke-tests.sh
+
+      - name: Smoke tests (reconciler)
+        env:
+          IMAGE_TAG: iam-realm-provisioner-ci-test
+          BINARY: reconciler
+          ENTRYPOINT: /iam-realm-provisioner-reconciler
+        run: bash .github/scripts/smoke-tests.sh
+
+      # ── push to GHCR on merge to main (needs validate-quality too) ───────
+      - name: Docker metadata
+        id: meta
+        if: github.event_name == 'push'
+        uses: docker/metadata-action@v6.1.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+
+      - name: Build and push
+        id: pushed
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          pull: true
+          push: true
+          provenance: true
+          sbom: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_VERSION=${{ github.sha }}
+            SOURCE_DATE_EPOCH=${{ steps.cache.outputs.SOURCE_DATE_EPOCH }}
+          secrets: |
+            go_private_token=${{ secrets.GO_PRIVATE_TOKEN }}
+          cache-from: |
+            type=gha
+            type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: |
+            type=gha,mode=max
+            type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
+
+      - name: Install Cosign
+        if: github.event_name == 'push'
+        uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Sign image with Cosign
+        if: github.event_name == 'push'
+        run: |
+          cosign sign --yes "${{ env.IMAGE }}@${{ steps.pushed.outputs.digest }}"
+
+      - name: Verify image signature
+        if: github.event_name == 'push'
+        run: |
+          cosign verify \
+            --certificate-identity-regexp "^https://github\.com/${{ github.repository }}/.github/workflows/.*@refs/heads/(main|master)$" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${{ env.IMAGE }}@${{ steps.pushed.outputs.digest }}"
+
+      - name: Log image digest
+        if: github.event_name == 'push'
+        env:
+          IMAGE_DIGEST: ${{ steps.pushed.outputs.digest }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: bash .github/scripts/log-image-digest.sh
+
+  # ── posts a check summary on every PR push ────────────────────────────────
+  pr-summary:
+    name: PR summary
+    runs-on: ubuntu-latest
+    needs: [validate-test, validate-quality, build-image]
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Post summary
+        run: |
+          {
+            echo "### iam-realm-provisioner CI summary"
+            echo "- Validate / Test: ${{ needs.validate-test.result }}"
+            echo "- Validate / Quality: ${{ needs.validate-quality.result }}"
+            echo "- Build image: ${{ needs.build-image.result }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── requires build-image + validate-quality to have passed ───────────────
+  push-gate:
+    name: Push gate
+    runs-on: ubuntu-latest
+    needs: [build-image, validate-quality]
+    if: github.event_name == 'push'
+    steps:
+      - name: Image pushed and signed
+        run: echo "iam-realm-provisioner (carrying both server and reconciler binaries) is pushed and verified."

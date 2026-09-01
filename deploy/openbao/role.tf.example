@@ -1,0 +1,29 @@
+# Terraform snippet — binds deploy/openbao/policy.hcl to this service's
+# Kubernetes ServiceAccount via OpenBao's kubernetes auth method. This file
+# is *illustrative*, not applied by the application; platform Terraform (or
+# an equivalent `bao`/`vault` CLI bootstrap) owns the authoritative version.
+#
+# Assumes the "kubernetes" auth method is already enabled and configured
+# against this cluster (auth/kubernetes/config) — that setup is shared
+# across every IAM service and is out of scope here.
+#
+# ServiceAccount name/namespace must match deploy/helm/iam-realm-provisioner
+# (fullname "iam-realm-provisioner" in namespace "iam", matching this
+# repo's Dockerfile/IAM-policy convention). BAO_AUTH_ROLE (§12) defaults to
+# "iam-realm-provisioner" — keep the role name below in sync with that env
+# var.
+
+resource "vault_policy" "iam_realm_provisioner" {
+  name   = "iam-realm-provisioner"
+  policy = file("${path.module}/policy.hcl")
+}
+
+resource "vault_kubernetes_auth_backend_role" "iam_realm_provisioner" {
+  backend                          = "kubernetes"
+  role_name                        = "iam-realm-provisioner"
+  bound_service_account_names      = ["iam-realm-provisioner"]
+  bound_service_account_namespaces = ["iam"]
+  token_policies                   = [vault_policy.iam_realm_provisioner.name]
+  token_ttl                        = 900  # 15m — short-lived, proactively renewed (see policy.hcl)
+  token_max_ttl                    = 3600
+}

@@ -1,0 +1,117 @@
+# Reusable workflow - test gate.
+# Race detector (unit · postgres/RLS · integration) + coverage + arch lint +
+# AsyncAPI-vs-schema drift check. Called by ci.yml. Gates the build-image
+# job. Mirrors the sibling IAM services' validate-test.yml.
+name: Validate / Test
+
+"on":
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to check out (leave empty to use the caller ref)'
+        type: string
+        required: false
+        default: ''
+    outputs:
+      pct:
+        description: 'Total statement coverage percentage'
+        value: ${{ jobs.test.outputs.pct }}
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  # 70% - see .github/scripts/coverage-gate.sh for why this matches the
+  # sibling IAM services' baseline. Ratchet this up over time; never lower
+  # it to make a failing PR pass.
+  COVERAGE_THRESHOLD: '70'
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      pct: ${{ steps.gate.outputs.pct }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            go.mod
+
+      - name: Configure private module access
+        run: |
+          git config --global credential.helper store
+          echo "https://x-access-token:${{ secrets.GO_PRIVATE_TOKEN }}@github.com" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+
+      - name: Download modules
+        env:
+          GOPRIVATE: github.com/BCBP-SOLUTIONS-FZC-LLC/*
+          GONOSUMDB: github.com/BCBP-SOLUTIONS-FZC-LLC/*
+        run: go mod download
+
+      - name: Verify modules
+        run: go mod verify
+
+      # Mandatory blocking gate: runs unit (incl. the AsyncAPI-vs-eventschema
+      # drift test, internal/eventschema/asyncapi_drift_test.go - this
+      # service's CI-enforceable substitute for a live Glue-registry
+      # comparison, §7.3/§23) + postgres/RLS (Testcontainers Postgres) +
+      # integration (Testcontainers Postgres+Keycloak) with -race and
+      # coverage, in parallel, merged into coverage.out (§17 Testing
+      # Strategy). Any data race detected here blocks all downstream jobs
+      # (build-image). Do NOT remove or skip.
+      - name: Tests - unit · postgres/RLS · integration (race + coverage)
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: 'true'
+        run: make test-ci
+
+      - name: Coverage threshold gate
+        id: gate
+        run: bash .github/scripts/coverage-gate.sh
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: coverage-report-${{ github.sha }}
+          path: coverage.out
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # Enforces this service's Clean Architecture layering (defined in
+      # .go-arch-lint.yml, §3.4/§6): core/domain -> core/port -> core/service,
+      # adapter/inbound and adapter/outbound depending only on core (+
+      # eventschema/api/observability), never on each other - wired together
+      # only from cmd/server and cmd/reconciler. Also enforces RP-INV-1
+      # (single Keycloak writer) and RLS-6 (no session-scoped tenant GUC).
+      - name: Cache go-arch-lint binary
+        uses: actions/cache@v6.0.0
+        with:
+          path: ~/go/bin
+          key: go-arch-lint-${{ runner.os }}-v1.15.0
+
+      - name: Architecture lint
+        run: bash .github/scripts/arch-lint.sh
+
+      # End-to-end tests exercise the full HTTP router (RP-1..RP-16) against
+      # real Postgres, plus the three SQS consumers and all four reconciler
+      # jobs against local Testcontainers (§17). Not part of the coverage
+      # gate, but must still pass before anything downstream builds on this
+      # ref.
+      - name: End-to-end tests
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: 'true'
+        run: make test-e2e

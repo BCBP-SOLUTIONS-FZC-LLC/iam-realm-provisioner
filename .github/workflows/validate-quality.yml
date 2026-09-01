@@ -1,0 +1,113 @@
+# Reusable workflow - quality gate.
+# fmt · tidy · vet · lint (golangci-lint via go tool) · vuln-check ·
+# Dockerfile checks. Called by ci.yml. Must pass before push; does NOT gate
+# coverage, trivy, or smoke (those only need validate-test.yml). Mirrors the
+# sibling IAM services' validate-quality.yml.
+name: Validate / Quality
+
+"on":
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to check out (leave empty to use the caller ref)'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            go.mod
+
+      - name: Configure private module access
+        run: |
+          git config --global credential.helper store
+          echo "https://x-access-token:${{ secrets.GO_PRIVATE_TOKEN }}@github.com" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+
+      - name: Download modules
+        env:
+          GOPRIVATE: github.com/BCBP-SOLUTIONS-FZC-LLC/*
+          GONOSUMDB: github.com/BCBP-SOLUTIONS-FZC-LLC/*
+        run: go mod download
+
+      - name: Verify modules
+        run: go mod verify
+
+      # Workflow files must use literal operators, not HTML entity encodings.
+      - name: Reject HTML-escaped operators in workflow files
+        run: |
+          if grep -REn '&(gt|lt|amp)' .github/workflows/ .github/scripts/; then
+            echo "::error::Workflow or script files contain HTML entities. Use literal operators instead."
+            exit 1
+          fi
+
+      # RLS-6 style CI gate (§6.2/§13.1/§14/§17.5 Case 5) - see
+      # .github/scripts/check-forbidden-set-guc.sh for the full rationale.
+      - name: Reject non-transaction-local SET app.tenant_id
+        run: bash .github/scripts/check-forbidden-set-guc.sh
+
+      - name: Format check
+        run: |
+          unformatted=$(gofmt -l cmd/ internal/ pkg/ test/ 2>/dev/null || true)
+          if [ -n "${unformatted}" ]; then
+            echo "${unformatted}" | while IFS= read -r f; do
+              echo "::error file=${f},title=Format check::Not formatted - run 'make fmt'"
+            done
+            exit 1
+          fi
+
+      - name: Tidy check
+        run: |
+          make tidy
+          if ! git diff --exit-code go.mod go.sum; then
+            echo "::error file=go.mod,title=Module drift::go.mod or go.sum is stale - run 'go mod tidy' and commit the result."
+            exit 1
+          fi
+
+      - name: Vet
+        run: make vet
+
+      - name: Lint
+        run: make lint
+
+      - name: Vulnerability check
+        run: |
+          if ! make vuln-check; then
+            echo "::error file=go.mod,title=Vulnerability found::govulncheck detected vulnerabilities - run 'make vuln-check' locally to view details."
+            exit 1
+          fi
+
+      # Enforce digest-pinned FROM lines in the Dockerfile. Floating tags
+      # (e.g. golang:1.26.6-bookworm without @sha256:...) can be silently
+      # overwritten by upstream maintainers, breaking supply-chain
+      # guarantees.
+      - name: Dockerfile base image digest check
+        run: |
+          if grep -E '^FROM [^ @]+:[^ @]+( AS .+)?$' Dockerfile; then
+            echo "::error file=Dockerfile,title=Unpinned base image::Dockerfile FROM lines must use digest-pinned references (e.g. golang:1.26.6-bookworm@sha256:...)."
+            exit 1
+          fi
+          echo "Dockerfile base images are digest-pinned."

@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TrialTenantProvisionedPayload",
+  "description": "Payload of TrialTenantProvisioned (LLD §7.5). Emitted by RP-1 on trial-user creation in the shared trial realm. Settles/reconciles O&M's tenants row created by Signup's own I-1 call — does not create it (RP-6).",
+  "type": "object",
+  "required": ["tenant_id", "realm", "keycloak_user_id"],
+  "additionalProperties": true,
+  "properties": {
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "realm": { "type": "string", "const": "trial" },
+    "keycloak_user_id": { "type": "string", "format": "uuid" }
+  }
+}

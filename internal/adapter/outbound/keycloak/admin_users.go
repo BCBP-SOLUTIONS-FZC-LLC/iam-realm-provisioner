@@ -1,0 +1,334 @@
+package keycloak
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/Nerzal/gocloak/v13"
+	"github.com/google/uuid"
+
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
+)
+
+const tenantIDAttribute = "tenant_id"
+
+func buildUser(req port.CreateUserRequest) gocloak.User {
+	first, last := splitName(req.FullName)
+	u := gocloak.User{
+		Username:      &req.Email,
+		Email:         &req.Email,
+		FirstName:     &first,
+		LastName:      &last,
+		Enabled:       gocloak.BoolP(true),
+		EmailVerified: gocloak.BoolP(req.EmailVerified),
+		Attributes:    &map[string][]string{tenantIDAttribute: {req.TenantID.String()}},
+	}
+	if len(req.RequiredActions) > 0 {
+		u.RequiredActions = &req.RequiredActions
+	}
+	if req.HashedPasswordSeed != "" {
+		u.Credentials = &[]gocloak.CredentialRepresentation{{
+			Type:      gocloak.StringP("password"),
+			Value:     &req.HashedPasswordSeed,
+			Temporary: gocloak.BoolP(false),
+		}}
+	}
+	return u
+}
+
+func splitName(full string) (first, last string) {
+	for i := len(full) - 1; i >= 0; i-- {
+		if full[i] == ' ' {
+			return full[:i], full[i+1:]
+		}
+	}
+	return full, ""
+}
+
+// CreateTrialUser creates a user in the shared trial realm (RP-1, RP-INV-2).
+func (a *Admin) CreateTrialUser(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) {
+	tok, err := a.token(ctx)
+	if err != nil {
+		return uuid.Nil, wrapErr("create_trial_user: token", err)
+	}
+	if len(req.RequiredActions) == 0 {
+		req.RequiredActions = []string{"VERIFY_EMAIL"}
+	}
+	id, err := a.client.CreateUser(ctx, tok, "trial", buildUser(req))
+	if err != nil {
+		return uuid.Nil, wrapErr("create_trial_user", err)
+	}
+	if err := a.client.SendVerifyEmail(ctx, tok, id, "trial"); err != nil {
+		a.log.Warn("send verify email failed", map[string]any{"error": err.Error(), "user_id": id})
+	}
+	return uuid.Parse(id)
+}
+
+// CreateInvitedUser creates a user in realmName with requiredActions
+// applied verbatim (RP-5, F5).
+func (a *Admin) CreateInvitedUser(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
+	tok, err := a.token(ctx)
+	if err != nil {
+		return uuid.Nil, wrapErr("create_invited_user: token", err)
+	}
+	id, err := a.client.CreateUser(ctx, tok, realmName, buildUser(req))
+	if err != nil {
+		return uuid.Nil, wrapErr("create_invited_user", err)
+	}
+	return uuid.Parse(id)
+}
+
+// MigrateUser recreates a trial user in the dedicated realm, preserving
+// sub, copying TOTP, and flagging WEBAUTHN_REGISTER when the source held a
+// WebAuthn credential (WebAuthn cannot migrate across realms, §8.3).
+func (a *Admin) MigrateUser(ctx context.Context, sourceRealm, targetRealm string, keycloakUserID uuid.UUID) (bool, error) {
+	tok, err := a.token(ctx)
+	if err != nil {
+		return false, wrapErr("migrate_user: token", err)
+	}
+	src, err := a.client.GetUserByID(ctx, tok, sourceRealm, keycloakUserID.String())
+	if err != nil {
+		return false, wrapErr("migrate_user: get_user", err)
+	}
+	creds, err := a.client.GetCredentials(ctx, tok, sourceRealm, keycloakUserID.String())
+	if err != nil {
+		return false, wrapErr("migrate_user: get_credentials", err)
+	}
+
+	target := *src
+	target.ID = gocloak.StringP(keycloakUserID.String()) // preserve sub
+	var totp *gocloak.CredentialRepresentation
+	webauthnReenroll := false
+	for _, c := range creds {
+		if c.Type == nil {
+			continue
+		}
+		switch *c.Type {
+		case "otp":
+			totp = c
+		case "webauthn", "webauthn-passwordless":
+			webauthnReenroll = true
+		}
+	}
+	if totp != nil {
+		target.Credentials = &[]gocloak.CredentialRepresentation{*totp}
+	} else {
+		target.Credentials = nil
+	}
+	if webauthnReenroll {
+		var actions []string
+		if target.RequiredActions != nil {
+			actions = append(actions, *target.RequiredActions...)
+		}
+		actions = append(actions, "webauthn-register")
+		target.RequiredActions = &actions
+	}
+
+	// Keycloak's user id is a global primary key shared across every
+	// realm in the deployment, not scoped per-realm (confirmed
+	// empirically: importing a user with an id that still exists in
+	// ANOTHER realm 409s with "Duplicate resource error", even into a
+	// brand-new target realm). The source user must therefore be deleted
+	// BEFORE the target is created with the same id — safe here because
+	// §8.3's caller force-logs-out the shared-realm session for this user
+	// as part of the same conversion flow, and a mid-flight failure after
+	// this delete is recovered by the caller's compensating teardown +
+	// idempotent retry (§9.3): a retry's GetUserByID on the now-absent
+	// source will fail fast rather than silently re-reading stale data.
+	//
+	// The standard POST /admin/realms/{realm}/users endpoint does NOT
+	// honor a caller-supplied id — Keycloak always server-generates one
+	// (also confirmed empirically). sub preservation (RP-INV-2/§8.3)
+	// instead requires the partialImport endpoint, which Keycloak
+	// documents as import/restore tooling and DOES accept an explicit id.
+	// gocloak v13 has no wrapper for it, so this uses its resty escape
+	// hatch directly.
+	if err := a.client.DeleteUser(ctx, tok, sourceRealm, keycloakUserID.String()); err != nil {
+		return false, wrapErr("migrate_user: delete_source", err)
+	}
+	if err := a.partialImportUser(ctx, tok, targetRealm, target); err != nil {
+		return false, wrapErr("migrate_user: partial_import", err)
+	}
+	return webauthnReenroll, nil
+}
+
+// partialImportUser calls POST /admin/realms/{realm}/partialImport with a
+// single user, ifResourceExists=FAIL so a genuine id collision surfaces as
+// an error rather than silently overwriting an unrelated user.
+func (a *Admin) partialImportUser(ctx context.Context, tok, realm string, user gocloak.User) error {
+	body := map[string]any{
+		"ifResourceExists": "FAIL",
+		"users":            []gocloak.User{user},
+	}
+	resp, err := a.client.GetRequestWithBearerAuth(ctx, tok).
+		SetBody(body).
+		Post(a.cfg.BaseURL + "/admin/realms/" + realm + "/partialImport")
+	if err != nil {
+		return err
+	}
+	if resp.IsError() {
+		return fmt.Errorf("partialImport: unexpected status %d: %s", resp.StatusCode(), resp.String())
+	}
+	var result struct {
+		Overwritten int `json:"overwritten"`
+		Added       int `json:"added"`
+		Skipped     int `json:"skipped"`
+		Results     []struct {
+			Action       string `json:"action"`
+			ResourceType string `json:"resourceType"`
+			ResourceName string `json:"resourceName"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(resp.Body(), &result); err != nil {
+		return fmt.Errorf("partialImport: decode response: %w", err)
+	}
+	if result.Added != 1 {
+		return fmt.Errorf("partialImport: expected 1 user added, got added=%d skipped=%d overwritten=%d (body: %s)",
+			result.Added, result.Skipped, result.Overwritten, resp.String())
+	}
+	return nil
+}
+
+// usersByTenantAttribute lists every user in realmName carrying tenant_id
+// == tenantID (used for shared-trial suspend/expiry/hard-delete — never
+// touches the shared realm itself, RP-INV-2/§8.12).
+func (a *Admin) usersByTenantAttribute(ctx context.Context, tok, realmName string, tenantID uuid.UUID) ([]*gocloak.User, error) {
+	q := fmt.Sprintf("tenant_id:%s", tenantID.String())
+	return a.client.GetUsers(ctx, tok, realmName, gocloak.GetUsersParams{Q: &q})
+}
+
+// ListUsersByTenant returns the Keycloak user IDs carrying tenant_id
+// (§8.3 — enumerates trial users to migrate at conversion).
+func (a *Admin) ListUsersByTenant(ctx context.Context, realmName string, tenantID uuid.UUID) ([]uuid.UUID, error) {
+	tok, err := a.token(ctx)
+	if err != nil {
+		return nil, wrapErr("list_users_by_tenant: token", err)
+	}
+	users, err := a.usersByTenantAttribute(ctx, tok, realmName, tenantID)
+	if err != nil {
+		return nil, wrapErr("list_users_by_tenant", err)
+	}
+	ids := make([]uuid.UUID, 0, len(users))
+	for _, u := range users {
+		if u.ID == nil {
+			continue
+		}
+		id, err := uuid.Parse(*u.ID)
+		if err != nil {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// DisableUsersInRealm disables every user tagged with tenantID's
+// tenant_id attribute in realmName (used for a trial tenant's suspend,
+// since the shared realm itself is never disabled).
+func (a *Admin) DisableUsersInRealm(ctx context.Context, realmName string, tenantID uuid.UUID) error {
+	tok, err := a.token(ctx)
+	if err != nil {
+		return wrapErr("disable_users: token", err)
+	}
+	users, err := a.usersByTenantAttribute(ctx, tok, realmName, tenantID)
+	if err != nil {
+		return wrapErr("disable_users: list", err)
+	}
+	for _, u := range users {
+		u.Enabled = gocloak.BoolP(false)
+		if err := a.client.UpdateUser(ctx, tok, realmName, *u); err != nil {
+			return wrapErr("disable_users: update", err)
+		}
+	}
+	return nil
+}
+
+// EnableUsersInRealm re-enables every user tagged with tenantID's
+// tenant_id attribute in realmName.
+func (a *Admin) EnableUsersInRealm(ctx context.Context, realmName string, tenantID uuid.UUID) error {
+	tok, err := a.token(ctx)
+	if err != nil {
+		return wrapErr("enable_users: token", err)
+	}
+	users, err := a.usersByTenantAttribute(ctx, tok, realmName, tenantID)
+	if err != nil {
+		return wrapErr("enable_users: list", err)
+	}
+	for _, u := range users {
+		u.Enabled = gocloak.BoolP(true)
+		if err := a.client.UpdateUser(ctx, tok, realmName, *u); err != nil {
+			return wrapErr("enable_users: update", err)
+		}
+	}
+	return nil
+}
+
+// HardDeleteUsersInRealm hard-deletes every user carrying tenant_id
+// (RP-C2 PII scrub, §15.2).
+func (a *Admin) HardDeleteUsersInRealm(ctx context.Context, realmName string, tenantID uuid.UUID) error {
+	tok, err := a.token(ctx)
+	if err != nil {
+		return wrapErr("hard_delete_users: token", err)
+	}
+	users, err := a.usersByTenantAttribute(ctx, tok, realmName, tenantID)
+	if err != nil {
+		return wrapErr("hard_delete_users: list", err)
+	}
+	for _, u := range users {
+		if u.ID == nil {
+			continue
+		}
+		if err := a.client.DeleteUser(ctx, tok, realmName, *u.ID); err != nil && !isNotFound(err) {
+			return wrapErr("hard_delete_users: delete", err)
+		}
+	}
+	return nil
+}
+
+// DeleteUser is idempotent — deleting an absent user succeeds (RP-15).
+func (a *Admin) DeleteUser(ctx context.Context, realmName string, keycloakUserID uuid.UUID) error {
+	tok, err := a.token(ctx)
+	if err != nil {
+		return wrapErr("delete_user: token", err)
+	}
+	if err := a.client.DeleteUser(ctx, tok, realmName, keycloakUserID.String()); err != nil && !isNotFound(err) {
+		return wrapErr("delete_user", err)
+	}
+	return nil
+}
+
+// RevokeUserSessions logs out and invalidates every session/token for
+// keycloakUserID (RP-16). Idempotent — no active sessions is a no-op.
+func (a *Admin) RevokeUserSessions(ctx context.Context, realmName string, keycloakUserID uuid.UUID) error {
+	tok, err := a.token(ctx)
+	if err != nil {
+		return wrapErr("revoke_sessions: token", err)
+	}
+	if err := a.client.LogoutAllSessions(ctx, tok, realmName, keycloakUserID.String()); err != nil && !isNotFound(err) {
+		return wrapErr("revoke_sessions", err)
+	}
+	return nil
+}
+
+// ForceLogoutRealm terminates every active session in realmName (§8.3
+// conversion — force-logout shared-realm sessions).
+func (a *Admin) ForceLogoutRealm(ctx context.Context, realmName string) error {
+	tok, err := a.token(ctx)
+	if err != nil {
+		return wrapErr("force_logout_realm: token", err)
+	}
+	users, err := a.client.GetUsers(ctx, tok, realmName, gocloak.GetUsersParams{})
+	if err != nil {
+		return wrapErr("force_logout_realm: list_users", err)
+	}
+	for _, u := range users {
+		if u.ID == nil {
+			continue
+		}
+		if err := a.client.LogoutAllSessions(ctx, tok, realmName, *u.ID); err != nil && !isNotFound(err) {
+			return wrapErr("force_logout_realm: logout", err)
+		}
+	}
+	return nil
+}

@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TrialExpiredPayload",
+  "description": "Payload of TrialExpired (LLD §7.5). Emitted by the RP-C1 cron via RP-12 (expire-trial), one call per expired tenant_realms row. Cron-origin — carries the system actor sentinel at the envelope level.",
+  "type": "object",
+  "required": ["tenant_id", "trial_ends_at", "grace_ends_at"],
+  "additionalProperties": true,
+  "properties": {
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "trial_ends_at": { "type": "string", "format": "date-time" },
+    "grace_ends_at": { "type": "string", "format": "date-time" }
+  }
+}

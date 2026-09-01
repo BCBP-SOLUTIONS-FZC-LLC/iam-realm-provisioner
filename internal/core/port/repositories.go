@@ -1,0 +1,73 @@
+package port
+
+import (
+	"context"
+	"encoding/json"
+
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
+	"github.com/google/uuid"
+)
+
+// TenantRealmRepository persists `tenant_realms` (§4.2). Every method binds
+// the RLS GUC transaction-locally via the caller's ctx (RLS-6).
+type TenantRealmRepository interface {
+	FindByTenantID(ctx context.Context, tenantID uuid.UUID) (*domain.TenantRealm, error)
+	Upsert(ctx context.Context, realm *domain.TenantRealm) error
+	Update(ctx context.Context, realm *domain.TenantRealm) error
+	// ListExpiredTrials returns shared-trial realms whose trial_ends_at has
+	// passed (RP-C1, idx_tenant_realms_trial_exp), limited to limit rows.
+	ListExpiredTrials(ctx context.Context, limit int) ([]*domain.TenantRealm, error)
+	// CountsByShard returns the current live dedicated-realm count per
+	// keycloak_shard, read from the local mirror (§9.5 shard placement —
+	// this service is the single writer, so the count is authoritative
+	// without re-querying Keycloak).
+	CountsByShard(ctx context.Context) (map[string]int, error)
+}
+
+// IdpConfigRepository persists `keycloak_idp_configs` (§4.3).
+type IdpConfigRepository interface {
+	FindByAlias(ctx context.Context, tenantID uuid.UUID, alias string) (*domain.IdpConfig, error)
+	ListByTenant(ctx context.Context, tenantID uuid.UUID) ([]*domain.IdpConfig, error)
+	Upsert(ctx context.Context, cfg *domain.IdpConfig) error
+	Delete(ctx context.Context, tenantID uuid.UUID, alias string) error
+	// ListAll returns every IdP config across every tenant (RP-13 —
+	// operator-only whole-estate portability audit). Callers must use a
+	// BYPASSRLS pool since this is deliberately cross-tenant.
+	ListAll(ctx context.Context) ([]*domain.IdpConfig, error)
+}
+
+// IdpValidationRepository persists `keycloak_idp_config_validations` (§4.3)
+// — append-only, one row per §11.6 validation run.
+type IdpValidationRepository interface {
+	Insert(ctx context.Context, v *domain.IdpConfigValidation) error
+	LatestForAlias(ctx context.Context, tenantID uuid.UUID, alias string) (*domain.IdpConfigValidation, error)
+}
+
+// ReconciliationRepository persists `realm_config_reconciliations` (§4.4) —
+// backs RP-INV-6 durability.
+type ReconciliationRepository interface {
+	Insert(ctx context.Context, r *domain.RealmConfigReconciliation) error
+	ListPending(ctx context.Context, limit int) ([]*domain.RealmConfigReconciliation, error)
+	MarkApplied(ctx context.Context, id uuid.UUID) error
+	MarkFailed(ctx context.Context, id uuid.UUID, lastErr string) error
+}
+
+// IdempotencyStore implements the `provisioning_operations` ledger (§4.4,
+// §9.2). Every externally-triggered mutation is keyed here so a retry or
+// at-least-once redelivery replays the stored result instead of
+// re-executing the Keycloak mutation.
+type IdempotencyStore interface {
+	// Begin inserts an `in_progress` row. Returns (existing, true, nil) when
+	// the key already exists (caller must inspect existing.Status: replay
+	// `succeeded`.Result, or return 409 operation_in_progress for
+	// `in_progress`).
+	Begin(ctx context.Context, key string, tenantID uuid.UUID, operation string) (existing *domain.ProvisioningOperation, found bool, err error)
+	Complete(ctx context.Context, key string, result json.RawMessage) error
+	Fail(ctx context.Context, key string) error
+}
+
+// ProcessedEventsStore implements the consumer dedup ledger (§4.5, §7).
+type ProcessedEventsStore interface {
+	IsProcessed(ctx context.Context, consumer domain.ProcessedEventsConsumer, eventID string) (bool, error)
+	MarkProcessed(ctx context.Context, consumer domain.ProcessedEventsConsumer, eventID string) error
+}

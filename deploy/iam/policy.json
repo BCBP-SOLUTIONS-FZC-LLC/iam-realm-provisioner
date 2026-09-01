@@ -1,0 +1,92 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PublishTenantEvents",
+      "Effect": "Allow",
+      "Action": [
+        "sns:Publish"
+      ],
+      "Resource": "${tenant_events_topic_arn}"
+    },
+    {
+      "Sid": "ConsumeInboundQueues",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:ChangeMessageVisibility"
+      ],
+      "Resource": [
+        "${membership_realm_queue_arn}",
+        "${tenant_realm_queue_arn}",
+        "${billing_realm_queue_arn}"
+      ]
+    },
+    {
+      "Sid": "InboundDLQReadOnlyForOps",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:GetQueueAttributes",
+        "sqs:ReceiveMessage"
+      ],
+      "Resource": [
+        "${membership_realm_dlq_arn}",
+        "${tenant_realm_dlq_arn}",
+        "${billing_realm_dlq_arn}"
+      ]
+    },
+    {
+      "Sid": "GlueSchemaRegistryReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "glue:GetRegistry",
+        "glue:GetSchema",
+        "glue:GetSchemaVersion",
+        "glue:GetSchemaByDefinition",
+        "glue:ListSchemas",
+        "glue:QuerySchemaVersionMetadata"
+      ],
+      "Resource": [
+        "${glue_registry_arn}",
+        "${glue_registry_arn}/*"
+      ]
+    },
+    {
+      "Sid": "RealmExportWrite",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject"
+      ],
+      "Resource": "${realm_export_bucket_arn}/*"
+    },
+    {
+      "Sid": "RealmExportListBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket"
+      ],
+      "Resource": "${realm_export_bucket_arn}"
+    },
+    {
+      "Sid": "RealmExportKMS",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Encrypt",
+        "kms:GenerateDataKey"
+      ],
+      "Resource": "${realm_export_kms_key_arn}"
+    },
+    {
+      "Sid": "CloudWatchLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:${aws_region}:${aws_account_id}:log-group:/aws/eks/*:*"
+    }
+  ]
+}

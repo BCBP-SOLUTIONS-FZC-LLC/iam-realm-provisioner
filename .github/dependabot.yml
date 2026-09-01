@@ -1,0 +1,41 @@
+version: 2
+
+# Grants Dependabot access to the private github.com/BCBP-SOLUTIONS-FZC-LLC/*
+# Go modules (platform-events, platform-gincommon, platform-pgcommon). Without
+# this, Dependabot cannot resolve the full module graph for ANY gomod update
+# (even unrelated public deps), failing with git_dependencies_not_reachable.
+#
+# Requires a Dependabot secret named GO_PRIVATE_TOKEN — a PAT (classic or
+# fine-grained) with read access to BCBP-SOLUTIONS-FZC-LLC private repos.
+# Set it under Settings → Secrets and variables → Dependabot (NOT Actions —
+# these are separate secret stores even when reusing the same name/value).
+registries:
+  github-bcbp:
+    type: git
+    url: https://github.com
+    username: x-access-token
+    password: ${{ secrets.GO_PRIVATE_TOKEN }}
+
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    registries:
+      - github-bcbp
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: [dependencies, go]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    labels: [dependencies, docker]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: [dependencies, github-actions]

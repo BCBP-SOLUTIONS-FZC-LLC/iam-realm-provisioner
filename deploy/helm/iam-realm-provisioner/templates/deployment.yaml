@@ -1,0 +1,120 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "iam-realm-provisioner.fullname" . }}
+  labels:
+    {{- include "iam-realm-provisioner.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "iam-realm-provisioner.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # maxSurge: 0 keeps rollout node-count neutral. With hard pod
+      # anti-affinity below, a surge pod cannot be scheduled when every node
+      # already holds a replica — the rollout would stall indefinitely. Use
+      # maxUnavailable: 1 instead.
+      maxSurge: 0
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        {{- include "iam-realm-provisioner.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.existingSecret }}
+        # When using an external secret (ESO / CSI), bump rotationEpoch to
+        # force a rollout after secret rotation:
+        #   helm upgrade ... --set rotationEpoch=$(date +%s)
+        rotationEpoch: {{ .Values.rotationEpoch | default "0" | quote }}
+        {{- else }}
+        # Force rollout when the self-managed Secret changes (checksum
+        # triggers pod recycling).
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "iam-realm-provisioner.serviceAccountName" . }}
+      # 30s HTTP+metrics graceful-shutdown budget plus buffer for the three
+      # in-process SQS consumers (membership-realm-q/tenant-realm-q/
+      # billing-realm-q) to finish an in-flight message — at-least-once
+      # delivery + processed_events dedup makes a redelivery safe if this
+      # is exceeded.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          # cmd/server (§13.1): serves RP-1..RP-16 AND runs the three
+          # inbound SQS consumers plus the transactional-outbox Runner
+          # in-process — the default entrypoint baked into this image. Every
+          # CronJob runs the SAME image with `command` overridden to the
+          # reconciler binary (see templates/cronjobs.yaml).
+          image: "{{ .Values.image.repository }}:{{ include "iam-realm-provisioner.imageTag" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.httpPort }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.service.metricsPort }}
+              protocol: TCP
+          env:
+            {{- range $key, $val := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+            {{- $secretName := include "iam-realm-provisioner.secretName" . }}
+            {{- range .Values.envFromSecret }}
+            - name: {{ . }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ . }}
+            {{- end }}
+          startupProbe:
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        # Hard anti-affinity: require pods to land on different nodes.
+        # preferred (soft) anti-affinity allows all replicas on one node — a
+        # single node failure would take the service to zero despite the PDB.
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "iam-realm-provisioner.selectorLabels" . | nindent 18 }}
+              topologyKey: kubernetes.io/hostname

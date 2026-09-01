@@ -1,0 +1,117 @@
+services:
+  app:
+    build:
+      context: .
+      secrets:
+        - go_private_token
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    environment:
+      APP_ENV: dev
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      openbao:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5544:5432"
+    volumes:
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  localstack:
+    image: localstack/localstack:4.4.0
+    ports:
+      - "4571:4566"
+    environment:
+      SERVICES: sns,sqs,s3
+      DEBUG: 0
+      AWS_DEFAULT_REGION: ap-south-1
+    volumes:
+      - ./scripts/init-localstack.sh:/etc/localstack/init/ready.d/init-localstack.sh:ro
+      - localstack-data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Keycloak: neither sibling IAM service runs Keycloak locally — this is
+  # the first service that needs to actually talk to its admin API, so
+  # this block is net-new (no existing pattern to copy). Dev-mode, single
+  # node, backed by its own embedded H2-equivalent (dev-file) store — NOT
+  # for production use (production Keycloak is externally managed per
+  # HLD §4.2/§4.3).
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: start-dev
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8091:8080"
+    healthcheck:
+      # The Keycloak image ships neither curl nor wget; a bash /dev/tcp
+      # connect check is the lowest-common-denominator liveness probe that
+      # works without Quarkus health endpoints enabled (dev mode default).
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8080'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  # OpenBao: this service's only OpenBao integration is the KV v2 client in
+  # internal/adapter/outbound/openbao/client.go (per-tenant IdP secrets,
+  # never Postgres — §10.2/RP-D10), tested until now only against a
+  # hand-written httptest fake (client_test.go). Same rationale as the
+  # Keycloak block above — no sibling IAM service runs OpenBao locally, so
+  # this is net-new. Dev-server mode (in-memory, auto-unsealed, KV v2
+  # already mounted at "secret/" by default) — NOT for production use
+  # (production OpenBao is externally managed, credentials via Kubernetes
+  # auth only, never env/image/git, §12/§20). The container prints its dev
+  # root token to stdout on startup (`docker compose logs openbao`); no
+  # Kubernetes cluster exists in this compose stack, so BAO_AUTH_ROLE's
+  # Kubernetes-auth login this service performs at runtime will not
+  # actually succeed here — local `make run` dev work that needs a live
+  # IdP-secret round trip must seed OpenBao by hand (`bao login <root
+  # token>` against this container) rather than relying on `make docker-up`
+  # alone; test/integration/openbao_test.go is what exercises the real
+  # Kubernetes-auth login end to end.
+  openbao:
+    image: openbao/openbao:latest
+    command: ["server", "-dev"]
+    ports:
+      - "8210:8200"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8200/v1/sys/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  pgdata:
+  localstack-data:
+
+secrets:
+  go_private_token:
+    environment: GO_PRIVATE_TOKEN

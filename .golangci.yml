@@ -1,0 +1,157 @@
+# golangci-lint v2 config (run via `go tool golangci-lint`, see go.mod's
+# tool directive and Makefile's `lint` target).
+version: "2"
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+  tests: true
+output:
+  formats:
+    text:
+      path: stdout
+      print-linter-name: true
+      print-issued-lines: true
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - contextcheck
+    - errcheck
+    - exhaustive
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - noctx
+    - nolintlint
+    - revive
+    - sqlclosecheck
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    exhaustive:
+      check:
+        - switch
+        - map
+      default-signifies-exhaustive: true
+    gocritic:
+      disabled-checks:
+        - hugeParam
+        - rangeValCopy
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    gosec:
+      excludes:
+        - G601
+      config:
+        G101:
+          ignore_entropy: false
+    govet:
+      disable:
+        - fieldalignment
+        # `err := ...` re-declared in a new `if`/`for` scope after an outer
+        # `err` already exists is idiomatic, pervasive Go across this
+        # service's linear provisioning-flow sequences — disabled for the
+        # same reasons the sibling services disable it.
+        - shadow
+      enable-all: true
+    misspell:
+      locale: US
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+    revive:
+      confidence: 0.8
+      severity: warning
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+    staticcheck:
+      checks:
+        - all
+    unparam:
+      check-exported: false
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - errcheck
+          - gosec
+          - unparam
+          - noctx
+          # unused-parameter (revive) fires frequently on table-driven test
+          # fakes/mocks whose interface-satisfying methods take a named
+          # `ctx`/`tenantID`/etc. they don't need to reference — naming them
+          # for readability at the call site is more valuable than renaming
+          # every one to `_`.
+          - revive
+          - gocritic
+        path: _test\.go
+      - linters:
+          - gosec
+        path: _test\.go
+        text: G104
+      - linters:
+          - revive
+        path: cmd/
+        text: package-comments
+      # "cancelled" (BrE) is O&M's actual subscription_status enum spelling
+      # and the frozen §23 TenantSuspended.cancelled_at field name — these
+      # doc comments intentionally mirror that contract term verbatim
+      # rather than "correcting" it to AmE, which would misdocument the
+      # real wire value.
+      - linters:
+          - misspell
+        source: 'cancelled past CANCELLED_GRACE_DAYS'
+      - linters:
+          - misspell
+        source: 'only cancelled/read-only'
+      - linters:
+          - misspell
+        source: 'cancelled->suspended->offboarded'
+      - linters:
+          - misspell
+        source: 'trial_expired\|cancelled\|suspended'
+    paths:
+      - migrations
+      - builtin$
+      - examples$
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  new: false
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - builtin$
+      - examples$

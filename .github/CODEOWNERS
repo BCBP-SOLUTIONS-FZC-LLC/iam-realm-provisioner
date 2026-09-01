@@ -1,0 +1,39 @@
+# Default: every file requires review from the IAM team.
+* @BCBP-SOLUTIONS-FZC-LLC/iam-team
+
+# Workflow and release automation changes require explicit sign-off.
+.github/workflows/ @BCBP-SOLUTIONS-FZC-LLC/iam-team
+.github/dependabot.yml @BCBP-SOLUTIONS-FZC-LLC/iam-team
+
+# Event contract — changes affect every downstream consumer of the shared
+# iam.tenant.events topic (Notification, Audit, Billing) and this service's
+# own inbound consumers (membership-realm-q, tenant-realm-q,
+# billing-realm-q). Any modification to the AsyncAPI spec or embedded JSON
+# Schemas must be reviewed by both the IAM team and the platform team.
+api/asyncapi.yaml @BCBP-SOLUTIONS-FZC-LLC/iam-team @BCBP-SOLUTIONS-FZC-LLC/platform-team
+internal/eventschema/ @BCBP-SOLUTIONS-FZC-LLC/iam-team @BCBP-SOLUTIONS-FZC-LLC/platform-team
+
+# Domain model — entities, value objects, domain errors, and event payloads.
+# Structural changes here ripple through every layer.
+internal/core/domain/ @BCBP-SOLUTIONS-FZC-LLC/iam-team
+
+# RP-INV-1 (single Keycloak writer) — this is the ONLY package permitted to
+# import Nerzal/gocloak (enforced in CI by .github/scripts/arch-lint.sh).
+# Any PR touching it needs platform-team eyes on the Keycloak Admin API
+# contract as well as IAM review.
+internal/adapter/outbound/keycloak/ @BCBP-SOLUTIONS-FZC-LLC/iam-team @BCBP-SOLUTIONS-FZC-LLC/platform-team
+
+# OpenBao secret paths — the sole home of SAML/OIDC IdP secret material
+# (never Postgres, §12). A widened or renamed KV path is a breaking,
+# security-relevant change.
+internal/adapter/outbound/openbao/ @BCBP-SOLUTIONS-FZC-LLC/iam-team @BCBP-SOLUTIONS-FZC-LLC/platform-team
+deploy/openbao/ @BCBP-SOLUTIONS-FZC-LLC/iam-team @BCBP-SOLUTIONS-FZC-LLC/platform-team
+
+# Database migrations affect all replicas and are irreversible in
+# production, and this schema carries the platform's tenant-isolation RLS
+# design (5 tenant-scoped tables under FORCE ROW LEVEL SECURITY).
+internal/adapter/outbound/postgres/migrations/ @BCBP-SOLUTIONS-FZC-LLC/iam-team @BCBP-SOLUTIONS-FZC-LLC/platform-team
+
+# Helm chart, IAM policy, and monitoring alerts — deployment configuration
+# changes require infra awareness.
+deploy/ @BCBP-SOLUTIONS-FZC-LLC/iam-team @BCBP-SOLUTIONS-FZC-LLC/platform-team

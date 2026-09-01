@@ -1,0 +1,157 @@
+# SLO recording + burn-rate alerts for iam-realm-provisioner (§11).
+#
+# Three SLOs are declared, each keyed to metrics that actually exist in
+# internal/adapter/outbound/metrics/metrics.go — do not add an SLO against
+# a metric that isn't registered there or in platform-gincommon/
+# platform-events.
+#
+#  SLO-1  Write-path error rate
+#         Target: 99.5% of mutating requests on /tenants/:id/realm/* return
+#         a non-5xx status (excludes intentional 4xx like
+#         idp_region_portability_failed or operation_in_progress). RP-1..
+#         RP-16 are the single write path into Keycloak (RP-INV-1), so a
+#         5xx here means a tenant identity-lifecycle operation failed.
+#
+#  SLO-2  Keycloak Admin API call success rate
+#         Target: 99% of Keycloak Admin API calls
+#         (iam_realm_provisioner_keycloak_call_duration_seconds) succeed.
+#         This is the dependency this service is most exposed to — every
+#         provisioning/migration/IdP/MFA operation is a Keycloak call.
+#
+#  SLO-3  Reconciler convergence
+#         Target: durable pending state (realm_config_pending_gauge,
+#         trial_expiry_deferred_total) clears within 2 CronJob cycles
+#         (realmConfigReconcile runs every 10 min; trial-expiry daily).
+#
+# Recording rules pre-compute the SLI numerator/denominator so alert rules
+# can key off a scalar. Alerts follow the multi-window multi-burn-rate
+# pattern (SRE book Ch. 5): a slow burn signals an ongoing degradation, a
+# fast burn signals an outage worth paging on.
+
+groups:
+  # ── SLI recording ─────────────────────────────────────────────────────────
+  - name: iam-realm-provisioner.slo.records
+    interval: 30s
+    rules:
+      # Write-path error rate (5xx only — 4xx are intentional, e.g. 409
+      # operation_in_progress on a replayed Idempotency-Key, 422
+      # idp_warnings_unacknowledged).
+      - record: iam:realm_provisioner_write_error_rate:ratio_rate_5m
+        expr: |
+          sum(rate(http_requests_total{
+            service="iam-realm-provisioner",
+            method=~"POST|PUT|PATCH|DELETE",
+            status=~"5.."
+          }[5m]))
+          /
+          clamp_min(sum(rate(http_requests_total{
+            service="iam-realm-provisioner",
+            method=~"POST|PUT|PATCH|DELETE"
+          }[5m])), 0.001)
+
+      # Keycloak Admin API call success ratio.
+      - record: iam:realm_provisioner_keycloak_success_ratio:rate_5m
+        expr: |
+          1 - (
+            sum(rate(iam_realm_provisioner_keycloak_call_failures_total[5m]))
+            /
+            clamp_min(sum(rate(iam_realm_provisioner_keycloak_call_duration_seconds_count[5m])), 0.001)
+          )
+
+      - record: iam:realm_provisioner_keycloak_success_ratio:rate_1h
+        expr: |
+          1 - (
+            sum(rate(iam_realm_provisioner_keycloak_call_failures_total[1h]))
+            /
+            clamp_min(sum(rate(iam_realm_provisioner_keycloak_call_duration_seconds_count[1h])), 0.001)
+          )
+
+      # Reconciler convergence — durable pending-state gauge/counter sum.
+      # realm_config_pending_gauge is a live gauge (§9.2 local-intent-first);
+      # trial_expiry_deferred_total is a monotonic counter, so its 1h
+      # increase (not its raw value) is the meaningful "still stuck" signal.
+      - record: iam:realm_provisioner_reconciler_markers:sum
+        expr: |
+          iam_realm_provisioner_realm_config_pending_gauge
+          + increase(iam_realm_provisioner_trial_expiry_deferred_total[1h])
+
+  # ── SLO burn-rate alerts (multi-window) ───────────────────────────────────
+  - name: iam-realm-provisioner.slo.burn
+    interval: 1m
+    rules:
+      # SLO-1: fast burn (2% of a 0.5% budget in 1h → page).
+      - alert: IAMSLO1_RealmProvisionerWriteErrorFastBurn
+        expr: |
+          iam:realm_provisioner_write_error_rate:ratio_rate_5m > (14.4 * 0.005)
+        for: 2m
+        labels:
+          severity: page
+          slo: SLO-1
+          service: iam-realm-provisioner
+        annotations:
+          summary: "SLO-1 fast-burn: iam-realm-provisioner write-path 5xx rate above target"
+          description: |
+            {{ $value | humanizePercentage }} of mutating requests
+            (RP-1..RP-16) are returning 5xx over the last 5m. Check Postgres,
+            Keycloak (iam:realm_provisioner_keycloak_success_ratio:rate_5m),
+            and OpenBao health.
+
+      # SLO-1: slow burn (6x budget sustained over 1h → ticket).
+      - alert: IAMSLO1_RealmProvisionerWriteErrorSlowBurn
+        expr: |
+          iam:realm_provisioner_write_error_rate:ratio_rate_5m > (6 * 0.005)
+        for: 15m
+        labels:
+          severity: ticket
+          slo: SLO-1
+          service: iam-realm-provisioner
+        annotations:
+          summary: "SLO-1 slow-burn: iam-realm-provisioner write-path error rate elevated for 15m+"
+
+      # SLO-2: Keycloak call failures — fast burn.
+      - alert: IAMSLO2_RealmProvisionerKeycloakFastBurn
+        expr: |
+          (1 - iam:realm_provisioner_keycloak_success_ratio:rate_5m) > (14.4 * (1 - 0.99))
+          and
+          (1 - iam:realm_provisioner_keycloak_success_ratio:rate_1h) > (14.4 * (1 - 0.99))
+        for: 2m
+        labels:
+          severity: page
+          slo: SLO-2
+          service: iam-realm-provisioner
+        annotations:
+          summary: "SLO-2 fast-burn: Keycloak Admin API success ratio degraded"
+          description: |
+            Keycloak Admin API call success ratio is
+            {{ $value | humanizePercentage }} below target over the 5m + 1h
+            windows. RP-INV-1 means every tenant realm/user/IdP/MFA
+            operation depends on this — check Keycloak health directly and
+            iam_realm_provisioner_keycloak_call_failures_total{op} for which
+            operation is failing.
+
+      # SLO-2: slow burn.
+      - alert: IAMSLO2_RealmProvisionerKeycloakSlowBurn
+        expr: |
+          (1 - iam:realm_provisioner_keycloak_success_ratio:rate_1h) > (6 * (1 - 0.99))
+        for: 15m
+        labels:
+          severity: ticket
+          slo: SLO-2
+          service: iam-realm-provisioner
+        annotations:
+          summary: "SLO-2 slow-burn: Keycloak Admin API success ratio below target for 15m+"
+
+      # SLO-3: reconciler markers accumulating.
+      - alert: IAMSLO3_RealmProvisionerReconcilerMarkersElevated
+        expr: iam:realm_provisioner_reconciler_markers:sum > 5
+        for: 20m
+        labels:
+          severity: ticket
+          slo: SLO-3
+          service: iam-realm-provisioner
+        annotations:
+          summary: "SLO-3: iam-realm-provisioner durable markers accumulating (reconciler convergence)"
+          description: |
+            Combined durable-marker value = {{ $value }} for 20m+. Check
+            each CronJob's last successful run: trial-expiry (RP-C1),
+            subscription-lapse (RP-C3), realm-config-reconcile (RP-C4).

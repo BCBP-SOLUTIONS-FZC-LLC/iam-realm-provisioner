@@ -1,0 +1,90 @@
+{{- /*
+Six reconciler CronJobs, all from ONE manifest (cmd/reconciler/main.go's own
+header comment already names this file "deploy/helm/templates/cronjobs.yaml"
+and documents "6 CronJobs", so the naming/shape is this codebase's own
+convention, not invented here): RP-C1..RP-C4 (§8.7-8.10) plus two
+maintenance jobs (outbox-prune, processed-events-prune) that this
+repo's cmd/reconciler/main.go registry already wires as --job values.
+
+Every CronJob runs the SAME image as the server Deployment, with `command`
+overridden to the reconciler binary and `--job=<jobName>` selecting the
+handler.
+*/ -}}
+{{- range $key, $job := .Values.cronJobs }}
+{{- if $job.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "iam-realm-provisioner.fullname" $ }}-{{ $job.jobName }}
+  labels:
+    {{- include "iam-realm-provisioner.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: cronjob-{{ $job.jobName }}
+spec:
+  schedule: {{ $job.schedule | quote }}
+  concurrencyPolicy: {{ $job.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ $job.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $job.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ $job.activeDeadlineSeconds }}
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "iam-realm-provisioner.selectorLabels" $ | nindent 12 }}
+            app.kubernetes.io/component: cronjob-{{ $job.jobName }}
+          annotations:
+            {{- if $.Values.existingSecret }}
+            rotationEpoch: {{ $.Values.rotationEpoch | default "0" | quote }}
+            {{- else }}
+            checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") $ | sha256sum }}
+            {{- end }}
+        spec:
+          serviceAccountName: {{ include "iam-realm-provisioner.serviceAccountName" $ }}
+          restartPolicy: OnFailure
+          securityContext:
+            {{- toYaml $.Values.podSecurityContext | nindent 12 }}
+          containers:
+            - name: {{ $job.jobName }}
+              image: "{{ $.Values.image.repository }}:{{ include "iam-realm-provisioner.imageTag" $ }}"
+              imagePullPolicy: {{ $.Values.image.pullPolicy }}
+              # Same image as the server Deployment (single Dockerfile) —
+              # override the entrypoint to run the reconciler binary
+              # instead of the default /iam-realm-provisioner-server.
+              command: ["/iam-realm-provisioner-reconciler"]
+              args:
+                - "--job={{ $job.jobName }}"
+              securityContext:
+                {{- toYaml $.Values.securityContext | nindent 16 }}
+              env:
+                {{- range $envKey, $envVal := $.Values.env }}
+                - name: {{ $envKey }}
+                  value: {{ $envVal | quote }}
+                {{- end }}
+                {{- $secretName := include "iam-realm-provisioner.secretName" $ }}
+                {{- range $.Values.envFromSecret }}
+                - name: {{ . }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $secretName }}
+                      key: {{ . }}
+                {{- end }}
+              resources:
+                {{- toYaml $job.resources | nindent 16 }}
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}
+          {{- with $.Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $.Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+---
+{{- end }}
+{{- end }}

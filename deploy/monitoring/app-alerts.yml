@@ -1,0 +1,277 @@
+# Prometheus alerting rules for the iam-realm-provisioner application.
+#
+# HTTP request metrics (http_request_duration_seconds, http_requests_total) are
+# emitted by platform-gincommon. Business event counters
+# (iam_realm_provisioner_*_total, §11.2/§23 — the frozen metric prefix) are
+# registered in internal/adapter/outbound/metrics/metrics.go. Outbox/SQS
+# metrics (events_*, outbox_*, sqs_*) are emitted by platform-events with a
+# ConstLabel service="iam-realm-provisioner".
+#
+# This is a standalone reference copy of the same alerts the chart's own
+# templates/prometheusrule.yaml renders as a PrometheusRule CRD (enabled via
+# prometheusRule.enabled in values.yaml) — use this file directly (e.g. a
+# Prometheus --rule-files directory) in environments not installing this
+# service via the Helm chart; keep both in sync when adding a new alert.
+#
+# The exact alert list and thresholds below are pinned in
+# docs/lld/IMPLEMENTATION_REFERENCE.md §11.5 — do not add an alert on a
+# metric that doesn't exist in the code (grep
+# internal/adapter/outbound/metrics/metrics.go first).
+#
+# Labels on all HTTP metrics (from platform-gincommon):
+#   service  — "iam-realm-provisioner"
+#   method   — HTTP method
+#   path     — route pattern (e.g. /tenants/:id/realm)
+#   status   — HTTP status code
+
+groups:
+  - name: iam_realm_provisioner_availability
+    rules:
+
+      # ── Service down ──────────────────────────────────────────────────────
+      - alert: IAMRealmProvisionerDown
+        expr: |
+          absent(up{job="iam-realm-provisioner"} == 1)
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: iam-realm-provisioner has no healthy instances
+          description: >-
+            No iam-realm-provisioner pods have been scraped as healthy for 2
+            minutes. Check pod readiness:
+            kubectl get pods -l app.kubernetes.io/name=iam-realm-provisioner
+            — this blocks all RP-1..RP-16 endpoints and the three SQS
+            consumers; the reconciler CronJobs (RP-C1..RP-C4) run as
+            separate pods and are not covered by this alert.
+
+      # ── Pod count below minimum ───────────────────────────────────────────
+      - alert: IAMRealmProvisionerReplicasMissing
+        expr: |
+          sum(up{job="iam-realm-provisioner"}) < 2
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: iam-realm-provisioner running below minimum replica count
+          description: >-
+            Fewer than 2 replicas are healthy. Current healthy count: {{ $value }}.
+
+  - name: iam_realm_provisioner_errors
+    rules:
+
+      # ── HTTP 5xx error rate ─────────────────────────────────────────────────
+      - alert: IAMRealmProvisionerHighErrorRate
+        expr: |
+          sum(rate(http_requests_total{job="iam-realm-provisioner", status=~"5.."}[5m]))
+            /
+          sum(rate(http_requests_total{job="iam-realm-provisioner"}[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: iam-realm-provisioner 5xx error rate above 5%
+          description: >-
+            {{ $value | humanizePercentage }} of requests are returning 5xx errors
+            over the last 5 minutes. Check Postgres/Keycloak/OpenBao/O&M
+            dependency health and application logs.
+
+      # ── HTTP 5xx error rate — critical ─────────────────────────────────────
+      - alert: IAMRealmProvisionerCriticalErrorRate
+        expr: |
+          sum(rate(http_requests_total{job="iam-realm-provisioner", status=~"5.."}[5m]))
+            /
+          sum(rate(http_requests_total{job="iam-realm-provisioner"}[5m]))
+          > 0.20
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: iam-realm-provisioner 5xx error rate above 20%
+          description: >-
+            {{ $value | humanizePercentage }} of requests are returning 5xx errors.
+            This exceeds the critical threshold. Escalate immediately —
+            RP-INV-1's single Keycloak writer means every tenant realm
+            operation funnels through this one service.
+
+      # ── Keycloak Admin API failure rate (§11.5) ────────────────────────────
+      - alert: IAMRealmProvisionerKeycloakCallFailureRate
+        expr: |
+          sum(rate(iam_realm_provisioner_keycloak_call_failures_total[5m]))
+            /
+          sum(rate(iam_realm_provisioner_keycloak_call_duration_seconds_count[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: iam-realm-provisioner Keycloak Admin API failure rate above 5%
+          description: >-
+            {{ $value | humanizePercentage }} of Keycloak Admin API calls are
+            failing over the last 5 minutes, broken down by operation in
+            iam_realm_provisioner_keycloak_call_failures_total{op}. Check
+            Keycloak health and admin credential validity.
+
+      # ── Admin token refresh spike on 401 (possible credential rotation) ────
+      - alert: IAMRealmProvisionerAdminTokenRefresh401Spike
+        expr: |
+          increase(iam_realm_provisioner_admin_token_refresh_total{trigger="401"}[15m]) > 3
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: iam-realm-provisioner admin token is being reactively refreshed on 401s
+          description: >-
+            {{ $value | humanize }} reactive (401-triggered) admin token
+            refreshes in the last 15 minutes — proactive refresh
+            (trigger="proactive") should normally prevent this. Possible
+            Keycloak credential rotation, clock skew, or token-cache bug.
+
+  - name: iam_realm_provisioner_latency
+    rules:
+
+      # ── p99 request latency ─────────────────────────────────────────────────
+      - alert: IAMRealmProvisionerHighLatency
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (
+              rate(http_request_duration_seconds_bucket{job="iam-realm-provisioner"}[5m])
+            )
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: iam-realm-provisioner p99 latency above 1s
+          description: >-
+            The p99 request duration is {{ $value | humanizeDuration }}.
+            Multi-step Keycloak provisioning flows (RP-2/RP-3) are the
+            likeliest cause — check
+            iam_realm_provisioner_keycloak_call_duration_seconds{op} for the
+            slow operation.
+
+  - name: iam_realm_provisioner_lifecycle
+    rules:
+
+      # ── RP-C1 trial-expiry deferrals sustained (§11.5) ─────────────────────
+      - alert: IAMRealmProvisionerTrialExpiryDeferredSustained
+        expr: |
+          increase(iam_realm_provisioner_trial_expiry_deferred_total[1h]) > 0
+        for: 1h
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: iam-realm-provisioner trial-expiry reconciler is deferring rows
+          description: >-
+            The trial-expiry CronJob (RP-C1) has been deferring rows to the
+            next tick for at least 1 hour. Trials that should have expired
+            are staying active past trial_ends_at. Check reconciler logs and
+            Keycloak health.
+
+      # ── RP-C4 realm-config reconciliation pending sustained (§11.5) ────────
+      - alert: IAMRealmProvisionerRealmConfigPendingSustained
+        expr: |
+          iam_realm_provisioner_realm_config_pending_gauge > 0
+        for: 30m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: iam-realm-provisioner has realm-config changes stuck pending
+          description: >-
+            {{ $value | humanize }} realm_config_reconciliations row(s) have
+            been in status=pending for at least 30 minutes (local-intent-
+            first pattern, RP-10/RP-C4). The desired realm setting has not
+            yet been applied to Keycloak. Check Keycloak connectivity.
+
+      # ── RP-11 realm export failure — critical (§11.5) ──────────────────────
+      - alert: IAMRealmProvisionerRealmExportFailure
+        expr: |
+          increase(iam_realm_provisioner_realm_export_total{result="fail"}[15m]) > 0
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: iam-realm-provisioner failed to export a realm before offboarding
+          description: >-
+            {{ $value | humanize }} realm export(s) to S3 failed in the last
+            15 minutes (RP-11/RP-EVT-4 — offboarding cannot proceed to
+            delete without a durable export). Investigate immediately: an
+            un-exported tenant realm blocks its own offboarding.
+
+  - name: iam_realm_provisioner_outbox_and_queues
+    rules:
+
+      # ── Transactional outbox dead-letters (§11.5) — outbox_dead_letters_total
+      #    is platform-events' own metric (registered automatically by
+      #    events.Init), not something this service defines itself. Mirrors
+      #    the sibling IAM services' identical outbox-stuck alert — keep in
+      #    sync with templates/prometheusrule.yaml.
+      - alert: IAMRealmProvisionerOutboxStuck
+        expr: |
+          increase(outbox_dead_letters_total{service="iam-realm-provisioner"}[30m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: iam-realm-provisioner outbox events moved to the dead-letter table
+          description: >-
+            One or more produced tenant-lifecycle events (TrialTenantProvisioned,
+            TenantRealmReady, TenantConverted, etc.) exhausted MaxAttempts and
+            were moved to outbox_dead_letters. Check the outbox runner logs
+            for SNS publish errors and verify SNS_TOPIC_TENANT_ARN
+            connectivity; outbox_dead_letters is queryable/retryable via
+            standard SQL.
+
+      # ── SQS ReceiveMessage errors — an application-visible signal that a
+      #    consumer loop can't reach its queue at all ─────────────────────────
+      - alert: IAMRealmProvisionerSQSReceiveErrors
+        expr: |
+          increase(sqs_receive_errors_total{service="iam-realm-provisioner"}[30m]) > 0
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: iam-realm-provisioner is failing to receive from an inbound queue
+          description: >-
+            {{ $value | humanize }} SQS ReceiveMessage error(s) on
+            {{ $labels.queue }} in the last 30 minutes (excludes context
+            cancellation). Check IAM permissions and queue connectivity for
+            membership-realm-q / tenant-realm-q / billing-realm-q.
+
+      # ── Inbound SQS DLQ depth (§11.5: "{membership,billing,tenant}-realm-q
+      #    DLQ depth > 0 — warning"). NOTE: no application-level DLQ-depth
+      #    metric exists in this codebase (a dead-lettered message is, by
+      #    definition, never processed by this service, so it cannot self-
+      #    report the count) — this alert is written against the platform's
+      #    CloudWatch exporter (yet-another-cloudwatch-exporter's default
+      #    `aws_sqs_approximate_number_of_messages_visible_average` series),
+      #    which must be scraping the three *-dlq queues for this to fire.
+      #    This metric name/label shape is an ASSUMPTION about the shared
+      #    CloudWatch-exporter deployment, not something pinned in this
+      #    service's own code or LLD — confirm against the actual exporter
+      #    config before relying on this alert, and adjust the metric name
+      #    if the deployed exporter differs.
+      - alert: IAMRealmProvisionerInboundDLQDepth
+        expr: |
+          aws_sqs_approximate_number_of_messages_visible_average{queue_name=~"(membership|tenant|billing)-realm-q-dlq"} > 0
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "iam-realm-provisioner: messages stuck on {{ $labels.queue_name }}"
+          description: >-
+            {{ $value | humanize }} message(s) visible on
+            {{ $labels.queue_name }} (maxReceiveCount=5 exhausted on the
+            source queue). Inspect the DLQ — a malformed envelope or a
+            persistent handler error needs manual replay/fix.

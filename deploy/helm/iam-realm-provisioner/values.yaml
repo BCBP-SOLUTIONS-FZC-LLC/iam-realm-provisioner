@@ -1,0 +1,427 @@
+# Default values for iam-realm-provisioner.
+#
+# Deployment topology (§13.1): a "server" Deployment (2-4 replicas, HPA)
+# serves the HTTP API (RP-1..RP-16) AND runs the three inbound SQS
+# consumers (membership-realm-q, tenant-realm-q, billing-realm-q) plus the
+# transactional-outbox Runner in-process — same "one process, several
+# responsibilities" pattern as the sibling IAM services. Six CronJobs
+# (RP-C1..RP-C4 plus outbox-prune/processed-events-prune, §8.7-8.10) run
+# from the SAME image (it carries both binaries — see the repo-root
+# Dockerfile), each overriding `command` to invoke
+# /iam-realm-provisioner-reconciler --job=<name> (see templates/cronjobs.yaml,
+# which cmd/reconciler/main.go's own header comment already anticipates as a
+# single multi-CronJob manifest).
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/bcbp-solutions-fzc-llc/iam-realm-provisioner
+  pullPolicy: IfNotPresent
+  tag: ""  # overridden by CI to the git SHA / release version; falls back to Chart.appVersion
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  # Annotations added to the ServiceAccount:
+  #   - IRSA on EKS, for the SNS/SQS/Glue/S3 permissions in deploy/iam/policy.json:
+  #       eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/iam-realm-provisioner
+  #   this service also authenticates to OpenBao via this ServiceAccount's
+  #   projected JWT against the Kubernetes auth method (BAO_AUTH_ROLE,
+  #   deploy/openbao/role.tf.example) — no annotation needed for that path,
+  #   only that automountServiceAccountToken stays true (overridden below,
+  #   unlike a sibling service with no such dependency).
+  annotations: {}
+
+service:
+  type: ClusterIP
+  httpPort: 8080
+  metricsPort: 9090
+
+# HPA — CPU/memory only. §14 carries no queue-depth-based scaling
+# requirement for this service (unlike a cascade-consumer-heavy sibling),
+# so no custom-metrics adapter is wired here.
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+# Non-secret env, rendered directly onto the server container (see
+# templates/deployment.yaml). Anything with a credential (DATABASE_URL,
+# KEYCLOAK_ADMIN_CLIENT_SECRET, DOCS_AUTH_TOKEN) lives in envFromSecret
+# below. Mirrors .env-example, flattened to production defaults.
+env:
+  APP_ENV: "production"
+  APP_NAME: "iam-realm-provisioner"
+  APP_PORT: "8080"
+  METRICS_PORT: "9090"
+
+  # Postgres pool sizing (pgcommon.ConfigFromEnv()) — DATABASE_URL/
+  # SYSTEM_DATABASE_URL/MIGRATION_DATABASE_URL (envFromSecret below) already
+  # embed host/user/dbname/sslmode, so no discrete PG_HOST/PG_USER/PG_DBNAME
+  # is set here.
+  PG_MAX_CONNS: "10"
+  PG_BOUNCER_MODE: "true"
+  PG_STATEMENT_TIMEOUT: "5s"
+  PG_SLOW_QUERY_THRESHOLD: "200ms"
+
+  # AWS SNS/SQS/Glue/S3 (§7/§13.4) — credentials come from the pod's IRSA
+  # role (serviceAccount.annotations above), not env vars. ARNs/URLs are
+  # real per-environment values — REQUIRED, cmd/server/config.go fails fast
+  # at startup if any queue URL is empty; set per environment.
+  AWS_REGION: "ap-south-1"
+  SNS_TOPIC_TENANT_ARN: ""
+  GLUE_REGISTRY_TENANT_NAME: ""
+  SQS_MEMBERSHIP_REALM_QUEUE_URL: ""
+  SQS_TENANT_REALM_QUEUE_URL: ""
+  SQS_BILLING_REALM_QUEUE_URL: ""
+
+  OUTBOX_POLL_INTERVAL: "500ms"
+  OUTBOX_BATCH_SIZE: "50"
+  OUTBOX_MAX_ATTEMPTS: "5"
+  OUTBOX_DRAIN_TIMEOUT: "30s"
+  OUTBOX_RETENTION_DAYS: "8"
+  PROCESSED_EVENTS_TTL_DAYS: "8"
+
+  # Keycloak (RP-INV-1 — the sole seam, internal/adapter/outbound/keycloak/).
+  # KEYCLOAK_ADMIN_CLIENT_SECRET lives in envFromSecret below.
+  KEYCLOAK_BASE_URL: "http://keycloak.iam.svc.cluster.local"
+  KEYCLOAK_ADMIN_REALM: "master"
+  KEYCLOAK_ADMIN_CLIENT_ID: "iam-realm-provisioner"
+  KEYCLOAK_RATE_LIMIT_RPS: "20"
+  KEYCLOAK_TIMEOUT_MS: "8s"
+  SHARED_TRIAL_REALM: "trial"
+  REALM_TEMPLATE_VERSION: "v1"
+
+  # OpenBao (per-tenant IdP secrets + Keycloak admin credential, §12) — no
+  # static token: this pod authenticates via its ServiceAccount JWT against
+  # OpenBao's Kubernetes auth method (BAO_AUTH_ROLE).
+  BAO_ADDR: "http://openbao.openbao.svc.cluster.local:8200"
+  BAO_AUTH_ROLE: "iam-realm-provisioner"
+  BAO_KV_MOUNT: "secret"
+  BAO_IDP_PATH_PREFIX: "iam/realm-provisioner/idp"
+  BAO_KEYCLOAK_ADMIN_PATH: "iam/realm-provisioner/keycloak-admin"
+
+  # Org & Membership — I-8 residual-MFA-requirement check.
+  ORG_MEMBERSHIP_BASE_URL: "http://iam-org-membership.iam.svc.cluster.local"
+
+  # Realm export (offboarding, §15.2) — S3 bucket + KMS key for the
+  # encrypted export written before a dedicated realm is deleted.
+  REALM_EXPORT_BUCKET: "iam-realm-exports"
+  REALM_EXPORT_KMS_KEY: ""
+
+  # Lifecycle timers (§8.7-8.9) — shared by cmd/server (endpoint defaults)
+  # and every reconciler CronJob (templates/cronjobs.yaml re-declares this
+  # same env block, so a change here should be mirrored there or moved to a
+  # ConfigMap in a future iteration).
+  TRIAL_GRACE_DAYS: "30"
+  CANCELLED_GRACE_DAYS: "30"
+  RETENTION_DAYS: "90"
+  RECONCILER_BATCH_LIMIT: "100"
+  RECONCILER_TIMEOUT: "5m"
+
+  DOCS_ENABLED: "false"
+
+  # OpenTelemetry — OTLP/gRPC via platform-gincommon's
+  # ObservabilityMiddlewares (port 4317, not the legacy OTLP/HTTP 4318).
+  OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector.observability.svc.cluster.local:4317"
+
+# Env vars whose value comes from a Kubernetes Secret. Keys must be present
+# in either .Values.existingSecret or .Values.secretValues. Shared by both
+# the server Deployment and every reconciler CronJob (templates/cronjobs.yaml)
+# — they all need the three Postgres DSNs; RECONCILER_BATCH_LIMIT and the
+# lifecycle timers are non-secret and stay in .Values.env instead.
+envFromSecret:
+  - DATABASE_URL
+  - SYSTEM_DATABASE_URL
+  - MIGRATION_DATABASE_URL
+  - KEYCLOAK_ADMIN_CLIENT_SECRET
+  - DOCS_AUTH_TOKEN
+
+# existingSecret — preferred for production. Set to the name of a
+# pre-existing Kubernetes Secret whose keys match envFromSecret. When set,
+# the chart creates no Secret resource and secretValues is ignored.
+#
+# DATABASE_URL here MUST be the runtime app role (realm_provisioner_app),
+# which has no BYPASSRLS/CREATE. SYSTEM_DATABASE_URL/MIGRATION_DATABASE_URL
+# MUST both be the BYPASSRLS realm_provisioner_migrator role — the server
+# pod applies migrations itself at startup and RP-C1..C4 read across every
+# tenant (§10.1); there is no separate migrate Job in this chart.
+existingSecret: ""
+
+# rotationEpoch — used only when existingSecret is set. Bump this value to
+# trigger a rolling restart after an external secret is rotated:
+#   helm upgrade ... --set rotationEpoch=$(date +%s)
+rotationEpoch: "0"
+
+# Secret values — used ONLY when existingSecret is empty.
+# Pass via --set or a Helm secrets plugin (never commit real values).
+secretValues:
+  DATABASE_URL: ""
+  SYSTEM_DATABASE_URL: ""
+  MIGRATION_DATABASE_URL: ""
+  KEYCLOAK_ADMIN_CLIENT_SECRET: ""
+  DOCS_AUTH_TOKEN: ""
+
+# 30s HTTP+metrics server graceful shutdown budget + buffer for the three
+# in-process SQS consumers to finish an in-flight message (at-least-once +
+# processed_events dedup makes a redelivery safe if this is exceeded).
+terminationGracePeriodSeconds: 30
+
+# podDisruptionBudget — ensures at least 1 pod survives voluntary
+# disruptions (node drains, cluster upgrades). With minReplicas: 2 keep
+# minAvailable=1 so a single node drain doesn't take the service to zero.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532      # distroless nonroot UID
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+
+# startupProbe covers a slow cold start (Postgres pool warmup, Keycloak
+# token fetch, AWS SDK config resolution) before liveness/readiness take
+# over.
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 2
+  periodSeconds: 5
+  failureThreshold: 12   # 12 x 5s = 60s startup budget
+  timeoutSeconds: 3
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 0  # startupProbe handles the initial delay
+  periodSeconds: 15
+  failureThreshold: 3
+  timeoutSeconds: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  initialDelaySeconds: 0
+  periodSeconds: 10
+  failureThreshold: 3
+  timeoutSeconds: 3
+
+# NetworkPolicy — enabled by default (§13). Public API traffic (RP-1..RP-16)
+# reaches the "http" port via the gateway/mesh. :9090/metrics is restricted
+# to the monitoring namespace only.
+networkPolicy:
+  enabled: true
+  ingressControllerNamespaceSelector:
+    kubernetes.io/metadata.name: envoy-gateway-system
+  ingressControllerPodSelector: {}
+  metricsIngress:
+    enabled: true
+    namespaceSelector:
+      kubernetes.io/metadata.name: monitoring
+    podSelector:
+      app.kubernetes.io/name: prometheus
+  additionalIngressRules: []
+  additionalEgressRules: []
+
+# ServiceMonitor — requires kube-prometheus-stack (monitoring.coreos.com/v1
+# CRD). PrometheusRule (alerting rules) is also gated on this flag — no
+# scrape means no metrics, which means every alert stays permanently
+# inactive.
+serviceMonitor:
+  enabled: true
+  interval: "30s"
+  scrapeTimeout: "10s"
+  additionalLabels: {}
+  relabelings: []
+  namespaceSelector: {}
+
+# Ingress — disabled by default; this service is normally reached only
+# through the shared Envoy gateway/mesh. Enable only if a caller sits
+# outside the cluster.
+ingress:
+  enabled: false
+  type: HTTPRoute
+
+  hosts:
+    - host: iam-realm-provisioner.internal.example.com
+      paths:
+        - path: /api/v1
+          pathType: PathPrefix
+
+  gateway:
+    name: ""              # required — name of the Gateway resource
+    namespace: ""         # optional — defaults to the release namespace
+    sectionName: ""       # optional — target a specific listener (e.g. "https")
+
+  securityPolicy:
+    enabled: false
+    cors:
+      enabled: false
+      allowOrigins: []
+      allowMethods:
+        - GET
+        - POST
+        - PATCH
+        - DELETE
+        - OPTIONS
+      allowHeaders:
+        - Authorization
+        - Content-Type
+        - Idempotency-Key
+        - X-Tenant-Id
+        - X-User-Id
+        - X-User-Roles
+      maxAge: "86400"
+    rateLimit:
+      enabled: false
+      requestsPerUnit: 1000
+      unit: Second          # Second | Minute | Hour
+
+  className: ""
+  annotations: {}
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  tls: []
+  #  - secretName: iam-realm-provisioner-tls
+  #    hosts:
+  #      - iam-realm-provisioner.internal.example.com
+
+# ── Reconciler CronJobs (§8.7-8.10, templates/cronjobs.yaml) ───────────────
+# Each CronJob runs the SAME image as the Deployment (image above), with
+# `command` overridden to the iam-realm-provisioner-reconciler binary and a
+# `--job=<name>` argument selecting which handler in
+# cmd/reconciler/main.go's registry to run.
+cronJobs:
+  trialExpiry:
+    enabled: true
+    schedule: "0 2 * * *"        # RP-C1 (§8.7)
+    jobName: trial-expiry
+    concurrencyPolicy: Forbid
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    activeDeadlineSeconds: 600
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+  trialHardDelete:
+    enabled: true
+    schedule: "0 3 * * *"        # RP-C2 (§8.7)
+    jobName: trial-hard-delete
+    concurrencyPolicy: Forbid
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    activeDeadlineSeconds: 600
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+  subscriptionLapse:
+    enabled: true
+    schedule: "0 2 * * *"        # RP-C3 (§8.8/§8.9) — blocked on the O&M
+                                  # subscription-status-read endpoint being
+                                  # unspecified (port.SubscriptionStatusReader
+                                  # doc comment); no-ops until wired.
+    jobName: subscription-lapse
+    concurrencyPolicy: Forbid
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    activeDeadlineSeconds: 900
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+  realmConfigReconcile:
+    enabled: true
+    schedule: "*/10 * * * *"     # RP-C4 (§8.10)
+    jobName: realm-config-reconcile
+    concurrencyPolicy: Forbid
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    activeDeadlineSeconds: 240
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+  # The LLD's own outbox-prune entry (§3.1) leaves open whether this runs as
+  # a cmd/server background ticker or a separate CronJob ("verify against
+  # sibling pattern"); this codebase's cmd/reconciler/main.go registry
+  # already wires it as a --job value, and its own header comment
+  # anticipates "6 CronJobs" in this one manifest — so it is scheduled here.
+  # No schedule is pinned by the LLD; 04:00 daily (offset from the 02:00/
+  # 03:00 lifecycle crons above) is this chart's own choice.
+  outboxPrune:
+    enabled: true
+    schedule: "0 4 * * *"        # this chart's own choice — not LLD-pinned
+    jobName: outbox-prune
+    concurrencyPolicy: Forbid
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    activeDeadlineSeconds: 300
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 128Mi
+  processedEventsPrune:
+    enabled: true
+    schedule: "30 4 * * *"       # this chart's own choice — not LLD-pinned
+    jobName: processed-events-prune
+    concurrencyPolicy: Forbid
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    activeDeadlineSeconds: 300
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 128Mi

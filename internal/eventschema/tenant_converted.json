@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TenantConvertedPayload",
+  "description": "Payload of TenantConverted (LLD §7.5). Emitted by RP-3 (or RP-2 with direct_signup=true). O&M flips keycloak_realm/keycloak_realm_strategy/subscription_status from this; AuthZ Enrichment invalidates its realm->tenant cache.",
+  "type": "object",
+  "required": ["tenant_id", "realm", "plan", "users_migrated", "direct_signup"],
+  "additionalProperties": true,
+  "properties": {
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "realm": { "type": "string" },
+    "plan": { "type": "string", "enum": ["starter", "pro", "enterprise"] },
+    "billing_subscription_id": { "type": "string" },
+    "users_migrated": { "type": "integer", "minimum": 0 },
+    "direct_signup": { "type": "boolean" }
+  }
+}

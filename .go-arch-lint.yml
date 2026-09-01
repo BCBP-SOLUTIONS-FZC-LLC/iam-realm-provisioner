@@ -1,0 +1,160 @@
+version: 3
+workdir: .
+
+allow:
+  depOnAnyVendor: true
+  # Deep-scan follows method calls through the composition root and flags
+  # every DI wire (e.g. cmd passing an outbound adapter to a service
+  # constructor) as a cross-layer dependency. That's how Clean Architecture
+  # is supposed to work in main.go — keep import-level checks only.
+  deepScan: false
+
+# Tests, dev scripts, and deploy manifests are not part of the runtime
+# architecture. Excluding them keeps the linter focused on production code.
+exclude:
+  - test
+  - scripts
+  - deploy
+
+excludeFiles:
+  - '.*_test\.go$'
+
+components:
+  domain:
+    in: internal/core/domain
+
+  port:
+    in: internal/core/port
+
+  service:
+    in: internal/core/service
+
+  requestctx:
+    in: pkg/requestctx
+
+  # Embedded JSON schemas for the 9 published events, validated at
+  # outbox-enqueue time by the eventbus adapter's ValidatingCodec.
+  eventschema:
+    in: internal/eventschema
+
+  # Embedded AsyncAPI spec asset (api/asyncapi.yaml, api/embed.go) — single
+  # source of truth for the event contract, embedded directly rather than a
+  # synced duplicate under internal/adapter/inbound/http.
+  apispec:
+    in: api
+
+  # Cross-cutting Prometheus counters/histograms (iam_realm_provisioner_*,
+  # §11.2). Imported by both inbound handlers and outbound adapters.
+  observability:
+    in: internal/adapter/outbound/metrics
+
+  adapters_inbound:
+    in:
+      - internal/adapter/inbound/http
+      - internal/adapter/inbound/consumer
+
+  # keycloak is its own component (not folded into adapters_outbound) so the
+  # RP-INV-1 single-writer invariant — no other package may import gocloak
+  # — can be verified structurally: no other adapters_outbound file needs
+  # to depend on it, and .github/scripts/arch-lint.sh additionally greps
+  # for stray gocloak imports outside this one package.
+  keycloak:
+    in: internal/adapter/outbound/keycloak
+
+  adapters_outbound:
+    in:
+      - internal/adapter/outbound/postgres
+      - internal/adapter/outbound/eventbus
+      - internal/adapter/outbound/openbao
+      - internal/adapter/outbound/orgmembership
+      - internal/adapter/outbound/s3
+
+  # cmd/reconciler/jobs is its own component (not merged into cmd) so it
+  # can be declared as a normal dependency of cmd/reconciler's main.go
+  # without a false-positive self-cycle warning.
+  reconciler_jobs:
+    in: cmd/reconciler/jobs
+
+  cmd:
+    in:
+      - cmd/server
+      - cmd/reconciler
+
+deps:
+  # domain: no internal (project) imports — pure value types + invariants
+  # only. anyVendorDeps covers its use of google/uuid etc.
+  domain:
+    anyVendorDeps: true
+
+  # port: depends only on domain (interfaces are described in terms of
+  # domain types).
+  port:
+    mayDependOn:
+      - domain
+
+  # service: domain + port + requestctx + observability (mfa_service.go,
+  # idp_service.go, realm_config_service.go import
+  # internal/adapter/outbound/metrics directly — a cross-cutting
+  # instrumentation leaf, not a "real" adapter, per the sibling convention).
+  service:
+    mayDependOn:
+      - domain
+      - port
+      - requestctx
+      - observability
+
+  requestctx:
+    anyVendorDeps: true
+
+  eventschema:
+    anyVendorDeps: true
+
+  apispec:
+    anyVendorDeps: true
+
+  observability:
+    mayDependOn:
+      - domain
+
+  keycloak:
+    mayDependOn:
+      - domain
+      - port
+      - observability
+
+  adapters_outbound:
+    mayDependOn:
+      - domain
+      - port
+      - service
+      - eventschema
+      - observability
+
+  adapters_inbound:
+    mayDependOn:
+      - domain
+      - port
+      - service
+      - requestctx
+      - apispec
+      - observability
+
+  reconciler_jobs:
+    mayDependOn:
+      - domain
+      - port
+      - observability
+
+  cmd:
+    mayDependOn:
+      - domain
+      - port
+      - service
+      - requestctx
+      - eventschema
+      - apispec
+      - observability
+      - keycloak
+      - adapters_inbound
+      - adapters_outbound
+      - reconciler_jobs

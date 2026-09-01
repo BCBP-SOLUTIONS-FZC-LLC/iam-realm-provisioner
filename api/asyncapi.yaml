@@ -1,0 +1,491 @@
+asyncapi: 3.0.0
+
+info:
+  title: IAM Realm Provisioner Events
+  version: "1.0.0"
+  description: |
+    Domain events published and consumed by iam-realm-provisioner (LLD §7).
+
+    This service is BOTH a producer and a consumer. It publishes NINE
+    tenant-lifecycle events on the `iam-tenant-events` SNS topic — the one
+    IAM topic with two producers (this service and Org & Membership,
+    HLD §9.1.1). It shares the topic's Glue Schema Registry
+    (`iam-tenant-events`) with Org & Membership, which registers
+    TenantCreated/TrialStarted there — the two producers never collide on
+    schema names (RP-D5).
+
+    It consumes three SQS queues:
+      membership-realm-q  ← iam.membership.events (O&M)  — MFA-role sync
+      tenant-realm-q       ← iam.tenant.events (O&M)       — trial timer record
+      billing-realm-q      ← billing.events (Billing)      — reactivation
+
+    Wire format: each SNS message body is prefixed with an 18-byte AWS Glue
+    Schema Registry header before the EventEnvelope JSON:
+      byte 0     : header version (0x03)
+      byte 1     : compression    (0x00 = none)
+      bytes 2-17 : schema version UUID
+
+    `TenantReactivated` is a name this service both PRODUCES (source=operator,
+    on iam.tenant.events, for an operator un-suspend) and CONSUMES (Billing's,
+    source=billing, on billing.events → billing-realm-q). The two ride
+    different topics, so there is no self-consumption (RP-D13).
+
+    Schema versioning: the authoritative version identifier is the 16-byte
+    UUID in the Glue wire-format header. The same UUID is echoed into the
+    envelope JSON as `dataschema`. In dev/test (NoopCodec) there is no Glue
+    header and `dataschema` is absent.
+
+servers:
+  snsTenantEvents:
+    host: "sns.ap-south-1.amazonaws.com"
+    protocol: sns
+    description: |
+      The `iam-tenant-events` SNS topic (shared with Org & Membership,
+      two-producer topic per HLD §9.1.1). This service publishes 9 of the
+      11 schemas registered in the `iam-tenant-events` Glue registry.
+
+  sqsMembershipRealm:
+    host: "sqs.ap-south-1.amazonaws.com"
+    protocol: sqs
+    description: |
+      Queue: membership-realm-q  |  DLQ: membership-realm-q-dlq  (maxReceiveCount=5)
+      SNS subscription filter: EventType IN [DepartmentMembershipGranted,
+        DepartmentMembershipLevelChanged, TenantRoleGranted, TenantRoleRevoked]
+      Source topic: iam.membership.events (Org & Membership).
+
+  sqsTenantRealm:
+    host: "sqs.ap-south-1.amazonaws.com"
+    protocol: sqs
+    description: |
+      Queue: tenant-realm-q  |  DLQ: tenant-realm-q-dlq  (maxReceiveCount=5)
+      SNS subscription filter: EventType IN [TrialStarted]
+      Source topic: iam.tenant.events (Org & Membership) — RP-4.
+
+  sqsBillingRealm:
+    host: "sqs.ap-south-1.amazonaws.com"
+    protocol: sqs
+    description: |
+      Queue: billing-realm-q  |  DLQ: billing-realm-q-dlq  (maxReceiveCount=5)
+      SNS subscription filter: EventType IN [TenantReactivated]
+      Source topic: billing.events (Billing Service).
+
+channels:
+  iamTenantEvents:
+    address: "iam-tenant-events"
+    servers:
+      - $ref: '#/servers/snsTenantEvents'
+    description: The shared iam.tenant.events SNS topic — this service's 9 published events.
+    messages:
+      TrialTenantProvisioned:
+        $ref: '#/components/messages/TrialTenantProvisioned'
+      TenantRealmReady:
+        $ref: '#/components/messages/TenantRealmReady'
+      TenantConverted:
+        $ref: '#/components/messages/TenantConverted'
+      DirectPaidSignup:
+        $ref: '#/components/messages/DirectPaidSignup'
+      TrialExpired:
+        $ref: '#/components/messages/TrialExpired'
+      TrialReactivated:
+        $ref: '#/components/messages/TrialReactivated'
+      TenantSuspended:
+        $ref: '#/components/messages/TenantSuspended'
+      TenantOffboarded:
+        $ref: '#/components/messages/TenantOffboarded'
+      TenantReactivated:
+        $ref: '#/components/messages/TenantReactivated'
+
+  membershipRealmQueue:
+    address: "membership-realm-q"
+    servers:
+      - $ref: '#/servers/sqsMembershipRealm'
+    description: |
+      Drives MfaService.SyncRequiresMfa (§8.6). Adds requires-mfa
+      unconditionally on grant/elevate; drops it only on TenantRoleRevoked,
+      after an O&M I-8 residual-MFA-requirement check.
+    messages:
+      DepartmentMembershipGranted:
+        $ref: '#/components/messages/DepartmentMembershipGranted'
+      DepartmentMembershipLevelChanged:
+        $ref: '#/components/messages/DepartmentMembershipLevelChanged'
+      TenantRoleGranted:
+        $ref: '#/components/messages/TenantRoleGranted'
+      TenantRoleRevoked:
+        $ref: '#/components/messages/TenantRoleRevoked'
+
+  tenantRealmQueue:
+    address: "tenant-realm-q"
+    servers:
+      - $ref: '#/servers/sqsTenantRealm'
+    description: |
+      Drives LifecycleService.RecordTrialTimer — idempotent upsert of
+      trial_ends_at onto the existing tenant_realms row (RP-4). This
+      service never queries O&M for trial data; it is push-only.
+    messages:
+      TrialStarted:
+        $ref: '#/components/messages/TrialStarted'
+
+  billingRealmQueue:
+    address: "billing-realm-q"
+    servers:
+      - $ref: '#/servers/sqsBillingRealm'
+    description: |
+      Drives LifecycleService.ReactivateFromBilling (§8.11). Re-enables the
+      dedicated realm only if it had reached `suspended`; otherwise a no-op
+      (still recorded in processed_events).
+    messages:
+      BillingTenantReactivated:
+        $ref: '#/components/messages/BillingTenantReactivated'
+
+operations:
+  sendTrialTenantProvisioned:
+    action: send
+    channel:
+      $ref: '#/channels/iamTenantEvents'
+    summary: RP-1 emits TrialTenantProvisioned on shared-trial user creation.
+    messages:
+      - $ref: '#/channels/iamTenantEvents/messages/TrialTenantProvisioned'
+
+  sendTenantRealmReady:
+    action: send
+    channel:
+      $ref: '#/channels/iamTenantEvents'
+    summary: RP-2 or RP-3 emits TenantRealmReady once a dedicated realm + OIDC clients exist.
+    messages:
+      - $ref: '#/channels/iamTenantEvents/messages/TenantRealmReady'
+
+  sendTenantConverted:
+    action: send
+    channel:
+      $ref: '#/channels/iamTenantEvents'
+    summary: RP-3 (or RP-2 with direct_signup=true) emits TenantConverted.
+    messages:
+      - $ref: '#/channels/iamTenantEvents/messages/TenantConverted'
+
+  sendDirectPaidSignup:
+    action: send
+    channel:
+      $ref: '#/channels/iamTenantEvents'
+    summary: RP-2 completion emits DirectPaidSignup.
+    messages:
+      - $ref: '#/channels/iamTenantEvents/messages/DirectPaidSignup'
+
+  sendTrialExpired:
+    action: send
+    channel:
+      $ref: '#/channels/iamTenantEvents'
+    summary: RP-C1/RP-12 emits TrialExpired per expired trial tenant. Cron-origin.
+    messages:
+      - $ref: '#/channels/iamTenantEvents/messages/TrialExpired'
+
+  sendTrialReactivated:
+    action: send
+    channel:
+      $ref: '#/channels/iamTenantEvents'
+    summary: RP-10's trial branch emits TrialReactivated.
+    messages:
+      - $ref: '#/channels/iamTenantEvents/messages/TrialReactivated'
+
+  sendTenantSuspended:
+    action: send
+    channel:
+      $ref: '#/channels/iamTenantEvents'
+    summary: RP-C3 lapse sweep (source=billing_lapse) or RP-14 (source=operator) emits TenantSuspended.
+    messages:
+      - $ref: '#/channels/iamTenantEvents/messages/TenantSuspended'
+
+  sendTenantOffboarded:
+    action: send
+    channel:
+      $ref: '#/channels/iamTenantEvents'
+    summary: RP-C3 emits TenantOffboarded after confirmed S3 export + realm delete. Terminal (RP-INV-5).
+    messages:
+      - $ref: '#/channels/iamTenantEvents/messages/TenantOffboarded'
+
+  sendTenantReactivated:
+    action: send
+    channel:
+      $ref: '#/channels/iamTenantEvents'
+    summary: RP-10's paid branch emits TenantReactivated(source=operator) — RP-D13.
+    messages:
+      - $ref: '#/channels/iamTenantEvents/messages/TenantReactivated'
+
+  receiveMembershipRealmEvents:
+    action: receive
+    channel:
+      $ref: '#/channels/membershipRealmQueue'
+    summary: Consume O&M's department/tenant-role events to sync requires-mfa (§8.6).
+    messages:
+      - $ref: '#/channels/membershipRealmQueue/messages/DepartmentMembershipGranted'
+      - $ref: '#/channels/membershipRealmQueue/messages/DepartmentMembershipLevelChanged'
+      - $ref: '#/channels/membershipRealmQueue/messages/TenantRoleGranted'
+      - $ref: '#/channels/membershipRealmQueue/messages/TenantRoleRevoked'
+
+  receiveTrialStarted:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantRealmQueue'
+    summary: Consume O&M's TrialStarted to record trial_ends_at locally (RP-4).
+    messages:
+      - $ref: '#/channels/tenantRealmQueue/messages/TrialStarted'
+
+  receiveBillingTenantReactivated:
+    action: receive
+    channel:
+      $ref: '#/channels/billingRealmQueue'
+    summary: Consume Billing's TenantReactivated to re-enable a suspended dedicated realm (§8.11).
+    messages:
+      - $ref: '#/channels/billingRealmQueue/messages/BillingTenantReactivated'
+
+components:
+  messages:
+    TrialTenantProvisioned:
+      title: TrialTenantProvisioned
+      payload:
+        $ref: '#/components/schemas/TrialTenantProvisionedPayload'
+
+    TenantRealmReady:
+      title: TenantRealmReady
+      payload:
+        $ref: '#/components/schemas/TenantRealmReadyPayload'
+
+    TenantConverted:
+      title: TenantConverted
+      payload:
+        $ref: '#/components/schemas/TenantConvertedPayload'
+
+    DirectPaidSignup:
+      title: DirectPaidSignup
+      payload:
+        $ref: '#/components/schemas/DirectPaidSignupPayload'
+
+    TrialExpired:
+      title: TrialExpired
+      payload:
+        $ref: '#/components/schemas/TrialExpiredPayload'
+
+    TrialReactivated:
+      title: TrialReactivated
+      payload:
+        $ref: '#/components/schemas/TrialReactivatedPayload'
+
+    TenantSuspended:
+      title: TenantSuspended
+      payload:
+        $ref: '#/components/schemas/TenantSuspendedPayload'
+
+    TenantOffboarded:
+      title: TenantOffboarded
+      payload:
+        $ref: '#/components/schemas/TenantOffboardedPayload'
+
+    TenantReactivated:
+      title: TenantReactivated
+      description: Produced by this service (source=operator). See BillingTenantReactivated for the consumed counterpart (RP-D13).
+      payload:
+        $ref: '#/components/schemas/TenantReactivatedPayload'
+
+    DepartmentMembershipGranted:
+      title: DepartmentMembershipGranted
+      description: Consumed only — canonical schema owned by iam-org-membership's own AsyncAPI spec. additionalProperties left open.
+      payload:
+        $ref: '#/components/schemas/DepartmentMembershipGrantedPayload'
+
+    DepartmentMembershipLevelChanged:
+      title: DepartmentMembershipLevelChanged
+      description: Consumed only — canonical schema owned by iam-org-membership.
+      payload:
+        $ref: '#/components/schemas/DepartmentMembershipLevelChangedPayload'
+
+    TenantRoleGranted:
+      title: TenantRoleGranted
+      description: Consumed only — canonical schema owned by iam-org-membership.
+      payload:
+        $ref: '#/components/schemas/TenantRoleGrantedPayload'
+
+    TenantRoleRevoked:
+      title: TenantRoleRevoked
+      description: Consumed only — canonical schema owned by iam-org-membership.
+      payload:
+        $ref: '#/components/schemas/TenantRoleRevokedPayload'
+
+    TrialStarted:
+      title: TrialStarted
+      description: Consumed only — canonical schema owned by iam-org-membership.
+      payload:
+        $ref: '#/components/schemas/TrialStartedPayload'
+
+    BillingTenantReactivated:
+      title: TenantReactivated (billing.events)
+      description: Consumed only — Billing's own TenantReactivated (source=billing), distinct topic from this service's produced TenantReactivated (RP-D13).
+      payload:
+        $ref: '#/components/schemas/BillingTenantReactivatedPayload'
+
+  schemas:
+    EventEnvelopeBase:
+      type: object
+      description: Shared envelope fields on every event this service publishes (§7.3).
+      required: [id, type, source, specversion, time, data, tenant_id]
+      properties:
+        id: { type: string, format: uuid, description: "UUID v7, consumer dedup key" }
+        type: { type: string, description: "PascalCase event name" }
+        source: { type: string, const: "iam-realm-provisioner" }
+        specversion: { type: string, const: "1" }
+        time: { type: string, format: date-time }
+        tenant_id: { type: string, format: uuid }
+        trace_id: { type: string }
+        subject: { type: string }
+        actor: { type: string }
+        dataschema: { type: string, description: "Glue schema-version UUID" }
+        ip_address: { type: string }
+        user_agent: { type: string }
+
+    TrialTenantProvisionedPayload:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, realm, keycloak_user_id]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        realm: { type: string, const: "trial" }
+        keycloak_user_id: { type: string, format: uuid }
+
+    TenantRealmReadyPayload:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, realm, keycloak_shard, oidc_clients]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        realm: { type: string }
+        keycloak_shard: { type: string }
+        oidc_clients: { type: array, items: { type: string } }
+
+    TenantConvertedPayload:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, realm, plan, users_migrated, direct_signup]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        realm: { type: string }
+        plan: { type: string, enum: [starter, pro, enterprise] }
+        billing_subscription_id: { type: string }
+        users_migrated: { type: integer, minimum: 0 }
+        direct_signup: { type: boolean }
+
+    DirectPaidSignupPayload:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, realm, direct_signup]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        realm: { type: string }
+        direct_signup: { type: boolean, const: true }
+
+    TrialExpiredPayload:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, trial_ends_at, grace_ends_at]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        trial_ends_at: { type: string, format: date-time }
+        grace_ends_at: { type: string, format: date-time }
+
+    TrialReactivatedPayload:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, new_trial_ends_at]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        new_trial_ends_at: { type: string, format: date-time }
+
+    TenantSuspendedPayload:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, realm, suspended_at, source]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        realm: { type: string }
+        cancelled_at: { type: string, format: date-time }
+        suspended_at: { type: string, format: date-time }
+        source: { type: string, enum: [billing_lapse, operator] }
+        reason: { type: string }
+
+    TenantOffboardedPayload:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, realm, export_s3_key, offboarded_at]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        realm: { type: string }
+        export_s3_key: { type: string }
+        offboarded_at: { type: string, format: date-time }
+
+    TenantReactivatedPayload:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, realm, source]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        realm: { type: string }
+        source: { type: string, enum: [operator] }
+        reason: { type: string }
+
+    DepartmentMembershipGrantedPayload:
+      type: object
+      additionalProperties: true
+      required: [user_id, tenant_id, department_id, level, actor_id]
+      properties:
+        user_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        department_id: { type: string, format: uuid }
+        level: { type: string, enum: [preparator, reviewer, approver] }
+        actor_id: { type: string, format: uuid }
+
+    DepartmentMembershipLevelChangedPayload:
+      type: object
+      additionalProperties: true
+      required: [user_id, tenant_id, department_id, previous_level, new_level, actor_id]
+      properties:
+        user_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        department_id: { type: string, format: uuid }
+        previous_level: { type: string, enum: [preparator, reviewer, approver] }
+        new_level: { type: string, enum: [preparator, reviewer, approver] }
+        actor_id: { type: string, format: uuid }
+
+    TenantRoleGrantedPayload:
+      type: object
+      additionalProperties: true
+      required: [user_id, tenant_id, role_code, actor_id]
+      properties:
+        user_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        role_code: { type: string, enum: [tenant_owner, tenant_admin, tender_admin] }
+        actor_id: { type: string, format: uuid }
+
+    TenantRoleRevokedPayload:
+      type: object
+      additionalProperties: true
+      required: [user_id, tenant_id, role_code, actor_id]
+      properties:
+        user_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        role_code: { type: string, enum: [tenant_owner, tenant_admin, tender_admin] }
+        actor_id: { type: string, format: uuid }
+
+    TrialStartedPayload:
+      type: object
+      additionalProperties: true
+      required: [tenant_id, plan, trial_ends_at]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        plan: { type: string, enum: [starter, pro, enterprise] }
+        trial_ends_at: { type: string, format: date-time }
+
+    BillingTenantReactivatedPayload:
+      type: object
+      additionalProperties: true
+      required: [tenant_id, source]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        source: { type: string, const: "billing" }
+        reason: { type: string }

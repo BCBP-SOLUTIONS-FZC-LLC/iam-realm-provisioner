@@ -1,0 +1,15 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "iam-realm-provisioner.fullname" . }}
+  labels:
+    {{- include "iam-realm-provisioner.labels" . | nindent 4 }}
+spec:
+  # With minReplicas: 2 keep minAvailable=1 so a single node drain cannot
+  # take the service to zero. Bump if scaling minReplicas beyond 2.
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "iam-realm-provisioner.selectorLabels" . | nindent 6 }}
+{{- end }}

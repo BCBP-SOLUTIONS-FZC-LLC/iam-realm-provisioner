@@ -1,0 +1,16 @@
+apiVersion: v2
+name: iam-realm-provisioner
+description: Realm Provisioner Service for the IAM stack — the single writer to the Keycloak Admin API and the system of record for tenant identity lifecycle (RP-1..RP-16, RP-C1..RP-C4, three inbound SQS consumers, the iam.tenant.events topic)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - iam
+  - realm-provisioner
+  - keycloak
+  - tenant-lifecycle
+home: https://github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner
+sources:
+  - https://github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner
+maintainers:
+  - name: BCBP Solutions IAM Team

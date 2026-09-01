@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DirectPaidSignupPayload",
+  "description": "Payload of DirectPaidSignup (LLD §7.5). Emitted by RP-2 completion alongside TenantRealmReady + TenantConverted(direct_signup=true). Settles O&M's tenants row created by Signup's own I-1 call.",
+  "type": "object",
+  "required": ["tenant_id", "realm", "direct_signup"],
+  "additionalProperties": true,
+  "properties": {
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "realm": { "type": "string" },
+    "direct_signup": { "type": "boolean", "const": true }
+  }
+}
