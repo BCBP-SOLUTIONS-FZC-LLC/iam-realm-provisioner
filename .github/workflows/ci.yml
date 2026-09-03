@@ -170,7 +170,7 @@ jobs:
       - name: Docker metadata
         id: meta
         if: github.event_name == 'push'
-        uses: docker/metadata-action@v6.1.0
+        uses: docker/metadata-action@v6.2.0
         with:
           images: ${{ env.IMAGE }}
           tags: |
