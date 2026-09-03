@@ -77,7 +77,7 @@ jobs:
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
 
       - name: Hadolint
-        uses: hadolint/hadolint-action@v3.3.0
+        uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: Dockerfile
 
