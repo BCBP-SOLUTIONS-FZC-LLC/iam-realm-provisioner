@@ -28,16 +28,17 @@ type Context struct {
 	ProcessedEvents    port.ProcessedEventsStore
 	Keycloak           port.KeycloakAdmin
 	ObjectStore        port.ObjectStore
-	SubscriptionStatus port.SubscriptionStatusReader // optional — see its doc comment (open O&M coordination item)
+	SubscriptionLapses port.SubscriptionLapseReader // O&M's I-16 GET /subscription-lapses (§16 RP-C3)
 
 	Logger port.SlogStyleLogger
 
-	BatchLimit             int
-	TrialGraceDays         int
-	CancelledGraceDays     int
-	RetentionDays          int
-	OutboxRetentionDays    int
-	ProcessedEventsTTLDays int
+	BatchLimit                int
+	TrialGraceDays            int
+	CancelledGraceDays        int
+	RetentionDays             int
+	OutboxRetentionDays       int
+	ProcessedEventsTTLDays    int
+	MaxReconciliationAttempts int
 }
 
 // Result summarizes a reconciler run.
@@ -46,6 +47,10 @@ type Result struct {
 	Succeeded int
 	Failed    int
 	Skipped   int
+	// Abandoned counts RealmConfigReconcile rows that hit
+	// MaxReconciliationAttempts and moved to the terminal 'failed' status
+	// this run (RP-C4 poison-pill cap, §8.10), a subset of Failed.
+	Abandoned int
 }
 
 // Func is the signature every job satisfies.

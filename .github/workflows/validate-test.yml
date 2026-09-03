@@ -22,10 +22,18 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
-  # 70% - see .github/scripts/coverage-gate.sh for why this matches the
-  # sibling IAM services' baseline. Ratchet this up over time; never lower
-  # it to make a failing PR pass.
-  COVERAGE_THRESHOLD: '70'
+  # 80% - COVER_PKG_LIST includes ./cmd/... (expanded from the prior
+  # ./internal/... + ./pkg/... scope). cmd/reconciler/jobs/*.go (all 6
+  # reconciler jobs' business logic) once sat at 0%, pulling the real
+  # measured total down to ~78.8%; it now has real test coverage (~90.9%)
+  # and the merged total sits at ~84.8%. This floor sits a few points below
+  # that measured number - enough to still catch a real regression, not so
+  # tight that normal fluctuation trips it. The coverage-gate.sh default of
+  # 90% reflects the aspiration once every package is as thoroughly covered
+  # as internal/core/service and internal/adapter/inbound/http (both ~99%+).
+  # Ratchet this up over time as that gap closes; never lower it to make a
+  # failing PR pass.
+  COVERAGE_THRESHOLD: '80'
 
 jobs:
   test:
@@ -68,7 +76,7 @@ jobs:
       # Mandatory blocking gate: runs unit (incl. the AsyncAPI-vs-eventschema
       # drift test, internal/eventschema/asyncapi_drift_test.go - this
       # service's CI-enforceable substitute for a live Glue-registry
-      # comparison, §7.3/§23) + postgres/RLS (Testcontainers Postgres) +
+      # comparison, §7.3/§25) + postgres/RLS (Testcontainers Postgres) +
       # integration (Testcontainers Postgres+Keycloak) with -race and
       # coverage, in parallel, merged into coverage.out (§17 Testing
       # Strategy). Any data race detected here blocks all downstream jobs

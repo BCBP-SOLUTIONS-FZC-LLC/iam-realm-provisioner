@@ -7,28 +7,29 @@ import (
 	"github.com/google/uuid"
 )
 
-// TenantSubscriptionInfo is the subset of O&M's `tenants` row RP-C3 needs
-// to drive the billing-lapse sweep (§8.9): subscription_status plus the
-// timestamps/source that gate the cancelled->suspended->offboarded clock.
-type TenantSubscriptionInfo struct {
-	TenantID           uuid.UUID
-	SubscriptionStatus string // active|trial|trial_expired|cancelled|suspended|offboarded (O&M's enum)
-	CancelledAt        *time.Time
-	SuspendedAt        *time.Time
-	SuspensionSource   string // billing_lapse|operator|"" — RP-C3 excludes "operator" from auto-offboard (§8.8)
+// LapsedSubscription is one row of O&M's I-16 response
+// (GET /api/v1/internal/subscription-lapses, §16 RP-C3 of the RP↔O&M
+// alignment review): a tenant whose subscription is `status='cancelled'`
+// and past O&M's own SUBSCRIPTION_GRACE_DAYS. O&M does the grace-period
+// math so the 30-day rule stays single-sourced; RP only ever sees tenants
+// already due for the suspend action — the poll is self-idempotent,
+// since RP suspending a tenant (emitting TenantSuspended) naturally drops
+// it from O&M's next response.
+type LapsedSubscription struct {
+	TenantID    uuid.UUID
+	RealmID     string
+	RealmType   string // "shared"|"dedicated" — RP-C3 only acts on "dedicated"; a "shared" entry is a trial tenant, owned by RP-C1/RP-C2 instead
+	CancelledAt time.Time
 }
 
-// SubscriptionStatusReader is RP-C3's single read dependency on Org &
-// Membership: the daily lapse sweep needs every dedicated tenant's current
-// subscription_status + timestamps (§8.9, "read from O&M").
-//
-// OPEN ITEM: the frozen LLD (§8.9/§16) specifies that this read happens
-// but does not name the O&M endpoint that serves it — no such bulk/listing
-// endpoint appears in O&M's own committed API surface as of this LLD's
-// sign-off. Coordinate with the Org & Membership team before wiring the
-// concrete adapter; this interface captures the shape RP-C3 needs so the
-// reconciler's transition logic can be built and tested against a mock now
-// without guessing at (and potentially locking in) an unratified contract.
-type SubscriptionStatusReader interface {
-	ListDedicatedTenantSubscriptions(ctx context.Context) ([]TenantSubscriptionInfo, error)
+// SubscriptionLapseReader is RP-C3's single read dependency on Org &
+// Membership for the SUSPEND half of the billing-lapse sweep (§8.8/§8.9):
+// which dedicated tenants are cancelled and past grace. The OFFBOARD half
+// (a billing-lapse-suspended tenant past RETENTION_DAYS) is answered
+// entirely from this service's own tenant_realms.suspension_source —
+// O&M's endpoint carries no notion of "already suspended," so it is never
+// consulted for that decision (port.TenantRealmRepository.
+// ListSuspendedPastRetention).
+type SubscriptionLapseReader interface {
+	ListLapsedSubscriptions(ctx context.Context) ([]LapsedSubscription, error)
 }

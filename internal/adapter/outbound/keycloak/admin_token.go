@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/Nerzal/gocloak/v13"
+
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 )
 
 // adminTokenSafetyMargin is subtracted from the token's expires_in so a
@@ -25,6 +27,10 @@ type tokenCache struct {
 	token     string
 	expiresAt time.Time
 	inflight  chan struct{} // non-nil while a refresh is in progress
+	// unauthorized records that the cached token was dropped because
+	// Keycloak rejected it with a 401 rather than because it aged out, so
+	// the next mint is attributed to trigger="401" (§11.6).
+	unauthorized bool
 
 	client       *gocloak.GoCloak
 	adminRealm   string
@@ -57,9 +63,20 @@ func (c *tokenCache) Token(ctx context.Context) (string, error) {
 	}
 	ch := make(chan struct{})
 	c.inflight = ch
+	trigger := "proactive"
+	if c.unauthorized {
+		trigger = "401"
+		c.unauthorized = false
+	}
 	c.mu.Unlock()
 
+	metrics.AdminTokenRefreshTotal.WithLabelValues(trigger).Inc()
+	start := time.Now()
 	tok, expiresIn, err := c.refresh(ctx)
+	metrics.KeycloakCallDuration.WithLabelValues("token").Observe(time.Since(start).Seconds())
+	if err != nil {
+		metrics.KeycloakCallFailuresTotal.WithLabelValues("token").Inc()
+	}
 
 	c.mu.Lock()
 	if err == nil {
@@ -73,12 +90,26 @@ func (c *tokenCache) Token(ctx context.Context) (string, error) {
 	return tok, err
 }
 
-// Invalidate forces the next Token call to mint a fresh token — called
-// reactively on a 401 from Keycloak.
+// Invalidate forces the next Token call to mint a fresh token — used when
+// this service knows the token's grants are stale (the post-create realm
+// admin grant, §10.2), which is a deliberate re-mint, not a credential
+// problem, so it stays on trigger="proactive".
 func (c *tokenCache) Invalidate() {
 	c.mu.Lock()
 	c.token = ""
 	c.expiresAt = time.Time{}
+	c.mu.Unlock()
+}
+
+// InvalidateUnauthorized drops the cached token after Keycloak rejected it
+// with a 401 and attributes the next mint to trigger="401", so a rotated
+// admin client secret shows up as a refresh storm rather than as an opaque
+// wave of failures (§11.6).
+func (c *tokenCache) InvalidateUnauthorized() {
+	c.mu.Lock()
+	c.token = ""
+	c.expiresAt = time.Time{}
+	c.unauthorized = true
 	c.mu.Unlock()
 }
 

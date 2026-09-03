@@ -48,7 +48,7 @@ Checks every SAML/OIDC config field against a fixed list of AWS region substring
 
 ### 11.1 Metrics
 
-All `iam_realm_provisioner_`-prefixed (frozen §23 name inventory), registered in `internal/adapter/outbound/metrics/metrics.go`:
+All `iam_realm_provisioner_`-prefixed (frozen §25 name inventory), registered in `internal/adapter/outbound/metrics/metrics.go`:
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
@@ -70,7 +70,11 @@ All `iam_realm_provisioner_`-prefixed (frozen §23 name inventory), registered i
 | `iam_realm_provisioner_mfa_reset_total` | Counter | `result` | RP-9 (fail-closed semantics) |
 | `iam_realm_provisioner_template_drift` | Gauge/Counter | `realm_version` | Report-only realm-template drift (RP-3) |
 
-Plus passthrough `http_*` (from `platform-gincommon`) and `events_*`/`outbox_*`/`sqs_*` (from `platform-events`, including `outbox_dead_letters_total`). No projection-lag metric — this service is a producer, not a projector.
+Plus passthrough `http_*` (from `platform-gincommon`), `events_*`/`outbox_*`/`sqs_*` (from `platform-events`, including `outbox_dead_letters_total`), and `pgcommon_*` pool/query/retry instruments (from `platform-pgcommon`'s `pgmetrics.InitWithRegisterer`). All three land on the registry `gincommon.MetricsRegisterer()` returns — `cmd/server/main.go` primes `ObservabilityMiddlewares` first (gincommon's metrics-init API), then registers business / events / pg collectors onto it, rather than assuming `DefaultRegisterer`. No projection-lag metric — this service is a producer, not a projector.
+
+> **DB-state gauges.** `realm_active_gauge`, `realm_config_pending_gauge`, and `template_drift` are refreshed every 5 minutes by exporter goroutines in `cmd/server` (`runBusinessExporters` → `pgadapter.GaugeRepository`, querying the BYPASSRLS sysPool), emitting once at startup so they are populated before the first scrape. A failing query logs `gauge exporter query failed` at WARN and keeps the previous value, so **a flat gauge plus that log line means the exporter is broken, not that the count is stable** — check the log before trusting a flat line. `template_drift` series disappear when a version stops drifting (the vec is reset each poll); `realm_active_gauge` reports an explicit `0` instead.
+>
+> **Not-yet-armed instruments.** `trial_expiry_*`, `lapse_processed_total`, and `realm_export_total` are incremented correctly but only inside the reconciler CronJob, which exits before a scrape lands and exposes no `/metrics` listener; exporting them needs a Pushgateway or DB-backed state the server reads (the sibling `iam-user-profile` reconciler has the same limitation). Treat silence on these as "no signal", not "no problem". See LLD §11.2.
 
 **Alerts (`deploy/monitoring/app-alerts.yml`):**
 - `IAMRealmProvisionerDown` — no healthy instances for 2m → **critical** (blocks all 16 endpoints + all 3 SQS consumers; the reconciler CronJobs run as separate pods and are not covered)
@@ -87,7 +91,7 @@ Plus passthrough `http_*` (from `platform-gincommon`) and `events_*`/`outbox_*`/
 
 ### 11.2 Tracing
 
-`platform-gincommon.InitTracingFromEnv()`. W3C `traceparent` propagated on every outbound call (O&M, Keycloak, SNS). The outbox stamps `trace_id` so provision → event → O&M-projection is one trace. Keycloak spans are named `keycloak.<op>` (e.g. `keycloak.create_realm`, `keycloak.migrate_user`).
+`gincommon.InitTracingFromEnv()` in both binaries (always — in-process spans get valid trace IDs even without a collector; OTLP export is a no-op until `OTEL_EXPORTER_OTLP_ENDPOINT` is set), plus `pgcommon.Config.Tracer` for a `db.query` span per query. W3C `traceparent` is injected on every outbound HTTP call (O&M, OpenBao, Keycloak) by the shared `adapter/outbound/httpx` transport; SNS instead carries `trace_id` on the outbox envelope, so provision → event → O&M-projection is one trace. Keycloak spans are named `keycloak.<op>` (e.g. `keycloak.create_realm`, `keycloak.migrate_user`); a CronJob run is rooted at `reconciler.<job>`.
 
 ### 11.3 Structured Logs
 
@@ -124,9 +128,9 @@ Grafana "IAM — Realm Provisioner": provision throughput/success by kind, conve
 | `ORG_MEMBERSHIP_BASE_URL` | (required) | O&M client (I-8 residual-MFA check) — fail-fast on the dev default outside `APP_ENV=dev` |
 | `REALM_EXPORT_BUCKET` / `REALM_EXPORT_KMS_KEY` | `iam-realm-exports` / `alias/iam-realm-export` | Offboarding export target |
 | `TRIAL_GRACE_DAYS` / `CANCELLED_GRACE_DAYS` / `RETENTION_DAYS` | `30` / `30` / `90` | Lifecycle timers |
-| `RECONCILER_BATCH_LIMIT` / `RECONCILER_TIMEOUT` | `100` / `5m` | Reconciler-job tunables |
+| `RECONCILER_BATCH_LIMIT` / `RECONCILER_TIMEOUT` / `RECONCILER_MAX_ATTEMPTS` | `100` / `5m` / `20` | Reconciler-job tunables — `RECONCILER_MAX_ATTEMPTS` is RP-C4's poison-pill cap (§13.1) |
 | `DOCS_ENABLED` / `DOCS_AUTH_TOKEN` | `true` / — | AsyncAPI viewer gating — mounted always outside `APP_ENV=production`; opt-in via `DOCS_ENABLED` in prod, optionally bearer-gated |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | (opt-in) | OTLP collector |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | (unset) | OTLP collector — provider always installed; export no-op until set |
 
 **Fail-fast:** startup panics if `KEYCLOAK_BASE_URL` / `KEYCLOAK_ADMIN_CLIENT_SECRET` / `ORG_MEMBERSHIP_BASE_URL` are empty or hold a dev-default value outside `APP_ENV=dev`.
 
@@ -148,8 +152,8 @@ All six defined in one Helm manifest (`deploy/helm/iam-realm-provisioner/templat
 |---|---|---|---|
 | `trial-expiry` | RP-C1 | `0 2 * * *` | Sweep `tenant_realms WHERE strategy='shared' AND status='active' AND trial_ends_at < now()` (`idx_tenant_realms_trial_exp`) — **never queries O&M**. Calls the idempotent RP-12 effect per tenant, keyed `"trial-expiry:<tenant_id>:<trial_ends_at>"` so a changed `trial_ends_at` naturally produces a fresh key. |
 | `trial-hard-delete` | RP-C2 | `0 3 * * *` | For trials past `TRIAL_GRACE_DAYS` (30) beyond expiry: hard-delete users from the shared realm via the Admin API, soft-delete/scrub the local `tenant_realms` row (retain only `tenant_id` for audit-FK, preserve `sub`). Runs entirely against `SysPool` (`BYPASSRLS`) with raw SQL, not through the repository port. |
-| `subscription-lapse` | RP-C3 | `0 2 * * *` | Reads dedicated tenants' subscription state from O&M and drives `cancelled`→`suspended`→(past `RETENTION_DAYS`)→export-then-`offboarded`. **See Open Items below — currently a no-op.** |
-| `realm-config-reconcile` | RP-C4 | `*/10 * * * *` | Retries every `realm_config_reconciliations` row in `status='pending'`: re-resolve the realm, re-attempt `ApplyRealmConfig`; success → `MarkApplied`, failure → `MarkFailed(lastErr)` and the row stays pending for the next tick. |
+| `subscription-lapse` | RP-C3 | `0 2 * * *` | Two-phase suspend→offboard sweep. Suspend polls O&M's I-16 `GET /api/v1/internal/subscription-lapses` (skipped with a WARN if `ORG_MEMBERSHIP_BASE_URL` is unset); offboard always runs against local `suspension_source='billing_lapse'` rows past `RETENTION_DAYS`, independent of whether the suspend phase ran. |
+| `realm-config-reconcile` | RP-C4 | `*/10 * * * *` | Retries every `realm_config_reconciliations` row in `status='pending'`: re-resolve the realm, re-attempt `ApplyRealmConfig`; success → `MarkApplied`, failure → `MarkFailed(lastErr, RECONCILER_MAX_ATTEMPTS)`, which leaves the row pending for the next tick unless its attempt count has just reached `RECONCILER_MAX_ATTEMPTS` (default 20 — poison-pill cap), in which case it moves atomically to the terminal `failed` status instead of retrying forever. |
 | `outbox-prune` | — | `0 4 * * *` (this chart's own choice, not LLD-pinned) | Calls `platform-events`' `outbox.Runner.PrunePublished` at `OUTBOX_RETENTION_DAYS` (default 8) retention. |
 | `processed-events-prune` | — | `30 4 * * *` (this chart's own choice, not LLD-pinned) | Prunes `processed_events` rows older than `PROCESSED_EVENTS_TTL_DAYS` (default 8). |
 
@@ -166,11 +170,72 @@ Every job is idempotent per tenant (safe to re-run) and batched (`RECONCILER_BAT
 ### 13.2 CI/CD (`.github/workflows/`)
 
 - **`validate-test.yml`** — unit + integration (`go test -race`), coverage gate (`.github/scripts/coverage-gate.sh`), Postgres + Keycloak testcontainers.
-- **`validate-quality.yml`** — `golangci-lint`, `.go-arch-lint.yml` check (`.github/scripts/arch-lint.sh`), the no-session-scoped-`SET`-GUC grep (RLS-6), the no-`gocloak`-outside-`adapter/keycloak` grep (RP-INV-1), and an AsyncAPI-vs-Glue drift gate (pinned `platform-schemagov` validation of `api/asyncapi.yaml` against the `iam-tenant-events` Glue registry — fails the PR on drift).
+- **`validate-quality.yml`** — `golangci-lint`, `.go-arch-lint.yml` check (`.github/scripts/arch-lint.sh`), the no-session-scoped-`SET`-GUC grep (RLS-6), the no-`gocloak`-outside-`adapter/keycloak` grep (RP-INV-1). It carries no schema step itself — the AsyncAPI-vs-Glue drift gate (pinned `platform-schemagov` validation of `api/asyncapi.yaml` against the `iam-tenant-events` Glue registry, failing the PR on drift) lives in `schema-registry.yml`'s `pr-check` job instead; see 13.2.1 below for the full schema-governance pipeline that same tool also drives.
 - **`ci.yml`** — orchestrates the above, plus `build-image` (multi-stage Dockerfile + provenance scripts), a Trivy scan, a smoke check (`/healthz` returns 200, `/asyncapi.yaml` serves a real spec), `pr-summary`, and pushes to GHCR on the default branch.
 - **`release.yml`** — semver tag → release binary + image.
 - **`changelog-check.yml`** — enforces a `CHANGELOG.md` `[Unreleased]` entry per PR.
 - Plus `.github/CODEOWNERS`, `dependabot.yml`, `ISSUE_TEMPLATE/`, `SECURITY.md`, `pull_request_template.md`.
+
+#### 13.2.1 Schema Governance (`schema-*.yml`, `platform-schemagov`)
+
+Three additional workflows govern this service's 9 event schemas on the AWS
+Glue Schema Registry `iam-tenant-events` (LLD §7.3.1), all driven by the same
+`platform-schemagov` (`schema-gov`) Docker image the drift gate above uses:
+
+- **`schema-registry.yml`** — the registration pipeline. Triggers: PR touching
+  `internal/eventschema/*.json`/`api/asyncapi.yaml` (`pr-check` job, read-only
+  validate+diff against staging), push to `main` (`staging` job, full
+  validate→diff→register→changelog pipeline), a published release
+  (`production` job, same pipeline against the production registry), and
+  `workflow_dispatch` for either environment. Step order in the full-pipeline
+  jobs: validate (8 passes) → check `SCHEMA_FREEZE` → configure AWS
+  credentials → detect orphaned schemas (dry-run, informational) → assess
+  event usage → enforce usage→lifecycle → diff against the registry (fails on
+  breaking changes) → register → update `docs/schema-changelog.md` → emit
+  metrics (CloudWatch + Prometheus Pushgateway + GHA annotations).
+- **`schema-prune.yml`** — a monthly staging dry-run report plus an
+  operator-triggered `workflow_dispatch` execute path (archive to
+  `docs/schema-archive/` then `glue:DeleteSchema`). Production pruning is
+  never scheduled, only `workflow_dispatch`.
+- **`schema-health-quarterly.yml`** — a read-only quarterly GitHub Step
+  Summary: lifecycle lint (`schema-gov validate` Pass 4) plus a Glue
+  version-accumulation scan, with recommended follow-up actions. Never
+  mutates the registry.
+
+**Shared registry with Org & Membership.** `iam-tenant-events` is not this
+service's alone — O&M is the topic's other producer and registers two more
+schema names there, `TenantCreated` and `TrialStarted` (LLD §7.3.1). This
+service's tooling (`make schema-*` and all three workflows above) only ever
+acts on the 9 files under `internal/eventschema/`; it never registers,
+diffs, verifies, or deletes those two names. Because `schema-gov prune`'s
+orphan detection is "Glue schema names minus local file names," those two
+names will **always** surface as false-positive "orphans" in a dry-run
+report — expected, not a defect. `schema-prune.yml` additionally runs a hard
+guard step immediately before any `--execute` invocation that lists the live
+registry and fails the job if either name is present, since the underlying
+CLI has no `--exclude` flag and `--execute` deletes every candidate it
+finds with no way to select a subset. In practice this means automated
+`--execute` pruning is unavailable for this service today (those two names
+are permanent residents of the shared registry) — see
+`docs/runbook-schema-registry.md`'s "Pruning orphaned schemas" section for
+the manual fallback.
+
+**Dormant lifecycle enforcement, by design, not by omission.** The
+usage-check/enforce-lifecycle steps in `schema-registry.yml` read
+`PROMETHEUS_URL` — set, they classify each event's publish activity via
+Prometheus and auto-flag a never-fired `active` schema for deprecation (and
+a never-fired `deprecated` schema for retirement). `PROMETHEUS_URL` is
+deliberately left **unset** in this repo's `.env-example` and in every
+environment today: this service is pre-production — nothing is deployed to
+any environment and there is no live Prometheus to query (LLD §19.5, the
+same "nothing is deployed" fact behind this service's rollback-is-reverting-
+the-branch posture) — and its 9 events were frozen at LLD v1.0 sign-off
+(§25). Auto-deprecating a frozen
+event merely because a pre-production environment has never published it
+would be wrong. Leaving `PROMETHEUS_URL` unset makes `usage-check` run with
+`--source disabled`, which makes `enforce-lifecycle` a deliberate no-op —
+the capability stays fully wired (not deleted) and activates correctly the
+day a real production Prometheus is configured and this URL is set.
 
 ### 13.3 Rollout & Migration Safety
 
@@ -182,7 +247,7 @@ Every job is idempotent per tenant (safe to re-run) and batched (`RECONCILER_BAT
 - **Integration (testcontainers-go)** — a Postgres testcontainer with RLS (repo CRUD, the full RLS matrix, `processed_events` dedup, outbox enqueue/publish/prune, `realm_config_reconciliations` retry) **and** a Keycloak testcontainer for the `keycloak` adapter: real realm clone, user create with `sub` preservation, TOTP copy, IdP create with attribute mappers, `requires-mfa` role assign/revoke, realm disable/enable, realm export. Also asserts admin-token caching + single-flight refresh against a real token endpoint, and the rate limiter under a simulated migration burst.
 - **Contract** — an `OrgMembershipClient` mock (I-8 shape) plus a test that the trial-expiry sweep touches **only** the local `tenant_realms.trial_ends_at`, never calls O&M; the `TrialStarted` consumer upserts `trial_ends_at`; all 9 published-event payloads validated against `internal/eventschema/*.json` **and** `api/asyncapi.yaml`; consumed-event decodes against producers' schemas; a test that the produced `TenantReactivated` (RP-10) and the consumed `TenantReactivated` (from Billing, `billing-realm-q`) are distinguished by `source` and never self-consumed; RP-13's report shape matches the LLD verbatim.
 - **E2E** — trial provision → conversion (users migrated, TOTP copied, WebAuthn flagged, shared sessions force-logged-out) → `TenantConverted` → O&M flips realm/strategy/status; IdP configure with a region-pinned URL blocked `400`, region-neutral succeeds; an approver-level grant on `membership-realm-q` assigns `requires-mfa`; billing-lapse crons → `TenantSuspended` (realm disabled) → past retention → realm exported to S3 → `TenantOffboarded` (terminal); `TenantReactivated` on a suspended tenant re-enables the realm, on a cancelled tenant no-ops.
-- **RLS (canonical, must implement all 5 cases, `test/postgres/rls_test.go`)** — Case 1: missing GUC → 0 rows. Case 2: cross-tenant `INSERT`/`UPDATE` rejected by `WITH CHECK`. Case 3: cross-tenant `SELECT` returns 0 rows. Case 4: cross-tenant `UPDATE` affects 0 rows. **Case 5 (critical)** — no GUC leakage across a pooled PgBouncer connection: pin the pool to one backend (`MaxConns=1`), tenant A writes under `SET LOCAL`, tenant B reads on the **same backend** and sees only B's rows (and 0 rows with no GUC set at all — fail-closed). Applies to all 5 tenant-scoped tables plus reconciler/consumer write paths. Plus two structural tests: every tenant-scoped table has RLS+FORCE enabled, and the two operational tables (`outbox_events`/`processed_events`) deliberately do not.
+- **RLS (canonical, must implement all 5 cases, `test/postgres/rls_test.go`)** — Case 1: missing GUC → 0 rows. Case 2: cross-tenant `INSERT`/`UPDATE` rejected by `WITH CHECK`. Case 3: cross-tenant `SELECT` returns 0 rows. Case 4: cross-tenant `UPDATE` affects 0 rows. **Case 5 (critical)** — no GUC leakage across a pooled PgBouncer connection: pin the pool to one backend (`MaxConns=1`), tenant A writes under `SET LOCAL`, tenant B reads on the **same backend** and sees only B's rows (and 0 rows with no GUC set at all — fail-closed). Applies to all 5 tenant-scoped tables plus reconciler/consumer write paths. Plus two structural tests: every tenant-scoped table has RLS+FORCE enabled, and the three operational tables (`outbox_events`/`processed_events`/`exporter_watermarks`) deliberately do not.
 - **Load** (`test/load/`) — a migration load test: convert a synthetic tenant with N users (e.g. 500), assert the client-side rate limiter keeps the Keycloak Admin API call rate in budget, conversion time scales linearly; reports p50/p95/p99 per-user migration latency.
 
 ## 15. GDPR / Data Lifecycle
@@ -219,9 +284,10 @@ Every job is idempotent per tenant (safe to re-run) and batched (`RECONCILER_BAT
 
 ## 20. Open Items — Operational Impact
 
-- **RP-C3 / `SubscriptionStatusReader` has no wired adapter.** The frozen LLD specifies that the subscription-lapse job reads tenant subscription status from Org & Membership but does not name the concrete endpoint. The `SubscriptionStatusReader` port exists in `internal/core/port/subscription_status_reader.go` but `cmd/reconciler/main.go` currently wires it as `nil` — the job logs a WARN and returns immediately (a no-op) until O&M's endpoint contract is settled. **Do not** work around this by pointing it at an unconfirmed O&M endpoint; coordinate with the O&M team to confirm the contract first, then wire the adapter. Until then, RP-C3-driven suspension/offboarding does not run at all — subscription lapses must go through the manual RP-14/offboarding path if genuinely needed.
+- **RP-C3's suspend phase degrades to a no-op WARN if `ORG_MEMBERSHIP_BASE_URL` is unset.** This is a deliberate, not a missing, degradation: `cmd/reconciler/main.go` wires `port.SubscriptionLapseReader` (`internal/adapter/outbound/orgmembership`, O&M's I-16 `GET /api/v1/internal/subscription-lapses`) only when that env var is set, so an environment without it (e.g. a dev/CI run with no O&M instance) doesn't fail the whole job — the offboard phase (retention-driven, purely local) still runs. Set `ORG_MEMBERSHIP_BASE_URL` in every environment where automatic billing-lapse suspension should actually happen.
 - **OpenBao Kubernetes auth is untested outside a real cluster.** The Kubernetes ServiceAccount JWT the auth flow depends on (`/v1/auth/kubernetes/login`) only exists inside a real cluster with the correct service account bound (`deploy/openbao/role.tf.example`). In local-dev/CI without that binding, RP-6 (configure IdP) and RP-7 (delete IdP) return `500` on the OpenBao write/delete step — expected there, not a production defect. Verify OpenBao connectivity as part of any staging/production rollout checklist before relying on IdP configuration endpoints.
-- **RP-9's route parameter** is internally named `:keycloak_user_id` rather than the frozen §23 spelling `:uid` — Gin requires one wildcard name per path position across sibling routes sharing a prefix, and RP-15/RP-16 already use `:keycloak_user_id` at that position. Routing-internals detail only; the actual URL a caller hits is unchanged.
+- **RP-9's route parameter** is internally named `:keycloak_user_id` rather than the frozen §25 spelling `:uid` — Gin requires one wildcard name per path position across sibling routes sharing a prefix, and RP-15/RP-16 already use `:keycloak_user_id` at that position. Routing-internals detail only; the actual URL a caller hits is unchanged.
 - **RP-13's `failing_tenants` field** serializes as JSON `null` rather than `[]` when empty — a cosmetic gap, not a correctness issue; treat `null` and `[]` as equivalent ("no failing tenants") when reading the report.
+- **`rls_violations_total`'s exporter needs a Terraform-side grant this repo cannot provide.** `GaugeRepository.RLSViolationCounts` (backing the two RLS-6 alerts, `IAMRealmProvisionerRLSCrossTenantAccess`/`RLSMissingGUC`) reads `rls_violation_log` and reads/writes its own persisted high-water mark in `exporter_watermarks` (§4.2), both via `sysPool`, i.e. as `realm_provisioner_migrator`. Every privilege that role holds is provisioned by Terraform outside this repo (§10.1) — the domain migration grants it nothing on either table. Until that Terraform is updated to `GRANT SELECT ON rls_violation_log` and `GRANT SELECT, INSERT, UPDATE ON exporter_watermarks TO realm_provisioner_migrator`, this exporter fails every tick with a permission-denied error in any real environment (logged at WARN, not fatal — the previous counter value is retained, same as any other exporter query failure). `test/postgres/syspool_helper_test.go` grants both directly since the test harness doesn't run the real Terraform.
 
 Full operator procedures for every headline scenario (Keycloak degraded, realm-config not landing, offboarding export failed, late conversion reversal, stuck idempotency key, pre-migration IdP audit, outbox/SQS/DLQ health, reconciler job health, emergency operator suspension) are in `docs/runbook.md`.

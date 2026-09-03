@@ -20,17 +20,25 @@ type BillingConsumer struct {
 	realms   port.TenantRealmRepository
 	keycloak port.KeycloakAdmin
 	dedup    port.ProcessedEventsStore
+	tx       port.TxRunner
 	log      port.Logger
 }
 
 // NewBillingConsumer constructs a BillingConsumer for billing-realm-q.
-func NewBillingConsumer(realms port.TenantRealmRepository, keycloak port.KeycloakAdmin, dedup port.ProcessedEventsStore, log port.Logger) *BillingConsumer {
-	return &BillingConsumer{realms: realms, keycloak: keycloak, dedup: dedup, log: log}
+func NewBillingConsumer(realms port.TenantRealmRepository, keycloak port.KeycloakAdmin, dedup port.ProcessedEventsStore, tx port.TxRunner, log port.Logger) *BillingConsumer {
+	return &BillingConsumer{realms: realms, keycloak: keycloak, dedup: dedup, tx: tx, log: log}
 }
 
 // Handle dispatches one billing-realm-q message (RP-EVT-7).
 func (c *BillingConsumer) Handle(ctx context.Context, env events.Envelope[json.RawMessage]) error {
-	processed, err := c.dedup.IsProcessed(ctx, domain.ConsumerBilling, env.ID)
+	if env.Type != domain.EventTenantReactivated {
+		if err := ackUnknown(ctx, c.tx, c.dedup, c.log, domain.ConsumerBilling, env); err != nil {
+			return fmt.Errorf("billing consumer: %w", err)
+		}
+		return nil
+	}
+
+	processed, err := skipDuplicate(ctx, c.dedup, domain.ConsumerBilling, env.ID)
 	if err != nil {
 		return fmt.Errorf("billing consumer: check processed_events: %w", err)
 	}
@@ -38,10 +46,6 @@ func (c *BillingConsumer) Handle(ctx context.Context, env events.Envelope[json.R
 		return nil
 	}
 
-	if env.Type != domain.EventTenantReactivated {
-		c.log.Warn("billing consumer: no handler for event type — acknowledging", map[string]any{"event_type": env.Type, "event_id": env.ID})
-		return nil
-	}
 	var p domain.BillingTenantReactivatedPayload
 	if err := json.Unmarshal(env.Payload, &p); err != nil {
 		return fmt.Errorf("billing consumer: decode %s: %w", env.Type, err)
@@ -52,20 +56,35 @@ func (c *BillingConsumer) Handle(ctx context.Context, env events.Envelope[json.R
 	if err != nil {
 		return fmt.Errorf("billing consumer: find tenant_realms row: %w", err)
 	}
-	if row.Status == domain.RealmStatusSuspended {
-		if err := c.keycloak.EnableRealm(ctx, row.RealmName); err != nil {
-			return fmt.Errorf("billing consumer: enable realm: %w", err)
+
+	if row.Status != domain.RealmStatusSuspended {
+		// Never reached suspended (only cancelled/read-only) -> no Keycloak //nolint:misspell // "cancelled" mirrors O&M's actual enum spelling (frozen contract term)
+		// effect and no local write. MarkProcessed still goes through
+		// RunInTx so it joins withPool the same way iam-org-membership's
+		// no-op / unknown-type path does.
+		if err := markProcessedInTx(gucCtx, c.tx, c.dedup, domain.ConsumerBilling, env.ID); err != nil {
+			return fmt.Errorf("billing consumer: %w", err)
 		}
+		return nil
+	}
+
+	// Keycloak-effect-first, then the local commit (§9.1 / CONS-2): the
+	// realm is re-enabled outside any transaction, so a committed row always
+	// reflects real Keycloak state. A crash between the two replays this
+	// handler and EnableRealm reconciles to a no-op.
+	if err := c.keycloak.EnableRealm(ctx, row.RealmName); err != nil {
+		return fmt.Errorf("billing consumer: enable realm: %w", err)
+	}
+	return c.tx.RunInTx(gucCtx, func(txCtx context.Context) error {
 		row.Status = domain.RealmStatusActive
 		row.DisabledAt = nil
-		if err := c.realms.Update(gucCtx, row); err != nil {
+		row.SuspensionSource = nil
+		if err := c.realms.Update(txCtx, row); err != nil {
 			return fmt.Errorf("billing consumer: update tenant_realms: %w", err)
 		}
-	}
-	// Never reached suspended (only cancelled/read-only) -> no Keycloak //nolint:misspell // "cancelled" mirrors O&M's actual enum spelling (frozen contract term)
-	// effect; still record the processed event (§7.1).
-	if err := c.dedup.MarkProcessed(ctx, domain.ConsumerBilling, env.ID); err != nil {
-		return fmt.Errorf("billing consumer: mark processed: %w", err)
-	}
-	return nil
+		if err := c.dedup.MarkProcessed(txCtx, domain.ConsumerBilling, env.ID); err != nil {
+			return fmt.Errorf("billing consumer: mark processed: %w", err)
+		}
+		return nil
+	})
 }

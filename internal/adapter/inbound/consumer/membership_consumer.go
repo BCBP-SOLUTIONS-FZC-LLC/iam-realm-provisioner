@@ -23,23 +23,45 @@ type mfaSyncer interface {
 // TenantRoleGranted, TenantRoleRevoked -> MfaService.SyncRequiresMfa.
 //
 // mfaRequiringLevels/mfaRequiringRoles mirror O&M's vocabulary (§6.5/§8.6).
+//
+// Unlike TenantConsumer and BillingConsumer, this handler's only side effect
+// is a Keycloak realm-role mutation — it writes nothing to Postgres. There
+// is therefore no local write for the processed_events insert to be atomic
+// with. MarkProcessed still goes through TxRunner.RunInTx (matching
+// iam-org-membership) so the insert joins withPool rather than a one-off
+// connection. A crash between the Keycloak call and the mark replays the
+// handler, and SyncRequiresMfa is written as a reconcile (assign-if-absent
+// / revoke-if-present, RP-EVT-6) precisely so replay is a no-op.
 type MembershipConsumer struct {
 	mfa   mfaSyncer
 	dedup port.ProcessedEventsStore
+	tx    port.TxRunner
 	log   port.Logger
 }
 
 // NewMembershipConsumer constructs a MembershipConsumer for
 // membership-realm-q.
-func NewMembershipConsumer(mfa mfaSyncer, dedup port.ProcessedEventsStore, log port.Logger) *MembershipConsumer {
-	return &MembershipConsumer{mfa: mfa, dedup: dedup, log: log}
+func NewMembershipConsumer(mfa mfaSyncer, dedup port.ProcessedEventsStore, tx port.TxRunner, log port.Logger) *MembershipConsumer {
+	return &MembershipConsumer{mfa: mfa, dedup: dedup, tx: tx, log: log}
 }
 
 var mfaRequiringLevels = map[string]bool{"reviewer": true, "approver": true}
 
 // Handle implements events.Handler.
 func (c *MembershipConsumer) Handle(ctx context.Context, env events.Envelope[json.RawMessage]) error {
-	processed, err := c.dedup.IsProcessed(ctx, domain.ConsumerMembership, env.ID)
+	switch env.Type {
+	case domain.EventDepartmentMembershipGranted,
+		domain.EventDepartmentMembershipLevelChanged,
+		domain.EventTenantRoleGranted,
+		domain.EventTenantRoleRevoked:
+	default:
+		if err := ackUnknown(ctx, c.tx, c.dedup, c.log, domain.ConsumerMembership, env); err != nil {
+			return fmt.Errorf("membership consumer: %w", err)
+		}
+		return nil
+	}
+
+	processed, err := skipDuplicate(ctx, c.dedup, domain.ConsumerMembership, env.ID)
 	if err != nil {
 		return fmt.Errorf("membership consumer: check processed_events: %w", err)
 	}
@@ -80,15 +102,12 @@ func (c *MembershipConsumer) Handle(ctx context.Context, env events.Envelope[jso
 			return fmt.Errorf("membership consumer: decode %s: %w", env.Type, err)
 		}
 		handleErr = c.mfa.SyncRequiresMfa(withTenantGUC(ctx, p.TenantID), p.TenantID, p.UserID, false)
-	default:
-		c.log.Warn("membership consumer: no handler for event type — acknowledging", map[string]any{"event_type": env.Type, "event_id": env.ID})
-		return nil
 	}
 	if handleErr != nil {
 		return fmt.Errorf("membership consumer: %s: %w", env.Type, handleErr)
 	}
-	if err := c.dedup.MarkProcessed(ctx, domain.ConsumerMembership, env.ID); err != nil {
-		return fmt.Errorf("membership consumer: mark processed: %w", err)
+	if err := markProcessedInTx(ctx, c.tx, c.dedup, domain.ConsumerMembership, env.ID); err != nil {
+		return fmt.Errorf("membership consumer: %w", err)
 	}
 	return nil
 }

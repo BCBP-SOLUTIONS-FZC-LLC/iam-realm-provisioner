@@ -17,6 +17,10 @@ type TenantRealmRepository interface {
 	// ListExpiredTrials returns shared-trial realms whose trial_ends_at has
 	// passed (RP-C1, idx_tenant_realms_trial_exp), limited to limit rows.
 	ListExpiredTrials(ctx context.Context, limit int) ([]*domain.TenantRealm, error)
+	// ListSuspendedPastRetention returns dedicated realms suspended by the
+	// RP-C3 billing-lapse sweep (never operator suspensions, §8.8) whose
+	// disabled_at is older than retentionDays, limited to limit rows.
+	ListSuspendedPastRetention(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error)
 	// CountsByShard returns the current live dedicated-realm count per
 	// keycloak_shard, read from the local mirror (§9.5 shard placement —
 	// this service is the single writer, so the count is authoritative
@@ -49,7 +53,14 @@ type ReconciliationRepository interface {
 	Insert(ctx context.Context, r *domain.RealmConfigReconciliation) error
 	ListPending(ctx context.Context, limit int) ([]*domain.RealmConfigReconciliation, error)
 	MarkApplied(ctx context.Context, id uuid.UUID) error
-	MarkFailed(ctx context.Context, id uuid.UUID, lastErr string) error
+	// MarkFailed increments id's attempt count and records lastErr,
+	// atomically moving it to the terminal 'failed' status instead of
+	// leaving it 'pending' once the new attempt count reaches maxAttempts
+	// (RP-C4 poison-pill cap, §8.10) — otherwise a permanently-broken
+	// setting would retry every tick forever. Returns the row's resulting
+	// status so the caller can distinguish "still pending, retry next
+	// tick" from "gave up".
+	MarkFailed(ctx context.Context, id uuid.UUID, lastErr string, maxAttempts int) (domain.ReconStatus, error)
 }
 
 // IdempotencyStore implements the `provisioning_operations` ledger (§4.4,
@@ -67,7 +78,14 @@ type IdempotencyStore interface {
 }
 
 // ProcessedEventsStore implements the consumer dedup ledger (§4.5, §7).
+// platform-events has no processed-events API of its own — consumers
+// implement Envelope.ID + INSERT ON CONFLICT DO NOTHING against a local
+// table, matching iam-org-membership's IdempotencyStore.
 type ProcessedEventsStore interface {
 	IsProcessed(ctx context.Context, consumer domain.ProcessedEventsConsumer, eventID string) (bool, error)
 	MarkProcessed(ctx context.Context, consumer domain.ProcessedEventsConsumer, eventID string) error
+	// Prune deletes up to limit rows older than ttlDays (PE-1 / IDEMP-4).
+	// Batched so a backlog larger than one tick converges over several
+	// ticks instead of one unbounded DELETE.
+	Prune(ctx context.Context, ttlDays, limit int) (int, error)
 }

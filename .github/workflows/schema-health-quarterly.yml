@@ -1,0 +1,210 @@
+name: Schema Health Quarterly Review
+# Scheduled review prompt for schema registry health — version accumulation,
+# overdue deprecations, and stale lifecycle annotations, against the shared
+# `iam-tenant-events` Glue registry (LLD §7.3.1).
+#
+# This workflow never mutates anything.  Its only output is a GitHub Step
+# Summary that an operator reads and acts on manually.  Subsequent cleanup
+# actions go through the appropriate dedicated workflows:
+#
+#   schema-prune.yml      — retire orphaned schemas (monthly dry-run + manual execute;
+#                            hard-blocks execute while O&M's TenantCreated/TrialStarted
+#                            are present in the shared registry — see that file's header)
+#   schema-registry.yml   — re-register / validate schemas
+#
+# Lifecycle lint runs schema-gov validate (Pass 4) via the platform-schemagov
+# Docker image — the same check enforced in CI on every push. Pass 4 currently
+# only WARNS (does not fail) for this service: api/asyncapi.yaml carries no
+# x-lifecycle annotations by design (the 9 events were frozen at LLD v1.0
+# sign-off and none has ever needed to evolve past its frozen shape — see
+# ARCHITECTURE.md). Expect "no x-lifecycle annotation" warnings below for all
+# 9 of this service's events; that is the current, intentional state, not a
+# violation to fix.
+#
+# The version-accumulation scan below lists every schema in the registry,
+# including O&M's TenantCreated/TrialStarted — those two rows are informational
+# only; this service has no action to take on schemas it doesn't own.
+#
+# Thresholds (repository variables — override via vars.*):
+#   SCHEMA_VERSIONS_ALERT_THRESHOLD  — Glue version count that flags a schema for
+#                                      compaction review (default: 10)
+#
+# Required environment variables (staging environment):
+#   AWS_REGION                — AWS region
+#   GLUE_REGISTRY_TENANT_NAME — Glue registry name
+#
+# Required environment secrets (staging environment):
+#   AWS_ACCESS_KEY_ID      — IAM key with glue:ListSchemas + glue:ListSchemaVersions
+#   AWS_SECRET_ACCESS_KEY
+
+"on":
+  schedule:
+    - cron: '0 9 1 1,4,7,10 *'   # quarterly: 09:00 UTC on 1 Jan / 1 Apr / 1 Jul / 1 Oct
+  workflow_dispatch:
+    inputs:
+      version_threshold:
+        description: 'Glue version count to flag as compaction candidate (default: 10)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  SCHEMA_GOV_IMAGE: ghcr.io/bcbp-solutions-fzc-llc/platform-schemagov:0.4
+
+jobs:
+  health-review:
+    name: Quarterly schema health review
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+        with:
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Pull schema-gov image
+        run: docker pull "${{ env.SCHEMA_GOV_IMAGE }}"
+
+      # ── 1. Lifecycle lint ────────────────────────────────────────────────────
+      # Runs schema-gov validate (all 8 passes, including Pass 4 lifecycle) via
+      # the platform-schemagov Docker image — the same check enforced in CI on
+      # every push.  Surfaces: overdue retire-after dates, missing annotations,
+      # deprecated schemas without a replacement pointer, enum drift, Draft-07
+      # violations, and AsyncAPI coverage gaps.
+      # Runs unconditionally on a quarterly schedule so the team sees the full
+      # picture even when no schema changes were pushed this quarter.
+      - name: Lifecycle lint
+        id: lifecycle
+        run: |
+          LIFECYCLE_EXIT=0
+          docker run --rm \
+            -v "${{ github.workspace }}":/workspace \
+            -e GITHUB_ACTIONS \
+            "${{ env.SCHEMA_GOV_IMAGE }}" validate \
+            --asyncapi   api/asyncapi.yaml \
+            --schema-dir internal/eventschema \
+            --warn-days  30 \
+            --max-window 180 \
+            2>&1 | tee /tmp/lifecycle-output.txt || LIFECYCLE_EXIT=$?
+          echo "lifecycle_exit=${LIFECYCLE_EXIT}" >> "${GITHUB_OUTPUT}"
+          if [ "${LIFECYCLE_EXIT}" -ne 0 ]; then
+            printf '::warning title=Lifecycle Violations::schema-gov validate reported %d violation(s). Review the Step Summary.\n' \
+              "$(grep -c '✘' /tmp/lifecycle-output.txt 2>/dev/null || echo '?')"
+          fi
+
+      # ── 2. Version accumulation scan ────────────────────────────────────────
+      # Lists every schema in the Glue registry (including O&M's two schemas —
+      # informational only, no action for this service to take on them) and
+      # flags those whose version count exceeds the threshold. High version
+      # counts signal schemas that have been evolving in-place — compaction-
+      # protocol candidates.
+      - name: Version accumulation scan
+        id: version_scan
+        env:
+          REGISTRY_NAME: ${{ vars.GLUE_REGISTRY_TENANT_NAME }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          VERSION_THRESHOLD_INPUT: ${{ inputs.version_threshold }}
+        run: |
+          THRESHOLD="${VERSION_THRESHOLD_INPUT:-${SCHEMA_VERSIONS_ALERT_THRESHOLD:-10}}"
+          echo "  ·  Glue registry: ${REGISTRY_NAME}  threshold: ${THRESHOLD}"
+
+          # List all schemas in the registry — paginate via next-token if needed.
+          SCHEMAS_JSON=$(aws glue list-schemas \
+            --registry-id "RegistryName=${REGISTRY_NAME}" \
+            --region "${AWS_REGION}" \
+            --query 'Schemas[].{name:SchemaName,arn:SchemaArn}' \
+            --output json 2>/dev/null || echo '[]')
+
+          CANDIDATES=""
+          CANDIDATE_COUNT=0
+
+          while IFS='|' read -r _name _arn; do
+            [ -z "${_name}" ] && continue
+            # GetSchema returns LatestSchemaVersion — the total version count.
+            LATEST=$(aws glue get-schema \
+              --schema-id "SchemaArn=${_arn}" \
+              --region "${AWS_REGION}" \
+              --query 'LatestSchemaVersion' \
+              --output text 2>/dev/null || echo 0)
+            if [ "${LATEST:-0}" -gt "${THRESHOLD}" ] 2>/dev/null; then
+              CANDIDATES="${CANDIDATES}  ⚠  ${_name}  v${LATEST}  (threshold: ${THRESHOLD})\n"
+              CANDIDATE_COUNT=$((CANDIDATE_COUNT + 1))
+              printf '::warning title=Version Accumulation::%s has reached Glue version %d (threshold: %d). Consider compaction — see x-version-governance in api/asyncapi.yaml (if %s is one of this service'"'"'s 9 events — TenantCreated/TrialStarted belong to iam-org-membership).\n' \
+                "${_name}" "${LATEST}" "${THRESHOLD}" "${_name}"
+            else
+              printf '  ✔  %-36s  v%s\n' "${_name}" "${LATEST}"
+            fi
+          done < <(echo "${SCHEMAS_JSON}" | jq -r '.[] | "\(.name)|\(.arn)"')
+
+          echo "candidate_count=${CANDIDATE_COUNT}" >> "${GITHUB_OUTPUT}"
+          printf '%s' "${CANDIDATES}" > /tmp/version-candidates.txt
+
+      # ── 3. GitHub Step Summary ───────────────────────────────────────────────
+      - name: Write Step Summary
+        env:
+          REGISTRY_NAME: ${{ vars.GLUE_REGISTRY_TENANT_NAME }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          LIFECYCLE_EXIT: ${{ steps.lifecycle.outputs.lifecycle_exit }}
+          CANDIDATE_COUNT: ${{ steps.version_scan.outputs.candidate_count }}
+        run: |
+          THRESHOLD="${VERSION_THRESHOLD_INPUT:-${SCHEMA_VERSIONS_ALERT_THRESHOLD:-10}}"
+          RUN_DATE=$(date -u +%Y-%m-%d)
+
+          {
+            printf '# Schema Registry Quarterly Health Review — %s\n\n' "${RUN_DATE}"
+            printf '> Registry: `%s` (shared with iam-org-membership) · Region: `%s`\n\n' "${REGISTRY_NAME}" "${AWS_REGION}"
+
+            printf '## 1. Lifecycle annotations\n\n'
+            if [ "${LIFECYCLE_EXIT}" -eq 0 ]; then
+              printf '✅ No lifecycle *errors* — this service currently carries no `x-lifecycle`\n'
+              printf 'annotations at all (frozen event set, LLD v1.0 §25), so expect "no x-lifecycle\n'
+              printf 'annotation" *warnings* for all 9 events in the full output below; that is\n'
+              printf 'intentional, not a regression.\n\n'
+            else
+              printf '❌ **Violations found** — see full output below. Fix before next release.\n\n'
+            fi
+            printf '<details><summary>Full lifecycle lint output</summary>\n\n```\n'
+            cat /tmp/lifecycle-output.txt 2>/dev/null || echo "(no output)"
+            printf '\n```\n</details>\n\n'
+
+            printf '## 2. Version accumulation\n\n'
+            printf '**Threshold:** Glue version > `%s` → compaction candidate\n\n' "${THRESHOLD}"
+            printf '_Includes iam-org-membership'"'"'s TenantCreated/TrialStarted (shared registry) —\n'
+            printf 'informational only; this service takes no action on schemas it does not own._\n\n'
+            if [ "${CANDIDATE_COUNT:-0}" -eq 0 ]; then
+              printf '✅ All schemas are within the version threshold.\n\n'
+            else
+              printf '⚠ **%d schema(s) exceed the version threshold:**\n\n```\n' "${CANDIDATE_COUNT}"
+              cat /tmp/version-candidates.txt 2>/dev/null
+              printf '```\n\n'
+              printf 'For a schema this service owns, follow the compaction discipline in LLD §7.3.1\n'
+              printf '(new Glue schema name + new AsyncAPI message + major version bump). For\n'
+              printf 'TenantCreated/TrialStarted, forward this report to iam-org-membership.\n\n'
+            fi
+
+            printf '## 3. Recommended follow-up actions\n\n'
+            printf '| Priority | Action | Workflow |\n'
+            printf '|----------|--------|----------|\n'
+            if [ "${LIFECYCLE_EXIT}" -ne 0 ]; then
+              printf '| 🔴 High | Fix lifecycle violations (overdue retirements, stale overrides) | Push a fix to `main` — CI Pass 4 enforces |\n'
+            fi
+            if [ "${CANDIDATE_COUNT:-0}" -gt 0 ]; then
+              printf '| 🟡 Medium | Compaction review for version-accumulated schemas this service owns | Follow LLD §7.3.1 schema-evolution rules |\n'
+            fi
+            printf '| 🟢 Low | Orphan cleanup (schemas in Glue with no repo file — excludes TenantCreated/TrialStarted, always blocked) | Trigger `schema-prune.yml` (dry-run first) |\n'
+            printf '| 🟢 Low | Review COLD events — consider deprecating low-activity schemas | Dormant until `PROMETHEUS_URL` is set (`schema-registry.yml` usage-check) |\n'
+
+            printf '\n---\n'
+            printf '_Quarterly watchdog · Run [%s](%s/%s/actions/runs/%s)_\n' \
+              "${GITHUB_RUN_ID}" "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}"
+          } >> "${GITHUB_STEP_SUMMARY}"

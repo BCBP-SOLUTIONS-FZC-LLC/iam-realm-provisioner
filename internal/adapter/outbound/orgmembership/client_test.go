@@ -222,3 +222,167 @@ func TestNew_SetsBaseURLAndLogger(t *testing.T) {
 	assert.Equal(t, "http://om.internal", c.baseURL)
 	require.NotNil(t, c.http)
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// ListLapsedSubscriptions (I-16, RP-C3's suspend-phase trigger) — same
+// shape/branch complexity as HasResidualMFARequirement above, mirrored
+// test-for-test, adapted for the two real differences: this call is
+// deliberately cross-tenant (no :id path segment, and O&M's handler never
+// reads x-tenant-id — it queries its own BYPASSRLS sysPool unconditionally)
+// and has no 404-means-something-benign branch — any 3xx/4xx here is
+// simply an unexpected status.
+//
+// A sentinel uuid.Nil x-tenant-id IS still sent (corrected — a prior version
+// of this client sent no header at all, which O&M's shared gincommon
+// RequireAuth middleware hard-rejects with 401 on every /api/v1 route,
+// unconditionally, with no per-route opt-out; every real poll 401'd until
+// this was caught and fixed). The header carries no real tenant scope —
+// it exists purely to satisfy that platform-wide auth-header contract.
+// ─────────────────────────────────────────────────────────────────────────
+
+func TestListLapsedSubscriptions_RequestShapeAndHeaders(t *testing.T) {
+	var gotPath string
+	var gotHeaders http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"tenants":[]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, noopLogger{})
+	_, err := c.ListLapsedSubscriptions(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, "/api/v1/internal/subscription-lapses", gotPath)
+	assert.Equal(t, "00000000-0000-0000-0000-0000000000a1", gotHeaders.Get("x-user-id"))
+	assert.Equal(t, "iam-system", gotHeaders.Get("x-tenant-roles"))
+	assert.Equal(t, "00000000-0000-0000-0000-000000000000", gotHeaders.Get("x-tenant-id"),
+		"a sentinel nil UUID satisfies O&M's RequireAuth header-presence check — this call carries no real tenant scope")
+}
+
+func TestListLapsedSubscriptions_DecodesMultipleTenants(t *testing.T) {
+	tenantA, tenantB := uuid.New(), uuid.New()
+	cancelledAt := "2026-08-01T00:00:00Z"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, `{"tenants":[
+			{"tenant_id":%q,"realm_id":"kc-a","realm_type":"dedicated","cancelled_at":%q},
+			{"tenant_id":%q,"realm_id":"kc-b","realm_type":"shared","cancelled_at":%q}
+		]}`, tenantA, cancelledAt, tenantB, cancelledAt)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, noopLogger{})
+	got, err := c.ListLapsedSubscriptions(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.Equal(t, tenantA, got[0].TenantID)
+	assert.Equal(t, "kc-a", got[0].RealmID)
+	assert.Equal(t, "dedicated", got[0].RealmType)
+	assert.Equal(t, tenantB, got[1].TenantID)
+	assert.Equal(t, "shared", got[1].RealmType)
+}
+
+func TestListLapsedSubscriptions_EmptyListWhenNoTenantsLapsed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"tenants":[]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, noopLogger{})
+	got, err := c.ListLapsedSubscriptions(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+func TestListLapsedSubscriptions_5xxMapsToOrgMembershipUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, noopLogger{})
+	_, err := c.ListLapsedSubscriptions(context.Background())
+	require.Error(t, err)
+
+	var domErr *domain.Error
+	require.ErrorAs(t, err, &domErr)
+	assert.Equal(t, domain.ErrOrgMembershipUnavailable, domErr.Code)
+	assert.Equal(t, 503, domErr.Status())
+	assert.Equal(t, http.StatusServiceUnavailable, domErr.Details["status"])
+}
+
+func TestListLapsedSubscriptions_TransportErrorMapsToOrgMembershipUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Close() // closed before use: connection refused
+
+	c := New(srv.URL, noopLogger{})
+	_, err := c.ListLapsedSubscriptions(context.Background())
+	require.Error(t, err)
+
+	var domErr *domain.Error
+	require.ErrorAs(t, err, &domErr)
+	assert.Equal(t, domain.ErrOrgMembershipUnavailable, domErr.Code)
+}
+
+func TestListLapsedSubscriptions_UnexpectedStatusReturnsPlainError(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusFound} {
+		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			}))
+			defer srv.Close()
+
+			c := New(srv.URL, noopLogger{})
+			_, err := c.ListLapsedSubscriptions(context.Background())
+			require.Error(t, err)
+			var domErr *domain.Error
+			assert.NotErrorAs(t, err, &domErr, "an unexpected-status error must not be mistaken for the org_membership_unavailable domain error")
+			assert.Contains(t, err.Error(), fmt.Sprintf("unexpected status %d", status))
+		})
+	}
+}
+
+func TestListLapsedSubscriptions_MalformedJSONReturnsDecodeError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`not-json`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, noopLogger{})
+	_, err := c.ListLapsedSubscriptions(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode I-16 response")
+}
+
+func TestListLapsedSubscriptions_MalformedBaseURLFailsRequestConstruction(t *testing.T) {
+	c := New("http://\x7f-invalid-host", noopLogger{})
+	_, err := c.ListLapsedSubscriptions(context.Background())
+	require.Error(t, err)
+}
+
+func TestListLapsedSubscriptions_BodyCloseFailureIsLoggedNotPropagated(t *testing.T) {
+	var warned map[string]any
+	logger := &capturingLogger{warn: func(m map[string]any) { warned = m }}
+
+	c := &Client{
+		baseURL: "http://unused.invalid",
+		log:     logger,
+		http: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       erroringBody{strings.NewReader(`{"tenants":[]}`)},
+			}, nil
+		})},
+	}
+
+	got, err := c.ListLapsedSubscriptions(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	require.NotNil(t, warned, "a Close failure must be logged via Warn")
+	assert.Contains(t, warned["error"], "simulated close failure")
+}

@@ -46,15 +46,16 @@ import (
 	httpadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/inbound/http"
 	eventbusadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/eventbus"
 	keycloakadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/keycloak"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/test/dbseed"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/outbox"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 	pgmigrate "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/migrate"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ── package-level test environment, built once by TestMain ─────────────────
@@ -71,7 +72,7 @@ var (
 	testServer *httptest.Server
 	httpClient = &http.Client{Timeout: 30 * time.Second}
 
-	rawPG *pgxpool.Pool // superuser pool — bypasses RLS, used only for direct-state assertions
+	rawPG *dbseed.Pool // pgcommon-backed superuser pool — bypasses RLS, used only for direct-state assertions
 
 	kcAdmin   *keycloakadapter.Admin
 	kcBaseURL string
@@ -162,7 +163,7 @@ func runE2ESuite(m *testing.M) (int, error) {
 	}
 	defer func() { _ = pgContainer.Terminate(ctx) }()
 
-	rawPG, err = pgxpool.New(ctx, superDSN)
+	rawPG, err = dbseed.New(ctx, superDSN)
 	if err != nil {
 		return 0, fmt.Errorf("connect superuser pool: %w", err)
 	}
@@ -187,8 +188,9 @@ func runE2ESuite(m *testing.M) (int, error) {
 
 	appDSN := appRoleDSN(rawPG, appRolePassword)
 	appPool, err := pgcommon.NewPool(ctx, pgcommon.Config{
-		DSN:         appDSN,
-		GUCProvider: pgcommon.GUCSetFromContext,
+		DSN:           appDSN,
+		PGBouncerMode: false, // testcontainer talks to Postgres directly
+		GUCProvider:   pgcommon.GUCSetFromContext,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("connect app pool: %w", err)
@@ -244,7 +246,7 @@ func runE2ESuite(m *testing.M) (int, error) {
 		tenantRealmRepo, idempotencyRepo, kcAdmin, txRunner, sharedRealm,
 	).WithLogger(noopLogger{})
 	mfaSvc := service.NewMfaService(tenantRealmRepo, kcAdmin, fakeOrgMembership{}).WithLogger(noopLogger{})
-	idpSvc := service.NewIdpService(tenantRealmRepo, idpConfigRepo, idpValidationRepo, newFakeOpenBao(), kcAdmin).WithLogger(noopLogger{})
+	idpSvc := service.NewIdpService(tenantRealmRepo, idpConfigRepo, idpValidationRepo, idempotencyRepo, newFakeOpenBao(), kcAdmin).WithLogger(noopLogger{})
 	realmConfigSvc := service.NewRealmConfigService(tenantRealmRepo, reconRepo, kcAdmin).WithLogger(noopLogger{})
 
 	internalH := httpadapter.NewInternalHandler(provisioningSvc, lifecycleSvc, mfaSvc, idpSvc, realmConfigSvc)
@@ -264,6 +266,10 @@ func runE2ESuite(m *testing.M) (int, error) {
 
 	testServer = httptest.NewServer(router.Handler())
 	defer testServer.Close()
+
+	// NewRouter already primed ObservabilityMiddlewares; Register business
+	// collectors so ProvisionTrial/etc. can increment them.
+	metrics.Register()
 
 	return m.Run(), nil
 }
@@ -299,7 +305,7 @@ func startPostgresContainer(ctx context.Context) (*tcpostgres.PostgresContainer,
 	return nil, "", err
 }
 
-func appRoleDSN(rawPool *pgxpool.Pool, password string) string {
+func appRoleDSN(rawPool *dbseed.Pool, password string) string {
 	cfg := rawPool.Config().ConnConfig
 	return fmt.Sprintf("postgres://realm_provisioner_app:%s@%s:%d/%s?sslmode=disable",
 		password, cfg.Host, cfg.Port, cfg.Database)

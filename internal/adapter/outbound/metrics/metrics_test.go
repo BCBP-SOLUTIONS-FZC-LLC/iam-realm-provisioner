@@ -1,65 +1,135 @@
 package metrics
 
 import (
+	"os"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 )
 
-// TestRegister_RegistersAllSeventeenInstrumentsOnce exercises Register
-// against a real registry once (registered instruments are process-global
-// vars, so a second MustRegister of the same collector would panic — see
-// TestRegister_SecondCallPanics below, which documents that the "call once
-// at process startup" doc comment is a discipline, not enforced idempotency).
-func TestRegister_RegistersAllSeventeenInstrumentsOnce(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	collectors := allCollectors()
-	require.Len(t, collectors, 17, "test fixture must track every documented iam_realm_provisioner_* instrument")
-	seen := map[string]bool{}
-	for _, c := range collectors {
-		require.NoError(t, reg.Register(c), "each instrument must register without a name/descriptor collision")
-		ch := make(chan *prometheus.Desc, 1)
-		c.Describe(ch)
-		close(ch)
-		for d := range ch {
-			assert.False(t, seen[d.String()], "duplicate metric descriptor: %s", d)
-			seen[d.String()] = true
+func TestMain(m *testing.M) {
+	// ObservabilityMiddlewares is gincommon's public metrics-init API.
+	// Call it before Register() so collectors pick up {service, version}
+	// const labels and land on gincommon's registerer — the same order
+	// cmd/server/main.go uses.
+	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{
+		ServiceName:  "iam-realm-provisioner",
+		BuildVersion: "test",
+	})
+	os.Exit(m.Run())
+}
+
+func ensureRegistered(t testing.TB) {
+	t.Helper()
+	Register()
+}
+
+func TestRegister_SucceedsAndPopulatesAllVars(t *testing.T) {
+	ensureRegistered(t)
+
+	assert.NotNil(t, ProvisionTotal)
+	assert.NotNil(t, UsersMigratedTotal)
+	assert.NotNil(t, RealmActiveGauge)
+	assert.NotNil(t, KeycloakCallDuration)
+	assert.NotNil(t, KeycloakCallFailuresTotal)
+	assert.NotNil(t, AdminTokenRefreshTotal)
+	assert.NotNil(t, IdpValidationTotal)
+	assert.NotNil(t, MfaRoleSyncTotal)
+	assert.NotNil(t, RealmConfigPendingGauge)
+	assert.NotNil(t, TrialExpiryProcessedTotal)
+	assert.NotNil(t, TrialExpiryDeferredTotal)
+	assert.NotNil(t, LapseProcessedTotal)
+	assert.NotNil(t, RealmExportTotal)
+	assert.NotNil(t, UserDeleteTotal)
+	assert.NotNil(t, SessionRevokeTotal)
+	assert.NotNil(t, MfaResetTotal)
+	assert.NotNil(t, TemplateDrift)
+	assert.NotNil(t, RLSViolationsTotal)
+	assert.NotNil(t, UnknownEventAcknowledged)
+	assert.NotNil(t, ProcessedEventsDuplicates)
+}
+
+func TestRegister_IsIdempotent(t *testing.T) {
+	ensureRegistered(t)
+	assert.NotPanics(t, func() { Register() })
+}
+
+func TestRegister_LandsOnGincommonRegisterer(t *testing.T) {
+	ensureRegistered(t)
+
+	ProvisionTotal.WithLabelValues("trial", "success").Inc()
+	KeycloakCallDuration.WithLabelValues("create_realm").Observe(0.01)
+
+	families, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	names := make(map[string]bool, len(families))
+	for _, f := range families {
+		names[f.GetName()] = true
+	}
+	assert.True(t, names[prefix+"provision_total"], "collectors must land on gincommon's registerer (DefaultRegisterer after ObservabilityMiddlewares)")
+	assert.True(t, names[prefix+"keycloak_call_duration_seconds"])
+}
+
+func TestRegister_AppliesGincommonConstLabels(t *testing.T) {
+	ensureRegistered(t)
+
+	got := gincommonLabels()
+	want := gincommon.MetricsConstLabels()
+	assert.Equal(t, want, got)
+	assert.Equal(t, "iam-realm-provisioner", got["service"])
+	assert.Equal(t, "test", got["version"])
+
+	ProvisionTotal.WithLabelValues("trial", "success").Inc()
+	families, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+
+	var found bool
+	for _, f := range families {
+		if f.GetName() != prefix+"provision_total" {
+			continue
+		}
+		found = true
+		require.NotEmpty(t, f.GetMetric())
+		labels := map[string]string{}
+		for _, lp := range f.GetMetric()[0].GetLabel() {
+			labels[lp.GetName()] = lp.GetValue()
+		}
+		assert.Equal(t, "iam-realm-provisioner", labels["service"])
+		assert.Equal(t, "test", labels["version"])
+	}
+	assert.True(t, found, prefix+"provision_total must be gathered")
+}
+
+func TestPreseededRLSLabelsPresent(t *testing.T) {
+	ensureRegistered(t)
+
+	gathered, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+
+	var rlsMf *dto.MetricFamily
+	for _, mf := range gathered {
+		if mf.GetName() == prefix+"rls_violations_total" {
+			rlsMf = mf
+			break
 		}
 	}
-}
+	require.NotNil(t, rlsMf, prefix+"rls_violations_total must be gathered")
 
-// TestRegister_AgainstDefaultRegistryPanicsOnRepeat pins down that Register
-// itself wires into prometheus.DefaultRegisterer and that calling it twice
-// (e.g. from two composition roots in one process) panics rather than
-// silently no-op'ing, despite the doc comment's "idempotent-safe" claim.
-func TestRegister_AgainstDefaultRegistryPanicsOnRepeat(t *testing.T) {
-	Register()
-	assert.Panics(t, Register)
-}
-
-func allCollectors() []prometheus.Collector {
-	return []prometheus.Collector{
-		ProvisionTotal,
-		UsersMigratedTotal,
-		RealmActiveGauge,
-		KeycloakCallDuration,
-		KeycloakCallFailuresTotal,
-		AdminTokenRefreshTotal,
-		IdpValidationTotal,
-		MfaRoleSyncTotal,
-		RealmConfigPendingGauge,
-		TrialExpiryProcessedTotal,
-		TrialExpiryDeferredTotal,
-		LapseProcessedTotal,
-		RealmExportTotal,
-		UserDeleteTotal,
-		SessionRevokeTotal,
-		MfaResetTotal,
-		TemplateDrift,
+	seenTypes := map[string]bool{}
+	for _, m := range rlsMf.GetMetric() {
+		for _, lp := range m.GetLabel() {
+			if lp.GetName() == "violation_type" {
+				seenTypes[lp.GetValue()] = true
+			}
+		}
 	}
+	assert.True(t, seenTypes["missing_or_invalid_guc"])
+	assert.True(t, seenTypes["cross_tenant_access"])
 }
 
 func counterValue(t *testing.T, c prometheus.Counter) float64 {
@@ -86,6 +156,7 @@ func histogramSample(t *testing.T, o prometheus.Observer) *dto.Histogram {
 }
 
 func TestProvisionTotal_IncrementsByKindAndResultLabels(t *testing.T) {
+	ensureRegistered(t)
 	ProvisionTotal.Reset()
 	ProvisionTotal.WithLabelValues("trial", "success").Inc()
 	ProvisionTotal.WithLabelValues("trial", "success").Inc()
@@ -97,12 +168,14 @@ func TestProvisionTotal_IncrementsByKindAndResultLabels(t *testing.T) {
 }
 
 func TestUsersMigratedTotal_AddsCumulativeCount(t *testing.T) {
+	ensureRegistered(t)
 	before := counterValue(t, UsersMigratedTotal)
 	UsersMigratedTotal.Add(7)
 	assert.Equal(t, before+7, counterValue(t, UsersMigratedTotal))
 }
 
 func TestRealmActiveGauge_SetByStrategyLabel(t *testing.T) {
+	ensureRegistered(t)
 	RealmActiveGauge.Reset()
 	RealmActiveGauge.WithLabelValues("shared").Set(3)
 	RealmActiveGauge.WithLabelValues("dedicated").Set(11)
@@ -112,6 +185,7 @@ func TestRealmActiveGauge_SetByStrategyLabel(t *testing.T) {
 }
 
 func TestKeycloakCallDuration_ObservesByOpLabel(t *testing.T) {
+	ensureRegistered(t)
 	KeycloakCallDuration.Reset()
 	KeycloakCallDuration.WithLabelValues("create_realm").Observe(0.25)
 	KeycloakCallDuration.WithLabelValues("create_realm").Observe(0.75)
@@ -122,12 +196,14 @@ func TestKeycloakCallDuration_ObservesByOpLabel(t *testing.T) {
 }
 
 func TestKeycloakCallFailuresTotal_IncrementsByOpLabel(t *testing.T) {
+	ensureRegistered(t)
 	KeycloakCallFailuresTotal.Reset()
 	KeycloakCallFailuresTotal.WithLabelValues("migrate_user").Inc()
 	assert.Equal(t, float64(1), counterValue(t, KeycloakCallFailuresTotal.WithLabelValues("migrate_user")))
 }
 
 func TestAdminTokenRefreshTotal_IncrementsByTriggerLabel(t *testing.T) {
+	ensureRegistered(t)
 	AdminTokenRefreshTotal.Reset()
 	AdminTokenRefreshTotal.WithLabelValues("proactive").Inc()
 	AdminTokenRefreshTotal.WithLabelValues("401").Inc()
@@ -138,6 +214,7 @@ func TestAdminTokenRefreshTotal_IncrementsByTriggerLabel(t *testing.T) {
 }
 
 func TestIdpValidationTotal_IncrementsByOutcomeLabel(t *testing.T) {
+	ensureRegistered(t)
 	IdpValidationTotal.Reset()
 	IdpValidationTotal.WithLabelValues("warnings_only").Inc()
 	assert.Equal(t, float64(1), counterValue(t, IdpValidationTotal.WithLabelValues("warnings_only")))
@@ -145,6 +222,7 @@ func TestIdpValidationTotal_IncrementsByOutcomeLabel(t *testing.T) {
 }
 
 func TestMfaRoleSyncTotal_IncrementsByActionLabel(t *testing.T) {
+	ensureRegistered(t)
 	MfaRoleSyncTotal.Reset()
 	MfaRoleSyncTotal.WithLabelValues("assign").Inc()
 	MfaRoleSyncTotal.WithLabelValues("revoke").Inc()
@@ -155,6 +233,7 @@ func TestMfaRoleSyncTotal_IncrementsByActionLabel(t *testing.T) {
 }
 
 func TestRealmConfigPendingGauge_Sets(t *testing.T) {
+	ensureRegistered(t)
 	RealmConfigPendingGauge.Set(4)
 	assert.Equal(t, float64(4), gaugeValue(t, RealmConfigPendingGauge))
 	RealmConfigPendingGauge.Set(0)
@@ -162,15 +241,14 @@ func TestRealmConfigPendingGauge_Sets(t *testing.T) {
 }
 
 func TestTrialExpiryProcessedTotal_Increments(t *testing.T) {
+	ensureRegistered(t)
 	before := counterValue(t, TrialExpiryProcessedTotal)
 	TrialExpiryProcessedTotal.Inc()
 	assert.Equal(t, before+1, counterValue(t, TrialExpiryProcessedTotal))
 }
 
-// TestTrialExpiryDeferredTotal_IncrementsOnEveryDefer pins down the
-// operations-doc invariant (§11.1): this counter must increment on every
-// defer, not merely exist, or the "sustained >0" alert can never fire.
 func TestTrialExpiryDeferredTotal_IncrementsOnEveryDefer(t *testing.T) {
+	ensureRegistered(t)
 	before := counterValue(t, TrialExpiryDeferredTotal)
 	TrialExpiryDeferredTotal.Inc()
 	TrialExpiryDeferredTotal.Inc()
@@ -178,6 +256,7 @@ func TestTrialExpiryDeferredTotal_IncrementsOnEveryDefer(t *testing.T) {
 }
 
 func TestLapseProcessedTotal_IncrementsByTransitionLabel(t *testing.T) {
+	ensureRegistered(t)
 	LapseProcessedTotal.Reset()
 	LapseProcessedTotal.WithLabelValues("suspend").Inc()
 	LapseProcessedTotal.WithLabelValues("offboard").Inc()
@@ -187,7 +266,18 @@ func TestLapseProcessedTotal_IncrementsByTransitionLabel(t *testing.T) {
 	assert.Equal(t, float64(2), counterValue(t, LapseProcessedTotal.WithLabelValues("offboard")))
 }
 
+func TestRLSViolationsTotal_IncrementsByViolationTypeLabel(t *testing.T) {
+	ensureRegistered(t)
+	RLSViolationsTotal.Reset()
+	RLSViolationsTotal.WithLabelValues("cross_tenant_access").Add(2)
+	RLSViolationsTotal.WithLabelValues("missing_or_invalid_guc").Inc()
+
+	assert.Equal(t, float64(2), counterValue(t, RLSViolationsTotal.WithLabelValues("cross_tenant_access")))
+	assert.Equal(t, float64(1), counterValue(t, RLSViolationsTotal.WithLabelValues("missing_or_invalid_guc")))
+}
+
 func TestRealmExportTotal_IncrementsByResultLabel(t *testing.T) {
+	ensureRegistered(t)
 	RealmExportTotal.Reset()
 	RealmExportTotal.WithLabelValues("success").Inc()
 	RealmExportTotal.WithLabelValues("fail").Inc()
@@ -197,28 +287,48 @@ func TestRealmExportTotal_IncrementsByResultLabel(t *testing.T) {
 }
 
 func TestUserDeleteTotal_IncrementsByResultLabel(t *testing.T) {
+	ensureRegistered(t)
 	UserDeleteTotal.Reset()
 	UserDeleteTotal.WithLabelValues("success").Inc()
 	assert.Equal(t, float64(1), counterValue(t, UserDeleteTotal.WithLabelValues("success")))
 }
 
 func TestSessionRevokeTotal_IncrementsByResultLabel(t *testing.T) {
+	ensureRegistered(t)
 	SessionRevokeTotal.Reset()
 	SessionRevokeTotal.WithLabelValues("success").Inc()
 	assert.Equal(t, float64(1), counterValue(t, SessionRevokeTotal.WithLabelValues("success")))
 }
 
 func TestMfaResetTotal_IncrementsByResultLabel(t *testing.T) {
+	ensureRegistered(t)
 	MfaResetTotal.Reset()
 	MfaResetTotal.WithLabelValues("failure").Inc()
 	assert.Equal(t, float64(1), counterValue(t, MfaResetTotal.WithLabelValues("failure")))
 }
 
 func TestTemplateDrift_SetsByRealmVersionLabel(t *testing.T) {
+	ensureRegistered(t)
 	TemplateDrift.Reset()
 	TemplateDrift.WithLabelValues("v1").Set(2)
 	TemplateDrift.WithLabelValues("v2").Set(0)
 
 	assert.Equal(t, float64(2), gaugeValue(t, TemplateDrift.WithLabelValues("v1")))
 	assert.Equal(t, float64(0), gaugeValue(t, TemplateDrift.WithLabelValues("v2")))
+}
+
+func TestUnknownEventAcknowledged_IncrementsByTopicAndType(t *testing.T) {
+	ensureRegistered(t)
+	UnknownEventAcknowledged.Reset()
+	UnknownEventAcknowledged.WithLabelValues("membership", "DepartmentMembershipRevoked").Inc()
+	assert.Equal(t, float64(1), counterValue(t, UnknownEventAcknowledged.WithLabelValues("membership", "DepartmentMembershipRevoked")))
+}
+
+func TestProcessedEventsDuplicates_IncrementsByConsumer(t *testing.T) {
+	ensureRegistered(t)
+	ProcessedEventsDuplicates.Reset()
+	ProcessedEventsDuplicates.WithLabelValues("tenant").Inc()
+	ProcessedEventsDuplicates.WithLabelValues("tenant").Inc()
+	assert.Equal(t, float64(2), counterValue(t, ProcessedEventsDuplicates.WithLabelValues("tenant")))
+	assert.Equal(t, float64(0), counterValue(t, ProcessedEventsDuplicates.WithLabelValues("billing")))
 }

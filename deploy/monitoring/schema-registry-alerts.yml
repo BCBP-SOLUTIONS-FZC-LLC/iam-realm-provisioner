@@ -1,0 +1,135 @@
+# Prometheus alerting rules for the Glue Schema Registry CI pipeline
+# (.github/workflows/schema-registry.yml) governing this service's 9 event
+# schemas on the shared `iam-tenant-events` Glue registry (LLD §7.3.1).
+#
+# Metrics are emitted by `schema-gov metrics` (platform-schemagov v0.3.0+) on every
+# workflow run. For continuous time-series, configure a Prometheus Pushgateway and set
+# the PUSHGATEWAY_URL secret in your GitHub environment.
+#
+# These metric names (glue_schema_registry_*, glue_schema_version) are
+# generic to the platform-schemagov tool, not this service's own
+# `iam_realm_provisioner_*`-prefixed application metrics (see
+# deploy/monitoring/app-alerts.yml) — do not confuse the two families.
+#
+# Deploy via PrometheusRule CRD (kube-prometheus-stack) or include in a
+# Prometheus --rule-files directory.
+#
+# Thresholds mirror the defaults in schema-registry.yml's "Emit metrics" step;
+# adjust to match the ORPHAN_ALERT_THRESHOLD / REGISTRATIONS_SPIKE_THRESHOLD
+# repository variables if changed there.
+#
+# Labels
+# ──────
+# All metrics carry:
+#   environment — "staging" | "production"
+#   registry    — value of GLUE_REGISTRY_TENANT_NAME ("iam-tenant-events",
+#                 shared with iam-org-membership — see the orphan-count note below)
+#
+# glue_schema_version additionally carries:
+#   schema — individual schema name (e.g. TenantConverted) — this includes
+#            O&M's TenantCreated/TrialStarted, since they live in the same
+#            registry; alerts on this metric are informational for those two,
+#            not actionable by this service.
+#   status — "created" | "new_version" | "unchanged"
+
+groups:
+  - name: schema_registry
+    rules:
+
+      # ── Breaking change blocked ──────────────────────────────────────────────
+      # The CI diff step already fails the pipeline on breaking changes; this rule
+      # captures the metric trail for ops dashboards and async alerting to Slack /
+      # PagerDuty without relying solely on a failed GitHub Actions run.
+      - alert: SchemaBreakingChangeBlocked
+        expr: glue_schema_registry_breaking_changes_blocked > 0
+        for: 0m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: >-
+            Breaking schema change blocked in {{ $labels.environment }}
+          description: >-
+            {{ $value | humanize }} breaking change(s) were blocked by the CI diff check
+            in Glue registry {{ $labels.registry }} ({{ $labels.environment }}).
+            A developer attempted an incompatible change to one of this service's 9
+            event schemas. Registration was blocked. Follow LLD §7.3.1's
+            schema-evolution rules — a breaking change needs a new Glue schema
+            name, a new AsyncAPI message, and a major version bump.
+
+      # ── Orphan accumulation ──────────────────────────────────────────────────
+      # Orphaned schemas are registered in Glue but have no corresponding file in
+      # internal/eventschema/. They accumulate when schemas are renamed or retired
+      # without being removed from the registry. Default threshold: 5.
+      #
+      # NOTE — shared registry: this count is EXPECTED to be >= 2 at baseline,
+      # because O&M's TenantCreated/TrialStarted will always show up as
+      # "orphaned" by this definition (they have no file in this repo and never
+      # will — see schema-prune.yml's header). Set your alert threshold with
+      # that baseline in mind, or track this service's own orphan count
+      # separately by subtracting 2 before comparing against a tighter bound.
+      - alert: SchemaOrphanCountHigh
+        expr: glue_schema_registry_orphaned_schemas > 5
+        for: 0m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: >-
+            High orphaned schema count in {{ $labels.environment }}
+          description: >-
+            {{ $value | humanize }} schemas are registered in Glue registry
+            {{ $labels.registry }} ({{ $labels.environment }}) but have no
+            corresponding file in internal/eventschema/. Two of these are always
+            expected — O&M's TenantCreated/TrialStarted on the shared registry;
+            do not attempt to prune them (schema-prune.yml hard-blocks this).
+            For any other name, run `make schema-prune` for a dry-run list, or
+            trigger the schema-prune workflow with dry_run=false to archive and
+            remove them (archives to docs/schema-archive/ before deleting).
+
+      # ── Registration spike ───────────────────────────────────────────────────
+      # A normal run registers 1–9 schemas (this service owns 9 total). A spike
+      # suggests a bulk import, schema reset, or misconfiguration. Default
+      # threshold: 10.
+      - alert: SchemaRegistrationSpike
+        expr: glue_schema_registry_registrations_total > 10
+        for: 0m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: >-
+            Unusually high schema registration count in {{ $labels.environment }}
+          description: >-
+            {{ $value | humanize }} schemas were processed in a single registration run
+            for registry {{ $labels.registry }} ({{ $labels.environment }}).
+            This exceeds the expected maximum for this service (9 owned schemas).
+            Verify the changes are intentional — unexpected spikes may indicate a
+            bulk import, schema directory reset, or misconfigured
+            GLUE_REGISTRY_TENANT_NAME (e.g. accidentally pointed at O&M's own
+            registration path).
+
+      # ── Per-schema churn ─────────────────────────────────────────────────────
+      # glue_schema_version holds the current version number per schema.
+      # delta() over 7 days measures how many new versions were registered.
+      # Requires continuous Pushgateway scraping for accurate results; with
+      # infrequent CI-driven pushes the delta window may span fewer data points.
+      # Increase the threshold for schemas expected to evolve frequently.
+      - alert: SchemaVersionChurn
+        expr: delta(glue_schema_version[7d]) > 3
+        for: 0m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: >-
+            Schema {{ $labels.schema }} has churned {{ $value | humanize }} versions in 7d
+          description: >-
+            Schema {{ $labels.schema }} in registry {{ $labels.registry }}
+            ({{ $labels.environment }}) received more than 3 new version registrations
+            in the last 7 days. Frequent incompatible changes require consumer migration
+            work on every cycle. Consider batching schema changes, stabilising the
+            contract, or promoting the schema to a versioned event type
+            (e.g. {{ $labels.schema }} replaced by a new AsyncAPI message per LLD §7.3.1).
+            If {{ $labels.schema }} is TenantCreated or TrialStarted, forward this
+            alert to iam-org-membership — this service does not own that schema.

@@ -1,0 +1,319 @@
+# Periodically prune orphaned (retired) schemas from the shared AWS Glue
+# Schema Registry `iam-tenant-events`.
+#
+# A schema is a prune candidate when it exists in Glue but has no corresponding
+# file in internal/eventschema/ — i.e. it has been retired and its JSON file
+# removed from the repo via the normal lifecycle process.
+#
+# ══════════════════════════════════════════════════════════════════════════
+# SHARED REGISTRY — READ BEFORE TOUCHING THIS FILE
+# ══════════════════════════════════════════════════════════════════════════
+# `iam-tenant-events` is SHARED with iam-org-membership (O&M), which owns two
+# schema names there — `TenantCreated` and `TrialStarted` (LLD §7.3.1). This
+# repo's internal/eventschema/ will NEVER contain a file for either name, so
+# the platform-schemagov `prune` command's orphan detection (Glue schema
+# names minus local file names) will ALWAYS list them as "orphaned". They
+# are not orphaned — they belong to another service and are actively used.
+#
+# platform-schemagov's `prune` command has no `--exclude` flag (checked
+# against the tool's actual 0.4.0 CLI surface — see the note in
+# docs/runbook-schema-registry.md) and `--execute` deletes every candidate
+# it finds, with no way to select a subset. That combination makes it unsafe
+# to ever run `prune --execute` against this registry while either O&M name
+# is present in it — which, by the paragraph above, is always. So this
+# workflow adds a hard guard step, "Guard — exclude O&M-owned shared-registry
+# schemas", immediately before every `--execute` invocation: it lists the
+# registry directly via `aws glue list-schemas` and refuses to proceed
+# (workflow fails) if TenantCreated or TrialStarted is present. Concretely,
+# this means: dry-run reporting works normally (informational only, ignore
+# those two names in the report); --execute is permanently blocked until
+# either O&M's schemas leave this registry or platform-schemagov ships a
+# name-exclusion flag upstream. Do not remove the guard to "unblock" execute.
+#
+# Two modes:
+#   Dry-run (default): lists candidates and version counts. No AWS mutations.
+#   Execute          : archives all version definitions to docs/schema-archive/,
+#                      deletes the schema from Glue, commits the archive files.
+#
+# Archive layout committed to the repo:
+#   docs/schema-archive/
+#     {schema-name}/
+#       _meta.json  — provenance: schema, registry, environment, pruned_at
+#       v1.json     — raw JSON Schema definition as stored in Glue
+#       v2.json
+#       ...
+#
+# Triggers:
+#   schedule (monthly, 1st of month)  → staging dry-run report only
+#   workflow_dispatch                  → staging or production, dry-run or execute
+#
+# Design constraints:
+#   • Production pruning is NEVER scheduled — always requires a deliberate
+#     workflow_dispatch with environment=production. An operator must explicitly
+#     un-check dry_run to perform deletions.
+#   • The schedule produces a monthly candidate report. An operator reviews the
+#     output in the Actions log, then re-triggers manually with dry_run=false
+#     when ready to execute (subject to the shared-registry guard above).
+#   • glue:DeleteSchema is permanent — once deleted, old consumers referencing
+#     a schema version UUID will receive an error from Glue. Only prune schemas
+#     that have been fully retired and all consumers confirmed migrated —
+#     and that this service actually owns (never TenantCreated/TrialStarted).
+#
+# Required GitHub environment secrets (staging / production):
+#   AWS_ACCESS_KEY_ID       — IAM key with glue:ListSchemas, glue:ListSchemaVersions
+#   AWS_SECRET_ACCESS_KEY     (plus glue:GetSchemaVersion + glue:DeleteSchema for execute)
+#
+# Required GitHub environment variables:
+#   AWS_REGION              — e.g. ap-south-1
+#   GLUE_REGISTRY_TENANT_NAME — iam-tenant-events (same registry in every environment
+#                               that shares it with O&M; use the env-specific value your
+#                               platform team provisions, e.g. iam-tenant-events-staging)
+
+name: Schema Registry Prune
+
+"on":
+  schedule:
+    - cron: '0 2 1 * *'    # monthly on the 1st at 02:00 UTC — staging dry-run report
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target registry environment'
+        required: true
+        type: choice
+        options: [staging, production]
+        default: staging
+      dry_run:
+        description: 'Dry run — list candidates only; no deletions or archive commits'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  SCHEMA_GOV_IMAGE: ghcr.io/bcbp-solutions-fzc-llc/platform-schemagov:0.4
+
+jobs:
+  # ── Staging ─────────────────────────────────────────────────────────────────
+  # Triggered by the monthly schedule (always dry-run) or workflow_dispatch
+  # targeting staging (dry-run or execute, per the input).
+  prune-staging:
+    name: Prune schemas → staging
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.environment == 'staging')
+    environment: staging
+    permissions:
+      contents: write    # required by "Commit archived schemas" step (execute mode only)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+        with:
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # Hard-stops before any --execute run if either of O&M's shared-registry
+      # schema names is present. See the file header for why this exists and
+      # why it cannot be replaced with a CLI --exclude flag (none exists).
+      # Only runs when execute mode is actually being requested — dry-run
+      # (including every scheduled run) is read-only and always safe.
+      - name: Guard — exclude O&M-owned shared-registry schemas
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run == false
+        env:
+          REGISTRY_NAME: ${{ vars.GLUE_REGISTRY_TENANT_NAME }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          EXCLUDED=(TenantCreated TrialStarted)
+          # Fail closed on an AWS API error (bad credentials, network blip,
+          # throttling): the old `2>/dev/null || echo ""` swallowed a
+          # failed call into an empty NAMES list, indistinguishable from
+          # "the registry genuinely has neither name" — a transient AWS
+          # hiccup at exactly the moment --execute ran would have printed
+          # "safe to proceed" without ever actually checking. A guard that
+          # can be silently defeated by an API error is not a guard.
+          if ! NAMES=$(aws glue list-schemas \
+              --registry-id "RegistryName=${REGISTRY_NAME}" \
+              --region "${AWS_REGION}" \
+              --query 'Schemas[].SchemaName' --output text); then
+            echo "::error title=Guard check failed::Could not list schemas in registry '${REGISTRY_NAME}' — see the aws CLI error above. Refusing to proceed with --execute: an API/credentials/network failure must never be treated as confirmation that TenantCreated/TrialStarted are absent. Re-run once the AWS call succeeds."
+            exit 1
+          fi
+          BLOCKED=()
+          for n in "${EXCLUDED[@]}"; do
+            case " ${NAMES} " in *" ${n} "*) BLOCKED+=("${n}") ;; esac
+          done
+          if [ "${#BLOCKED[@]}" -gt 0 ]; then
+            echo "::error title=Shared-registry schema(s) present::${BLOCKED[*]} are owned by iam-org-membership on the shared '${REGISTRY_NAME}' registry and would be misidentified as orphans by 'prune --execute' (platform-schemagov has no --exclude flag and --execute deletes every candidate it finds, with no subset selection). Refusing to execute. See docs/runbook-schema-registry.md."
+            exit 1
+          fi
+          echo "  ✔  neither TenantCreated nor TrialStarted present in '${REGISTRY_NAME}' — safe to proceed"
+
+      # Schedule always runs dry-run (generates a monthly candidate report).
+      # workflow_dispatch respects the dry_run input; un-check to execute
+      # (only reachable if the guard step above passed).
+      - name: Prune orphaned schemas
+        env:
+          # Treat any non-false value (including schedule's empty string) as dry-run.
+          IS_SCHEDULE: ${{ github.event_name == 'schedule' }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+        run: |
+          EXECUTE_FLAG=""
+          if [ "${IS_SCHEDULE}" != "true" ] && [ "${DRY_RUN_INPUT}" = "false" ]; then
+            EXECUTE_FLAG="--execute"
+          fi
+          docker run --rm \
+            -v "${{ github.workspace }}":/workspace \
+            -v "${{ runner.temp }}":/tmp \
+            -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
+            -e AWS_REGION="${{ vars.AWS_REGION }}" \
+            -e GITHUB_ACTIONS \
+            "${{ env.SCHEMA_GOV_IMAGE }}" prune \
+            --registry "${{ vars.GLUE_REGISTRY_TENANT_NAME }}" \
+            --env      staging \
+            --output   /tmp/schema-prune-metrics.json \
+            ${EXECUTE_FLAG}
+          echo "::notice title=Shared registry::TenantCreated/TrialStarted above (if listed) are owned by iam-org-membership — expected in dry-run output, never actioned (see the Guard step)."
+
+      # Commit the archive files produced by execute mode.
+      # Skip in dry-run and on schedule (both are read-only).
+      - name: Commit archived schemas
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false }}
+        env:
+          REGISTRY_NAME: ${{ vars.GLUE_REGISTRY_TENANT_NAME }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/schema-archive/
+          if git diff --cached --quiet; then
+            echo "  ·  nothing to commit (no schemas archived — all candidates may have failed)"
+            exit 0
+          fi
+          PRUNED=$(jq -r '.pruned // 0' "${RUNNER_TEMP}/schema-prune-metrics.json" 2>/dev/null || echo 0)
+          ARCHIVED=$(jq -r '.archived // 0' "${RUNNER_TEMP}/schema-prune-metrics.json" 2>/dev/null || echo 0)
+          git commit -m "chore(schema-archive): archive ${PRUNED} retired schema(s), ${ARCHIVED} version(s) from ${REGISTRY_NAME} (staging)"
+          _MAX=3 _i=0
+          while [ "$_i" -lt "$_MAX" ]; do
+            _i=$((_i + 1))
+            if git push origin HEAD; then
+              echo "  ✔  archive committed (attempt ${_i})"
+              break
+            fi
+            if [ "$_i" -ge "$_MAX" ]; then
+              echo "  ⚠  push failed after ${_MAX} attempts" >&2
+              break
+            fi
+            echo "  ⟳  push rejected (attempt ${_i}) — rebasing..."
+            git fetch origin main
+            git rebase origin/main || { git rebase --abort || true; break; }
+          done
+
+  # ── Production ──────────────────────────────────────────────────────────────
+  # NEVER triggered by schedule — only by explicit workflow_dispatch with
+  # environment=production. Defaults to dry_run=true so an operator must
+  # deliberately un-check the dry-run box to perform actual Glue deletions.
+  prune-production:
+    name: Prune schemas → production
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.environment == 'production'
+    environment: production
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+        with:
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # See prune-staging's guard step for why this exists.
+      - name: Guard — exclude O&M-owned shared-registry schemas
+        if: inputs.dry_run == false
+        env:
+          REGISTRY_NAME: ${{ vars.GLUE_REGISTRY_TENANT_NAME }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          EXCLUDED=(TenantCreated TrialStarted)
+          # Fail closed on an AWS API error — see the staging job's guard
+          # step for the full rationale (a silently-swallowed API failure
+          # must never look like "registry confirmed empty").
+          if ! NAMES=$(aws glue list-schemas \
+              --registry-id "RegistryName=${REGISTRY_NAME}" \
+              --region "${AWS_REGION}" \
+              --query 'Schemas[].SchemaName' --output text); then
+            echo "::error title=Guard check failed::Could not list schemas in registry '${REGISTRY_NAME}' — see the aws CLI error above. Refusing to proceed with --execute: an API/credentials/network failure must never be treated as confirmation that TenantCreated/TrialStarted are absent. Re-run once the AWS call succeeds."
+            exit 1
+          fi
+          BLOCKED=()
+          for n in "${EXCLUDED[@]}"; do
+            case " ${NAMES} " in *" ${n} "*) BLOCKED+=("${n}") ;; esac
+          done
+          if [ "${#BLOCKED[@]}" -gt 0 ]; then
+            echo "::error title=Shared-registry schema(s) present::${BLOCKED[*]} are owned by iam-org-membership on the shared '${REGISTRY_NAME}' registry. Refusing to execute. See docs/runbook-schema-registry.md."
+            exit 1
+          fi
+          echo "  ✔  neither TenantCreated nor TrialStarted present in '${REGISTRY_NAME}' — safe to proceed"
+
+      - name: Prune orphaned schemas
+        env:
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+        run: |
+          EXECUTE_FLAG=""
+          [ "${DRY_RUN_INPUT}" = "false" ] && EXECUTE_FLAG="--execute"
+          docker run --rm \
+            -v "${{ github.workspace }}":/workspace \
+            -v "${{ runner.temp }}":/tmp \
+            -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
+            -e AWS_REGION="${{ vars.AWS_REGION }}" \
+            -e GITHUB_ACTIONS \
+            "${{ env.SCHEMA_GOV_IMAGE }}" prune \
+            --registry "${{ vars.GLUE_REGISTRY_TENANT_NAME }}" \
+            --env      production \
+            --output   /tmp/schema-prune-metrics.json \
+            ${EXECUTE_FLAG}
+          echo "::notice title=Shared registry::TenantCreated/TrialStarted above (if listed) are owned by iam-org-membership — expected in dry-run output, never actioned (see the Guard step)."
+
+      - name: Commit archived schemas
+        if: ${{ inputs.dry_run == false }}
+        env:
+          REGISTRY_NAME: ${{ vars.GLUE_REGISTRY_TENANT_NAME }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/schema-archive/
+          if git diff --cached --quiet; then
+            echo "  ·  nothing to commit (no schemas archived)"
+            exit 0
+          fi
+          PRUNED=$(jq -r '.pruned // 0' "${RUNNER_TEMP}/schema-prune-metrics.json" 2>/dev/null || echo 0)
+          ARCHIVED=$(jq -r '.archived // 0' "${RUNNER_TEMP}/schema-prune-metrics.json" 2>/dev/null || echo 0)
+          git commit -m "chore(schema-archive): archive ${PRUNED} retired schema(s), ${ARCHIVED} version(s) from ${REGISTRY_NAME} (production)"
+          _MAX=3 _i=0
+          while [ "$_i" -lt "$_MAX" ]; do
+            _i=$((_i + 1))
+            if git push origin HEAD; then
+              echo "  ✔  archive committed (attempt ${_i})"
+              break
+            fi
+            if [ "$_i" -ge "$_MAX" ]; then
+              echo "  ⚠  push failed after ${_MAX} attempts" >&2
+              break
+            fi
+            echo "  ⟳  push rejected (attempt ${_i}) — rebasing..."
+            git fetch origin main
+            git push origin HEAD:refs/heads/main || { git rebase --abort || true; break; }
+          done

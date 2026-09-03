@@ -14,10 +14,10 @@ import (
 
 	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/test/dbseed"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -325,7 +325,7 @@ func TestTenantRealmRepository(t *testing.T) {
 
 func timePtr(t time.Time) *time.Time { return &t }
 
-func seedExpiredTrial(t testing.TB, ctx context.Context, rawPool *pgxpool.Pool, tenantID uuid.UUID, trialEndsAt time.Time) {
+func seedExpiredTrial(t testing.TB, ctx context.Context, rawPool *dbseed.Pool, tenantID uuid.UUID, trialEndsAt time.Time) {
 	t.Helper()
 	_, err := rawPool.Exec(ctx, `
 		INSERT INTO tenant_realms (tenant_id, realm_name, strategy, status, trial_ends_at)

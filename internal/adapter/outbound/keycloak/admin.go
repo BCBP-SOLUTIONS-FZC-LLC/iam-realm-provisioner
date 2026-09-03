@@ -9,12 +9,16 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/Nerzal/gocloak/v13"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/httpx"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 )
@@ -39,7 +43,7 @@ type Admin struct {
 	tokens *tokenCache
 	cfg    Config
 	log    port.Logger
-	limit  *rateLimiter
+	tracer trace.Tracer
 }
 
 var _ port.KeycloakAdmin = (*Admin)(nil)
@@ -53,19 +57,36 @@ func New(cfg Config, log port.Logger) *Admin {
 		cfg.RateLimitRPS = 20
 	}
 	client := gocloak.NewClient(cfg.BaseURL)
+	tokens := newTokenCache(client, cfg.AdminRealm, cfg.ClientID, cfg.ClientSecret)
+	limiter := newRateLimiter(cfg.RateLimitRPS)
+
+	// gocloak drives resty, which owns its own http.Client — so the
+	// service-wide instrumented transport has to be installed here rather
+	// than passed in, or Keycloak calls would carry no traceparent (§11.3).
+	// rateLimitTransport sits UNDER retryTransport (its base) so every
+	// actual attempt — including retries — is throttled, not just the
+	// first one per outer Admin method call.
+	rc := client.RestyClient()
+	base := rc.GetClient().Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	rc.SetTransport(retryTransport{base: rateLimitTransport{limiter: limiter, base: httpx.NewTransport(unauthorizedTransport{base: base, tokens: tokens})}})
+
 	return &Admin{
 		client: client,
-		tokens: newTokenCache(client, cfg.AdminRealm, cfg.ClientID, cfg.ClientSecret),
+		tokens: tokens,
 		cfg:    cfg,
 		log:    log,
-		limit:  newRateLimiter(cfg.RateLimitRPS),
+		tracer: otel.Tracer(tracerName),
 	}
 }
 
-// token returns a cached admin token, throttled by the client-side rate
-// limiter (§9.4).
+// token returns a cached admin token. Rate limiting happens per actual
+// outbound HTTP request inside the transport chain (rateLimitTransport),
+// not here — a token-cache hit makes no network call and correctly
+// consumes no rate-limit budget.
 func (a *Admin) token(ctx context.Context) (string, error) {
-	a.limit.Wait(ctx)
 	return a.tokens.Token(ctx)
 }
 
@@ -118,7 +139,10 @@ func loadRealmTemplate() (gocloak.RealmRepresentation, error) {
 
 // CreateRealmFromTemplate clones the versioned realm template into a new
 // realm named realmName (RP-3, §12.2).
-func (a *Admin) CreateRealmFromTemplate(ctx context.Context, realmName, _ string) error {
+func (a *Admin) CreateRealmFromTemplate(ctx context.Context, realmName, _ string) (err error) {
+	ctx, done := a.begin(ctx, "create_realm")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return wrapErr("create_realm: token", err)
@@ -197,7 +221,10 @@ func (a *Admin) enableUnmanagedAttributes(ctx context.Context, tok, realmName st
 // RegisterOIDCClients registers the standard OIDC client set (already
 // present on the cloned template, per-tenant redirect URIs scoped to the
 // tenant slug) and returns their client IDs.
-func (a *Admin) RegisterOIDCClients(ctx context.Context, realmName, _ string) ([]string, error) {
+func (a *Admin) RegisterOIDCClients(ctx context.Context, realmName, _ string) (clientIDs []string, err error) {
+	ctx, done := a.begin(ctx, "register_oidc_clients")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return nil, wrapErr("register_oidc_clients: token", err)
@@ -219,7 +246,10 @@ func (a *Admin) RegisterOIDCClients(ctx context.Context, realmName, _ string) ([
 }
 
 // DisableRealm sets realmName's Enabled flag to false, blocking all logins.
-func (a *Admin) DisableRealm(ctx context.Context, realmName string) error {
+func (a *Admin) DisableRealm(ctx context.Context, realmName string) (err error) {
+	ctx, done := a.begin(ctx, "disable_realm")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return wrapErr("disable_realm: token", err)
@@ -231,7 +261,10 @@ func (a *Admin) DisableRealm(ctx context.Context, realmName string) error {
 }
 
 // EnableRealm sets realmName's Enabled flag to true, restoring logins.
-func (a *Admin) EnableRealm(ctx context.Context, realmName string) error {
+func (a *Admin) EnableRealm(ctx context.Context, realmName string) (err error) {
+	ctx, done := a.begin(ctx, "enable_realm")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return wrapErr("enable_realm: token", err)
@@ -247,7 +280,10 @@ func (a *Admin) EnableRealm(ctx context.Context, realmName string) error {
 // v13 has no wrapped `partial-export` endpoint, so this assembles an
 // equivalent document from GetRealm + GetUsers — sufficient for the
 // compliance-retention/DR-restore use case this export exists for.
-func (a *Admin) ExportRealm(ctx context.Context, realmName string) ([]byte, error) {
+func (a *Admin) ExportRealm(ctx context.Context, realmName string) (export []byte, err error) {
+	ctx, done := a.begin(ctx, "export_realm")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return nil, wrapErr("export_realm: token", err)
@@ -288,7 +324,10 @@ func (a *Admin) ExportRealm(ctx context.Context, realmName string) ([]byte, erro
 }
 
 // DeleteRealm permanently deletes realmName.
-func (a *Admin) DeleteRealm(ctx context.Context, realmName string) error {
+func (a *Admin) DeleteRealm(ctx context.Context, realmName string) (err error) {
+	ctx, done := a.begin(ctx, "delete_realm")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return wrapErr("delete_realm: token", err)
@@ -301,7 +340,10 @@ func (a *Admin) DeleteRealm(ctx context.Context, realmName string) error {
 
 // DeleteRealmIfExists is the idempotent compensating-teardown primitive
 // (§9.3) — deleting an absent realm succeeds.
-func (a *Admin) DeleteRealmIfExists(ctx context.Context, realmName string) error {
+func (a *Admin) DeleteRealmIfExists(ctx context.Context, realmName string) (err error) {
+	ctx, done := a.begin(ctx, "delete_realm_if_exists")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return wrapErr("delete_realm_if_exists: token", err)

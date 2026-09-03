@@ -6,11 +6,13 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 )
@@ -20,6 +22,15 @@ import (
 func nowPtr() *time.Time {
 	t := time.Now().UTC()
 	return &t
+}
+
+// outcome maps an operation's error to the frozen `result` label value used
+// by every result-labeled instrument in §11.2.
+func outcome(err error) string {
+	if err != nil {
+		return "failure"
+	}
+	return "success"
 }
 
 // ProvisioningService implements RP-1/RP-2/RP-3/RP-4 (§8.1-8.4).
@@ -113,7 +124,7 @@ type ProvisionTrialResult struct {
 // shared realm, stamp tenant_id, trigger verification email, and emit
 // TrialTenantProvisioned. Keycloak-effect-first, then local commit (§9.1).
 // Idempotent via idempotencyKey (§9.2).
-func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey string, req ProvisionTrialRequest) (*ProvisionTrialResult, error) {
+func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey string, req ProvisionTrialRequest) (out *ProvisionTrialResult, err error) {
 	existing, found, err := s.idempotency.Begin(ctx, idempotencyKey, req.TenantID, domain.OpProvisionTrial)
 	if err != nil {
 		return nil, err
@@ -121,6 +132,9 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 	if found {
 		return replayOrConflict[ProvisionTrialResult](existing)
 	}
+	// Registered past the replay check so an idempotent retry of an
+	// already-succeeded key does not inflate the attempt count.
+	defer func() { metrics.ProvisionTotal.WithLabelValues("trial", outcome(err)).Inc() }()
 
 	kcUserID, err := s.keycloak.CreateTrialUser(ctx, port.CreateUserRequest{
 		Email: req.AdminEmail, FullName: req.AdminName, TenantID: req.TenantID,
@@ -147,7 +161,7 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 		if !ok {
 			return nil
 		}
-		return pub.EnqueueCtx(ctx, &domain.Event{
+		return pub.Enqueue(ctx, &domain.Event{
 			Type: domain.EventTrialTenantProvisioned, TenantID: req.TenantID,
 			Subject: "tenants/" + req.TenantID.String(),
 			Data: domain.TrialTenantProvisionedPayload{
@@ -214,7 +228,7 @@ type ProvisionDirectResult struct {
 // ProvisionDirect implements RP-2 (§8.2): provision the dedicated realm
 // straight away (no shared-realm intermediate), create the admin user, and
 // emit TenantRealmReady + DirectPaidSignup + TenantConverted(direct_signup=true).
-func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKey string, req ProvisionDirectRequest) (*ProvisionDirectResult, error) {
+func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKey string, req ProvisionDirectRequest) (out *ProvisionDirectResult, err error) {
 	existing, found, err := s.idempotency.Begin(ctx, idempotencyKey, req.TenantID, domain.OpProvisionDirect)
 	if err != nil {
 		return nil, err
@@ -222,6 +236,7 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 	if found {
 		return replayOrConflict[ProvisionDirectResult](existing)
 	}
+	defer func() { metrics.ProvisionTotal.WithLabelValues("direct", outcome(err)).Inc() }()
 
 	realmName := dedicatedRealmName(req.TenantSlug)
 	shard, err := s.selectShard(ctx)
@@ -266,7 +281,7 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 		if !ok {
 			return nil
 		}
-		if err := pub.EnqueueCtx(ctx, &domain.Event{
+		if err := pub.Enqueue(ctx, &domain.Event{
 			Type: domain.EventTenantRealmReady, TenantID: req.TenantID,
 			Subject: "tenants/" + req.TenantID.String(),
 			Data: domain.TenantRealmReadyPayload{
@@ -275,7 +290,7 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 		}); err != nil {
 			return err
 		}
-		if err := pub.EnqueueCtx(ctx, &domain.Event{
+		if err := pub.Enqueue(ctx, &domain.Event{
 			Type: domain.EventDirectPaidSignup, TenantID: req.TenantID,
 			Subject: "tenants/" + req.TenantID.String(),
 			Data: domain.DirectPaidSignupPayload{
@@ -288,7 +303,7 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 		if req.BillingSubscriptionID != "" {
 			billingSubID = &req.BillingSubscriptionID
 		}
-		return pub.EnqueueCtx(ctx, &domain.Event{
+		return pub.Enqueue(ctx, &domain.Event{
 			Type: domain.EventTenantConverted, TenantID: req.TenantID,
 			Subject: "tenants/" + req.TenantID.String(),
 			Data: domain.TenantConvertedPayload{
@@ -331,7 +346,7 @@ type ConvertResult struct {
 
 // Convert implements RP-3 (§8.3): trial->paid conversion with user
 // migration. Requires the tenant to currently be `shared` strategy.
-func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string, tenantID uuid.UUID, req ConvertRequest) (*ConvertResult, error) {
+func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string, tenantID uuid.UUID, req ConvertRequest) (out *ConvertResult, err error) {
 	existing, found, err := s.idempotency.Begin(ctx, idempotencyKey, tenantID, domain.OpConvert)
 	if err != nil {
 		return nil, err
@@ -339,6 +354,7 @@ func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string
 	if found {
 		return replayOrConflict[ConvertResult](existing)
 	}
+	defer func() { metrics.ProvisionTotal.WithLabelValues("convert", outcome(err)).Inc() }()
 
 	current, err := s.realms.FindByTenantID(ctx, tenantID)
 	if err != nil {
@@ -354,8 +370,16 @@ func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string
 	// service persists no tenant_slug — see §5.2.1 field disposition); a
 	// caller-visible slug MUST be supplied via the realm-name convention
 	// upstream. Convert's request body carries no slug per §5.2, so this
-	// derives a stable, collision-resistant name from the tenant id.
-	slug := tenantID.String()[:8]
+	// derives a stable name from the tenant id. Uses the FULL uuid, not a
+	// truncated prefix: the realm-name collision below is now treated as
+	// proof of "my own earlier partial attempt" and resumed against
+	// (rather than always a hard error), so an 8-hex-char (32-bit) prefix
+	// would let two different tenants collide onto the same realm at
+	// large-enough scale and have the second tenant's users migrated into
+	// the first tenant's realm — a tenant-isolation violation. The full
+	// UUID carries the same 128 bits of collision resistance this service
+	// already relies on for tenant-id uniqueness itself.
+	slug := tenantID.String()
 	realmName := dedicatedRealmName(slug)
 	shard, err := s.selectShard(ctx)
 	if err != nil {
@@ -363,20 +387,47 @@ func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string
 		return nil, err
 	}
 
+	// realmMayHaveMigratedUsers gates every compensating teardown below
+	// (§9.3): MigrateUser deletes each user from the source realm before
+	// creating it in the target, so once this is true, realmName holds
+	// users that no longer exist anywhere else — deleting the realm at
+	// that point would destroy them permanently, not just roll back this
+	// attempt. It is set once, either because CreateRealmFromTemplate's
+	// conflict proves an earlier attempt already migrated users into this
+	// same realm (see below), or because this attempt migrates one itself.
+	realmMayHaveMigratedUsers := false
+
 	if err := s.keycloak.CreateRealmFromTemplate(ctx, realmName, "v1"); err != nil {
-		s.failIdempotency(ctx, idempotencyKey)
-		return nil, err
+		var domainErr *domain.Error
+		if !errors.As(err, &domainErr) || domainErr.Code != domain.ErrRealmAlreadyDedicated {
+			s.failIdempotency(ctx, idempotencyKey)
+			return nil, err
+		}
+		// realmName is deterministic per tenant (dedicatedRealmName), and
+		// current.Strategy read above is still shared, so this conflict
+		// cannot be a different tenant's realm — it can only be this
+		// tenant's own earlier attempt that got partway through this same
+		// Convert call before failing. Given the teardown gating below, the
+		// only way an earlier attempt can have left the realm behind on
+		// failure is if it had already migrated at least one user into it,
+		// so resuming here must treat the realm as unsafe to delete too.
+		realmMayHaveMigratedUsers = true
+		s.log.WarnContext(ctx, "convert: target realm already exists, resuming a prior partial attempt", "tenant_id", tenantID, "realm", realmName)
 	}
 	clients, err := s.keycloak.RegisterOIDCClients(ctx, realmName, slug)
 	if err != nil {
-		s.bestEffortDeleteRealm(ctx, realmName)
+		if !realmMayHaveMigratedUsers {
+			s.bestEffortDeleteRealm(ctx, realmName)
+		}
 		s.failIdempotency(ctx, idempotencyKey)
 		return nil, domain.NewError(domain.ErrConversionFailed, "register oidc clients failed").WithDetails(map[string]any{"error": err.Error()})
 	}
 
 	sourceUsers, err := s.keycloak.ListUsersByTenant(ctx, current.RealmName, tenantID)
 	if err != nil {
-		s.bestEffortDeleteRealm(ctx, realmName)
+		if !realmMayHaveMigratedUsers {
+			s.bestEffortDeleteRealm(ctx, realmName)
+		}
 		s.failIdempotency(ctx, idempotencyKey)
 		return nil, domain.NewError(domain.ErrConversionFailed, "list trial users failed").WithDetails(map[string]any{"error": err.Error()})
 	}
@@ -385,21 +436,24 @@ func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string
 	for _, uid := range sourceUsers {
 		reenroll, err := s.keycloak.MigrateUser(ctx, current.RealmName, realmName, uid)
 		if err != nil {
-			// Compensating teardown (§9.3): the new dedicated realm is
-			// deleted — the shared realm is untouched (users already
-			// migrated in this loop were deleted from the source as part
-			// of MigrateUser's own semantics; a retry with the same
-			// Idempotency-Key re-lists whatever remains in the shared
-			// realm and continues, since this is a fresh FindByTenantID
-			// + ListUsersByTenant on every attempt).
-			s.bestEffortDeleteRealm(ctx, realmName)
+			// Leave the partially-populated realm in place instead of
+			// tearing it down whenever realmMayHaveMigratedUsers; a retry
+			// with the same Idempotency-Key hits the ErrRealmAlreadyDedicated
+			// branch above, resumes against it, and a fresh
+			// ListUsersByTenant naturally picks up only whatever remains
+			// in the shared realm.
+			if !realmMayHaveMigratedUsers {
+				s.bestEffortDeleteRealm(ctx, realmName)
+			}
 			s.failIdempotency(ctx, idempotencyKey)
 			return nil, domain.NewError(domain.ErrConversionFailed, "migrate user failed").WithDetails(map[string]any{"error": err.Error(), "keycloak_user_id": uid})
 		}
+		realmMayHaveMigratedUsers = true
 		if reenroll {
 			webauthnReenroll++
 		}
 	}
+	metrics.UsersMigratedTotal.Add(float64(len(sourceUsers)))
 
 	if err := s.keycloak.ForceLogoutRealm(ctx, current.RealmName); err != nil {
 		s.log.WarnContext(ctx, "convert: force_logout_realm failed (non-fatal, sessions expire naturally)", "tenant_id", tenantID, "error", err.Error())
@@ -424,7 +478,7 @@ func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string
 		if !ok {
 			return nil
 		}
-		if err := pub.EnqueueCtx(ctx, &domain.Event{
+		if err := pub.Enqueue(ctx, &domain.Event{
 			Type: domain.EventTenantRealmReady, TenantID: tenantID,
 			Subject: "tenants/" + tenantID.String(),
 			Data: domain.TenantRealmReadyPayload{
@@ -437,7 +491,7 @@ func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string
 		if req.BillingSubscriptionID != "" {
 			billingSubID = &req.BillingSubscriptionID
 		}
-		return pub.EnqueueCtx(ctx, &domain.Event{
+		return pub.Enqueue(ctx, &domain.Event{
 			Type: domain.EventTenantConverted, TenantID: tenantID,
 			Subject: "tenants/" + tenantID.String(),
 			Data: domain.TenantConvertedPayload{
@@ -515,7 +569,7 @@ type RevertConversionResult struct {
 // Convert — recreates the tenant in the shared trial realm (extended trial
 // expiry), migrates users back, and tears down the dedicated realm. Beyond
 // the window, returns 409 revert_window_expired (late reversion is an
-// operator runbook, §22).
+// operator runbook, §24).
 func (s *ProvisioningService) RevertConversion(ctx context.Context, idempotencyKey string, tenantID uuid.UUID, _ string, revertWindowDays, newTrialDurationDays int) (*RevertConversionResult, error) {
 	existing, found, err := s.idempotency.Begin(ctx, idempotencyKey, tenantID, domain.OpRevertConversion)
 	if err != nil {
@@ -547,18 +601,32 @@ func (s *ProvisioningService) RevertConversion(ctx context.Context, idempotencyK
 	dedicatedRealm := current.RealmName
 	sourceUsers, err := s.keycloak.ListUsersByTenant(ctx, dedicatedRealm, tenantID)
 	if err != nil {
-		s.failIdempotency(ctx, idempotencyKey)
-		return nil, domain.NewError(domain.ErrConversionFailed, "list dedicated-realm users failed").WithDetails(map[string]any{"error": err.Error()})
-	}
-	for _, uid := range sourceUsers {
-		if _, err := s.keycloak.MigrateUser(ctx, dedicatedRealm, s.sharedRealm, uid); err != nil {
+		var de *domain.Error
+		if errors.As(err, &de) && de.Code == domain.ErrTenantRealmNotFound {
+			// The dedicated realm no longer exists in Keycloak, even
+			// though the local row (current, read above) still says
+			// Strategy=dedicated — this can only mean an earlier attempt
+			// with this same Idempotency-Key already migrated every user
+			// and deleted the realm (§9.1: Keycloak-effect-first) but
+			// failed before the local commit below landed. There is
+			// nothing left to migrate or delete; resume straight to
+			// fixing up the local row.
+			s.log.WarnContext(ctx, "revert_conversion: dedicated realm already gone, resuming a prior partial attempt", "tenant_id", tenantID, "realm", dedicatedRealm)
+		} else {
 			s.failIdempotency(ctx, idempotencyKey)
-			return nil, domain.NewError(domain.ErrConversionFailed, "migrate user back to shared realm failed").WithDetails(map[string]any{"error": err.Error(), "keycloak_user_id": uid})
+			return nil, domain.NewError(domain.ErrConversionFailed, "list dedicated-realm users failed").WithDetails(map[string]any{"error": err.Error()})
 		}
-	}
-	if err := s.keycloak.DeleteRealmIfExists(ctx, dedicatedRealm); err != nil {
-		s.failIdempotency(ctx, idempotencyKey)
-		return nil, err
+	} else {
+		for _, uid := range sourceUsers {
+			if _, err := s.keycloak.MigrateUser(ctx, dedicatedRealm, s.sharedRealm, uid); err != nil {
+				s.failIdempotency(ctx, idempotencyKey)
+				return nil, domain.NewError(domain.ErrConversionFailed, "migrate user back to shared realm failed").WithDetails(map[string]any{"error": err.Error(), "keycloak_user_id": uid})
+			}
+		}
+		if err := s.keycloak.DeleteRealmIfExists(ctx, dedicatedRealm); err != nil {
+			s.failIdempotency(ctx, idempotencyKey)
+			return nil, err
+		}
 	}
 
 	result := &RevertConversionResult{TenantID: tenantID, Realm: s.sharedRealm, Strategy: string(domain.RealmStrategyShared)}
@@ -577,7 +645,7 @@ func (s *ProvisioningService) RevertConversion(ctx context.Context, idempotencyK
 		if !ok {
 			return nil
 		}
-		return pub.EnqueueCtx(ctx, &domain.Event{
+		return pub.Enqueue(ctx, &domain.Event{
 			Type: domain.EventTrialReactivated, TenantID: tenantID,
 			Data: domain.TrialReactivatedPayload{TenantID: tenantID, NewTrialEndsAt: newTrialEndsAt.Format(time.RFC3339)},
 		})

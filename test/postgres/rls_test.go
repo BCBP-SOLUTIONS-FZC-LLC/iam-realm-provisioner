@@ -16,12 +16,12 @@ import (
 	"time"
 
 	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/test/dbseed"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/outbox"
 	pgmigrate "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/migrate"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -43,9 +43,9 @@ const (
 //	appPool — pgcommon.Pool bound as realm_provisioner_app, RLS enforced,
 //	          GUC-provider wired so `SET LOCAL app.tenant_id` fires on
 //	          every checkout (mirrors production, RLS-6).
-//	rawPool — raw pgxpool bound as postgres superuser, used only to seed
+//	rawPool — dbseed.Pool (pgcommon-backed superuser) used only to seed
 //	          rows (bypasses RLS naturally).
-func setupTestDB(t testing.TB) (appPool *pgcommon.Pool, rawPool *pgxpool.Pool) {
+func setupTestDB(t testing.TB) (appPool *pgcommon.Pool, rawPool *dbseed.Pool) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping postgres integration test in short mode")
@@ -81,7 +81,7 @@ func setupTestDB(t testing.TB) (appPool *pgcommon.Pool, rawPool *pgxpool.Pool) {
 	require.NoError(t, err, "postgres testcontainer failed after %d attempts", maxContainerAttempts)
 	t.Cleanup(func() { _ = pgContainer.Terminate(ctx) })
 
-	rawPool, err = pgxpool.New(ctx, superDSN)
+	rawPool, err = dbseed.New(ctx, superDSN)
 	require.NoError(t, err)
 	t.Cleanup(rawPool.Close)
 
@@ -99,8 +99,9 @@ func setupTestDB(t testing.TB) (appPool *pgcommon.Pool, rawPool *pgxpool.Pool) {
 
 	appDSN := strings.Replace(superDSN, "postgres:testpassword@", "realm_provisioner_app:"+appRolePassword+"@", 1)
 	appPool, err = pgcommon.NewPool(ctx, pgcommon.Config{
-		DSN:         appDSN,
-		GUCProvider: pgcommon.GUCSetFromContext,
+		DSN:           appDSN,
+		PGBouncerMode: false, // testcontainer talks to Postgres directly
+		GUCProvider:   pgcommon.GUCSetFromContext,
 	})
 	require.NoError(t, err)
 	t.Cleanup(appPool.Close)
@@ -118,7 +119,7 @@ func withTenant(ctx context.Context, tenantID uuid.UUID) context.Context {
 
 // seedTenantRealm inserts a tenant_realms row via the superuser pool
 // (bypasses RLS).
-func seedTenantRealm(t testing.TB, ctx context.Context, rawPool *pgxpool.Pool, tenantID uuid.UUID) {
+func seedTenantRealm(t testing.TB, ctx context.Context, rawPool *dbseed.Pool, tenantID uuid.UUID) {
 	t.Helper()
 	_, err := rawPool.Exec(ctx, `
 		INSERT INTO tenant_realms (tenant_id, realm_name, strategy, status)
@@ -163,13 +164,13 @@ func TestRLS_EveryTenantScopedTableEnabled(t *testing.T) {
 	assert.False(t, bypass, "realm_provisioner_app must NOT hold BYPASSRLS")
 }
 
-// outbox_events / processed_events are RLS-exempt (§4.5).
+// outbox_events / processed_events / exporter_watermarks are RLS-exempt (§4.5).
 func TestRLS_OperationalTablesExempt(t *testing.T) {
 	t.Parallel()
 	_, rawPool := setupTestDB(t)
 	ctx := context.Background()
 
-	for _, tbl := range []string{"outbox_events", "processed_events"} {
+	for _, tbl := range []string{"outbox_events", "processed_events", "exporter_watermarks"} {
 		var rls, force bool
 		err := rawPool.QueryRow(ctx, `
 			SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = $1`, tbl).Scan(&rls, &force)
@@ -324,7 +325,7 @@ func TestRLS_Case5_NoGUCLeakageAcrossPooledConnection(t *testing.T) {
 	assert.Equal(t, 0, noGUCCount, "no-GUC checkout on a reused backend must still fail closed")
 }
 
-func connStringForApp(t testing.TB, rawPool *pgxpool.Pool) string {
+func connStringForApp(t testing.TB, rawPool *dbseed.Pool) string {
 	t.Helper()
 	cfg := rawPool.Config().ConnConfig
 	return fmt.Sprintf("postgres://realm_provisioner_app:%s@%s:%d/%s?sslmode=disable",

@@ -1,0 +1,274 @@
+name: Schema Freeze Watchdog
+# Companion to this repo's own schema-registry.yml (SCHEMA_FREEZE gate) /
+# schema-prune.yml / schema-health-quarterly.yml. Modeled verbatim on
+# iam-user-profile's workflow of the same name — its SCHEMA_FREEZE variable
+# name and staging/production GitHub Environment names already match this
+# repo's schema-registry.yml exactly (verified directly against it; this
+# repo's own vars.GLUE_REGISTRY_TENANT_NAME is not referenced by this
+# watchdog either way, since it only ever inspects SCHEMA_FREEZE).
+#
+# Runs daily and alerts when SCHEMA_FREEZE has been active longer than
+# FREEZE_MAX_HOURS.  A forgotten freeze silently blocks all schema registration
+# without surfacing any CI failure — this workflow is the only async guard.
+# Daily (rather than every 4h) trades detection latency (up to ~24h instead of
+# ~4h) for a large cut in billed cron minutes; kept daily rather than weekly so
+# the warn_hours=24 tier still has a chance to fire before fail_hours=72.
+#
+# staging and production are checked sequentially in one job (not a matrix)
+# to halve the billed job count — this is a background cron check with no
+# per-environment parallelism benefit worth paying two job-minutes for.
+#
+# Alert mechanism: three-tier escalation + GitHub Step Summary.
+# Add SLACK_WEBHOOK_URL to the repository secrets for Slack escalation.
+#
+# Required GitHub repository secret (for Step Summary write access):
+#   GITHUB_TOKEN  — automatically available in all workflow runs
+#
+# Optional GitHub environment variables (checked per environment):
+#   SCHEMA_FREEZE  — "true" when the freeze is active
+#
+# Thresholds (overridable via workflow_dispatch inputs):
+#   warn_hours (default: 24h) — ::warning emitted; exit 0
+#   fail_hours (default: 72h) — ::error emitted;   exit 1
+#
+# Exit behaviour (per environment; job fails if ANY environment hits fail_hours):
+#   freeze absent             → exit 0 (quiet)
+#   freeze active < warn_hours → exit 0 with note in Step Summary
+#   freeze active ≥ warn_hours → exit 0 with ::warning and Step Summary
+#   freeze active ≥ fail_hours → job exit 1 with ::error and Step Summary (triggers GitHub notification)
+
+on:
+  schedule:
+    - cron: '0 9 * * *'   # daily at 09:00 UTC — catches forgotten freezes within ~24h
+  workflow_dispatch:
+    inputs:
+      warn_hours:
+        description: 'Hours before ::warning is emitted (default: 24)'
+        required: false
+        default: ''
+      fail_hours:
+        description: 'Hours before ::error + exit 1 is triggered (default: 72)'
+        required: false
+        default: ''
+
+permissions:
+  actions: read   # required to query environment variables via GitHub API
+  contents: read
+
+jobs:
+  check-freeze:
+    name: Schema Freeze Watchdog
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate freeze age (staging + production)
+        id: evaluate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          # workflow_dispatch inputs > environment variable > defaults
+          WARN_HOURS_INPUT: ${{ inputs.warn_hours }}
+          FAIL_HOURS_INPUT: ${{ inputs.fail_hours }}
+        run: |
+          WARN_HOURS="${WARN_HOURS_INPUT:-24}"
+          FAIL_HOURS="${FAIL_HOURS_INPUT:-72}"
+
+          OVERALL_EXIT=0
+          CRITICAL_ENVS=""
+          # Separate from CRITICAL_ENVS: an environment whose GitHub API
+          # check itself failed (as opposed to one with a confirmed stale
+          # freeze) — kept distinct so the Slack message never claims a
+          # freeze is stale when the real problem is "couldn't check."
+          CHECK_FAILED_ENVS=""
+
+          # query_variable prints the raw JSON body on success. A genuine
+          # 404 (variable never set — gh prints "HTTP 404" to stderr) is
+          # the only case that legitimately means "no freeze": it echoes
+          # '{}' for that case. Any OTHER failure (network error, expired
+          # token, permissions, rate limiting) must not collapse to the
+          # same '{}' — this watchdog bills itself as "the only async
+          # guard" against a forgotten freeze, so an API failure that
+          # happens to coincide with a real active freeze must be surfaced
+          # as a check failure, never silently read as "all clear."
+          query_variable() {
+            local url="$1" stderr_file body
+            stderr_file=$(mktemp)
+            if body=$(gh api "$url" 2>"$stderr_file"); then
+              rm -f "$stderr_file"
+              printf '%s' "$body"
+              return 0
+            fi
+            if grep -q "HTTP 404" "$stderr_file"; then
+              rm -f "$stderr_file"
+              printf '{}'
+              return 0
+            fi
+            echo "::error title=Freeze Watchdog check failed::Could not query ${url}: $(cat "$stderr_file")" >&2
+            rm -f "$stderr_file"
+            return 1
+          }
+
+          for ENVIRONMENT in staging production; do
+            echo "::group::${ENVIRONMENT}"
+
+            # ── Query GitHub API for the environment-level variable ───────────────
+            # Querying environment-level first (most specific), then repo-level.
+            # API returns {value, updated_at} when the variable exists; {} on 404.
+            if ! ENV_JSON=$(query_variable "repos/${REPO}/environments/${ENVIRONMENT}/variables/SCHEMA_FREEZE"); then
+              OVERALL_EXIT=1
+              CHECK_FAILED_ENVS="${CHECK_FAILED_ENVS} ${ENVIRONMENT}"
+              echo "::endgroup::"
+              continue
+            fi
+            FREEZE_VAL=$(  echo "$ENV_JSON" | jq -r '.value      // ""')
+            UPDATED_AT=$(  echo "$ENV_JSON" | jq -r '.updated_at // ""')
+
+            if [ -z "$FREEZE_VAL" ] || [ "$FREEZE_VAL" = "null" ]; then
+              if ! REPO_JSON=$(query_variable "repos/${REPO}/actions/variables/SCHEMA_FREEZE"); then
+                OVERALL_EXIT=1
+                CHECK_FAILED_ENVS="${CHECK_FAILED_ENVS} ${ENVIRONMENT}"
+                echo "::endgroup::"
+                continue
+              fi
+              FREEZE_VAL=$(  echo "$REPO_JSON" | jq -r '.value      // ""')
+              UPDATED_AT=$(  echo "$REPO_JSON" | jq -r '.updated_at // ""')
+            fi
+
+            if [ "$FREEZE_VAL" != "true" ]; then
+              echo "  ✔  ${ENVIRONMENT}: SCHEMA_FREEZE is not active"
+              echo "::endgroup::"
+              continue
+            fi
+
+            # ── Compute freeze age ────────────────────────────────────────────────
+            # updated_at reflects when the variable was last written — which is when
+            # it was set to "true" (or the last time it was re-saved, if ever).
+            # This is the best available proxy for "when did the freeze start".
+            if [ -z "$UPDATED_AT" ] || [ "$UPDATED_AT" = "null" ]; then
+              FREEZE_HOURS="unknown"
+              echo "  ⚠  ${ENVIRONMENT}: SCHEMA_FREEZE=true but updated_at unavailable (GitHub API)"
+            else
+              NOW_EPOCH=$(date -u +%s)
+              # GNU date — available on ubuntu-latest runners.
+              UPDATED_EPOCH=$(date -u -d "${UPDATED_AT}" +%s 2>/dev/null || echo "0")
+              if [ "$UPDATED_EPOCH" -eq 0 ]; then
+                FREEZE_HOURS="unknown"
+              else
+                FREEZE_HOURS=$(( (NOW_EPOCH - UPDATED_EPOCH) / 3600 ))
+              fi
+            fi
+
+            echo "  ⚠  ${ENVIRONMENT}: SCHEMA_FREEZE=true — active for ${FREEZE_HOURS} hour(s) (warn: ${WARN_HOURS}h / fail: ${FAIL_HOURS}h)"
+
+            # ── Determine alert tier ──────────────────────────────────────────────
+            #   Tier 0  (< WARN_HOURS)   — note only; exit 0
+            #   Tier 1  (≥ WARN_HOURS, < FAIL_HOURS) — ::warning; exit 0
+            #   Tier 2  (≥ FAIL_HOURS)  — ::error + job fails
+            TIER=0
+            if [ "$FREEZE_HOURS" != "unknown" ] 2>/dev/null; then
+              if [ "$FREEZE_HOURS" -ge "$FAIL_HOURS" ] 2>/dev/null; then
+                TIER=2
+              elif [ "$FREEZE_HOURS" -ge "$WARN_HOURS" ] 2>/dev/null; then
+                TIER=1
+              fi
+            fi
+
+            # ── GitHub Step Summary ───────────────────────────────────────────────
+            {
+              if [ "$TIER" -eq 2 ]; then
+                printf '## ❌ Schema Freeze Critical: `%s` (%sh ≥ fail threshold %sh)\n\n' \
+                  "${ENVIRONMENT}" "${FREEZE_HOURS}" "${FAIL_HOURS}"
+              elif [ "$TIER" -eq 1 ]; then
+                printf '## ⚠ Schema Freeze Warning: `%s` (%sh ≥ warn threshold %sh)\n\n' \
+                  "${ENVIRONMENT}" "${FREEZE_HOURS}" "${WARN_HOURS}"
+              else
+                printf '## ℹ Schema Freeze Active: `%s` (%sh — below warn threshold %sh)\n\n' \
+                  "${ENVIRONMENT}" "${FREEZE_HOURS}" "${WARN_HOURS}"
+              fi
+              printf 'Schema registration is **fully blocked** for `%s`.\n' "${ENVIRONMENT}"
+              printf 'All CI validation passes but nothing reaches Glue.\n\n'
+              printf '| Field | Value |\n|-------|-------|\n'
+              printf '| Environment | `%s` |\n' "${ENVIRONMENT}"
+              printf '| Active since (approx) | `%s` |\n' "${UPDATED_AT}"
+              printf '| Freeze age | **%s hour(s)** |\n' "${FREEZE_HOURS}"
+              printf '| Warn threshold | %sh |\n' "${WARN_HOURS}"
+              printf '| Fail threshold | %sh |\n\n' "${FAIL_HOURS}"
+              printf '### To lift the freeze\n\n'
+              printf '```bash\n'
+              printf '# Option A: delete the variable (cleanest)\n'
+              printf 'gh variable delete SCHEMA_FREEZE --env %s\n\n' "${ENVIRONMENT}"
+              printf '# Option B: set to false\n'
+              printf 'gh variable set SCHEMA_FREEZE --body "false" --env %s\n' "${ENVIRONMENT}"
+              printf '```\n\n'
+              printf '> Once lifted, the next push to `main` will register pending schemas automatically.\n\n'
+              printf '_Watchdog run: `%s` · Repo: `%s`_\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${REPO}"
+            } >> "${GITHUB_STEP_SUMMARY}"
+
+            # ── Emit annotation ───────────────────────────────────────────────────
+            if [ "$TIER" -eq 2 ]; then
+              printf '::error title=Schema Freeze Critical [%s]::SCHEMA_FREEZE has been active for %sh (fail threshold: %sh). Schema registration is fully blocked. Run: gh variable delete SCHEMA_FREEZE --env %s\n' \
+                "${ENVIRONMENT}" "${FREEZE_HOURS}" "${FAIL_HOURS}" "${ENVIRONMENT}"
+              OVERALL_EXIT=1
+              CRITICAL_ENVS="${CRITICAL_ENVS} ${ENVIRONMENT}"
+            elif [ "$TIER" -eq 1 ]; then
+              printf '::warning title=Schema Freeze Warning [%s]::SCHEMA_FREEZE=true — active for %sh (≥ %sh warn threshold). Lift the freeze once the incident is resolved: gh variable delete SCHEMA_FREEZE --env %s\n' \
+                "${ENVIRONMENT}" "${FREEZE_HOURS}" "${WARN_HOURS}" "${ENVIRONMENT}"
+            else
+              echo "  ·  ${ENVIRONMENT}: freeze is young (${FREEZE_HOURS}h < ${WARN_HOURS}h warn threshold) — no action needed"
+            fi
+
+            echo "::endgroup::"
+          done
+
+          echo "critical_envs=${CRITICAL_ENVS}" >> "$GITHUB_OUTPUT"
+          echo "check_failed_envs=${CHECK_FAILED_ENVS}" >> "$GITHUB_OUTPUT"
+          exit "$OVERALL_EXIT"
+
+      # Optional: Slack escalation when at least one environment is critical
+      # or its check itself failed. Wire SLACK_WEBHOOK_URL as a repository
+      # secret to enable.
+      - name: Slack escalation (stale freeze only)
+        if: "failure() && env.SLACK_WEBHOOK_URL != ''"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          CRITICAL_ENVS: ${{ steps.evaluate.outputs.critical_envs }}
+          CHECK_FAILED_ENVS: ${{ steps.evaluate.outputs.check_failed_envs }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          for ENVIRONMENT in ${CRITICAL_ENVS}; do
+            curl -sf -X POST "${SLACK_WEBHOOK_URL}" \
+              -H 'Content-Type: application/json' \
+              -d "$(jq -n \
+                --arg env   "${ENVIRONMENT}" \
+                --arg repo  "${REPO}" \
+                --arg url   "${RUN_URL}" \
+                '{
+                  text: ("🔒 *Schema Freeze Stale* — `" + $env + "` in `" + $repo + "`\n"
+                         + "Schema registration is blocked. Lift the freeze when the incident is resolved.\n"
+                         + "<" + $url + "|View watchdog run>")
+                }')" \
+            && echo "  ✔  Slack notification sent for ${ENVIRONMENT}" \
+            || echo "  ⚠  Slack notification failed for ${ENVIRONMENT} (non-fatal)" >&2
+          done
+
+          # Distinct from a confirmed stale freeze: the watchdog itself
+          # could not check this environment (GitHub API failure), so it
+          # cannot vouch that no freeze is active either. Same urgency,
+          # different wording — never claim a freeze is stale when the
+          # real problem is "couldn't check."
+          for ENVIRONMENT in ${CHECK_FAILED_ENVS}; do
+            curl -sf -X POST "${SLACK_WEBHOOK_URL}" \
+              -H 'Content-Type: application/json' \
+              -d "$(jq -n \
+                --arg env   "${ENVIRONMENT}" \
+                --arg repo  "${REPO}" \
+                --arg url   "${RUN_URL}" \
+                '{
+                  text: ("⚠️ *Schema Freeze Watchdog check failed* — `" + $env + "` in `" + $repo + "`\n"
+                         + "Could not query GitHub for SCHEMA_FREEZE — the watchdog cannot confirm whether a freeze is active. Check the run logs.\n"
+                         + "<" + $url + "|View watchdog run>")
+                }')" \
+            && echo "  ✔  Slack notification sent for ${ENVIRONMENT} (check-failed)" \
+            || echo "  ⚠  Slack notification failed for ${ENVIRONMENT} (non-fatal)" >&2
+          done

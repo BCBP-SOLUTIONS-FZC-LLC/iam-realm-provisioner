@@ -29,4 +29,19 @@ spec:
           type: Utilization
           averageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}
     {{- end }}
+    {{- if .Values.autoscaling.targetRPSPerReplica }}
+    # RPS-based scaling: opt-in, off by default (§14 has no queue-depth/RPS
+    # scaling requirement for this service). PREREQUISITE: prometheus-adapter
+    # must be installed and configured with the rule at
+    # deploy/monitoring/prometheus-adapter-rule.yaml. Without it this metric
+    # is silently absent from the custom metrics API and the HPA falls back
+    # to CPU/memory only.
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: {{ .Values.autoscaling.targetRPSPerReplica }}
+    {{- end }}
 {{- end }}

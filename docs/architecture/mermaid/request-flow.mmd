@@ -1,0 +1,67 @@
+sequenceDiagram
+    participant SG as Signup Service
+    participant GW as API Gateway (Envoy, mesh mTLS)
+    participant CAP as body-size cap (1 MB)
+    participant OBS as ObservabilityMiddlewares
+    participant PROT as ProtectedMiddlewares
+    participant GUC as GUCBridgeMiddleware
+    participant JSON as RequireJSONContentType
+    participant SYS as RequireSystemRole
+    participant IDEM as RequireIdempotencyKey
+    participant H as InternalHandler.ProvisionTrial
+    participant SVC as ProvisioningService
+    participant KC as Keycloak Admin API
+    participant DB as PostgreSQL (RLS)
+
+    Note over SG,GW: Representative endpoint — RP-1 POST /api/v1/internal/tenants/provision-trial<br/>Mesh-internal only — no public route, no JWT (x-tenant-id / x-user-id injected by the gateway)
+
+    SG ->>+ GW: POST /api/v1/internal/tenants/provision-trial<br/>Idempotency-Key: <key>, x-user-id, x-tenant-id, x-tenant-roles
+    GW ->>+ CAP: forward (mTLS + NetworkPolicy is the primary boundary)
+    CAP ->>+ OBS: MaxBytesReader(1<<20) wraps request body
+    Note over OBS: gincommon.TimeoutMiddleware(30s) then<br/>PanicRecovery → RequestID → Tracing →<br/>CorrelationHeaders → Metrics → Logging
+
+    OBS ->>+ PROT: c.Next()
+    Note over PROT: gincommon.ProtectedMiddlewares —<br/>RequireAuth (401 missing_identity_headers if absent)<br/>ContextMiddleware (build gincommon RequestContext)
+
+    PROT ->>+ GUC: c.Next()
+    Note over GUC: GUCBridgeMiddleware — parses bridged identity into<br/>requestctx.RequestContext{UserID,TenantID,Roles}<br/>and binds pgcommon.WithGUCSet(ctx) for every downstream<br/>pool checkout (transaction-local app.tenant_id, RLS-6)
+
+    GUC ->>+ JSON: c.Next()
+    Note over JSON: RequireJSONContentType — 415 unsupported_media_type<br/>if a non-empty POST/PUT/PATCH body isn't application/json
+
+    JSON ->>+ SYS: c.Next()
+    Note over SYS: RequireSystemRole — 403 insufficient_role unless<br/>rc.IsSystem() (defense-in-depth — mesh mTLS is primary, §5.1)
+
+    SYS ->>+ IDEM: c.Next()
+    Note over IDEM: RequireIdempotencyKey (registered per-route, RP-1..6/10/12/14) —<br/>400 missing_idempotency_key if header absent or > 256 chars
+
+    IDEM ->>+ H: c.Next()
+    Note over H: parse + validate ProvisionTrialRequest body
+
+    H ->>+ SVC: ProvisionTrial(ctx, idempotencyKey, req)
+    SVC ->>+ DB: idempotency.Begin(idempotencyKey, tenantID, OpProvisionTrial)
+    DB -->>- SVC: not found — proceed
+
+    SVC ->> KC: CreateTrialUser (Keycloak-effect-first, outside any tx)
+    alt Keycloak create fails
+        KC -->> SVC: error
+        SVC ->> DB: idempotency.Fail(idempotencyKey)
+        SVC -->> H: 502 keycloak_unavailable (no local commit, retryable)
+    else user created
+        KC -->> SVC: keycloak_user_id (sub)
+        SVC ->>+ DB: RunInTx { UPSERT tenant_realms(strategy='shared'),<br/>outbox.Enqueue(TrialTenantProvisioned) }
+        DB -->>- SVC: committed
+        SVC ->> DB: idempotency.Complete(idempotencyKey, result)
+        SVC -->>- H: ProvisionTrialResult{realm:'trial', strategy:'shared', keycloak_user_id}
+    end
+
+    H -->>- IDEM: 201 JSON response (or mapped domain.Error → gincommon.ErrorResponse)
+    IDEM -->>- SYS: return
+    SYS -->>- JSON: return
+    JSON -->>- GUC: return
+    GUC -->>- PROT: return
+    PROT -->>- OBS: return
+    Note over OBS: http_request log (Info/Warn/Error by class) · OTel span ended
+    OBS -->>- CAP: return
+    CAP -->>- GW: return
+    GW -->>- SG: 201 + X-Request-ID

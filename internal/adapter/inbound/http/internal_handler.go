@@ -2,6 +2,7 @@ package http
 
 import (
 	"net/http"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -62,6 +63,10 @@ func (h *InternalHandler) ProvisionTrial(c *gin.Context) {
 		HandleError(c, domain.NewError(domain.ErrInvalidRequest, err.Error()))
 		return
 	}
+	if !validTenantSlug(req.TenantSlug) {
+		HandleError(c, domain.NewError(domain.ErrInvalidRequest, "tenant_slug must not contain '/', whitespace, or control characters"))
+		return
+	}
 	result, err := h.Provisioning.ProvisionTrial(c.Request.Context(), idempotencyKey(c), service.ProvisionTrialRequest{
 		TenantID: req.TenantID, TenantName: req.TenantName, TenantSlug: req.TenantSlug,
 		AdminEmail: req.AdminEmail, AdminName: req.AdminName,
@@ -96,6 +101,10 @@ func (h *InternalHandler) ProvisionDirect(c *gin.Context) {
 	var req provisionDirectRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		HandleError(c, domain.NewError(domain.ErrInvalidRequest, err.Error()))
+		return
+	}
+	if !validTenantSlug(req.TenantSlug) {
+		HandleError(c, domain.NewError(domain.ErrInvalidRequest, "tenant_slug must not contain '/', whitespace, or control characters"))
 		return
 	}
 	result, err := h.Provisioning.ProvisionDirect(c.Request.Context(), idempotencyKey(c), service.ProvisionDirectRequest{
@@ -234,6 +243,22 @@ func (h *InternalHandler) ResetMFA(c *gin.Context) {
 // ── helpers ────────────────────────────────────────────────────────────
 
 func idempotencyKey(c *gin.Context) string { return c.GetHeader("Idempotency-Key") }
+
+// validTenantSlug rejects a slug that would corrupt the realm name this
+// service derives from it ("tenant-"+slug, RP-2's dedicatedRealmName) once
+// it becomes a path segment in Keycloak Admin API URLs
+// (/admin/realms/<name>/...). Keycloak itself imposes no documented
+// charset/length limit on a realm name — this is deliberately a safety
+// check (no '/', no whitespace, no control characters), not an invented
+// business-format rule.
+func validTenantSlug(slug string) bool {
+	for _, r := range slug {
+		if r == '/' || unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
 
 func parseTenantID(c *gin.Context) (uuid.UUID, error) {
 	id, err := uuid.Parse(c.Param("id"))

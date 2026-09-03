@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 )
@@ -52,6 +53,7 @@ func TestHandleError_FullTaxonomy(t *testing.T) {
 		{domain.ErrConversionFailed, http.StatusBadGateway},
 		{domain.ErrOrgMembershipUnavailable, http.StatusServiceUnavailable},
 		{domain.ErrObjectStoreUnavailable, http.StatusServiceUnavailable},
+		{domain.ErrDBUnavailable, http.StatusServiceUnavailable},
 	}
 	for _, tc := range tests {
 		t.Run(string(tc.code), func(t *testing.T) {
@@ -121,10 +123,73 @@ func TestHandleError_LogsUnclassifiedErrors(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
 	}
+	er := decodeError(t, rec)
+	if er.RequestID == "" {
+		t.Fatal("expected gincommon RequestIDMiddleware to populate request_id on the error body")
+	}
+	if er.TraceID == "" {
+		t.Fatal("expected gincommon TracingMiddleware to populate trace_id on the error body")
+	}
 	// gincommon's own LoggingMiddleware also logs 5xx responses at Error
 	// level, so this only asserts HandleError's own call landed at least
 	// once — the exact count is gincommon's concern, not this package's.
 	if logger.errorCalls < 1 {
 		t.Fatalf("expected errorLogger.Error to be called at least once, got %d", logger.errorCalls)
+	}
+}
+
+func TestHandleError_DBConnectivitySQLState_Returns503(t *testing.T) {
+	for _, code := range []string{"08006", "08001", "08004"} {
+		t.Run(code, func(t *testing.T) {
+			c, w := newErrorTestContext()
+			HandleError(c, &pgconn.PgError{Code: code})
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected 503, got %d", w.Code)
+			}
+			er := decodeError(t, w)
+			if er.Error != string(domain.ErrDBUnavailable) {
+				t.Fatalf("expected db_unavailable, got %q", er.Error)
+			}
+		})
+	}
+}
+
+func TestHandleError_DBResourceExhaustionSQLState_Returns503(t *testing.T) {
+	c, w := newErrorTestContext()
+	HandleError(c, &pgconn.PgError{Code: "53300"})
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", w.Code)
+	}
+	er := decodeError(t, w)
+	if er.Error != string(domain.ErrDBUnavailable) {
+		t.Fatalf("expected db_unavailable, got %q", er.Error)
+	}
+}
+
+func TestHandleError_OperatorOrSystemErrorSQLState_Returns503(t *testing.T) {
+	for _, code := range []string{"57P01", "58030"} {
+		t.Run(code, func(t *testing.T) {
+			c, w := newErrorTestContext()
+			HandleError(c, &pgconn.PgError{Code: code})
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected 503, got %d", w.Code)
+			}
+			er := decodeError(t, w)
+			if er.Error != string(domain.ErrDBUnavailable) {
+				t.Fatalf("expected db_unavailable, got %q", er.Error)
+			}
+		})
+	}
+}
+
+func TestHandleError_ConstraintViolationSQLState_Returns500(t *testing.T) {
+	c, w := newErrorTestContext()
+	HandleError(c, &pgconn.PgError{Code: "23505"})
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+	er := decodeError(t, w)
+	if er.Error != "internal_error" {
+		t.Fatalf("expected internal_error, got %q", er.Error)
 	}
 }

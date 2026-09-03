@@ -8,40 +8,89 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/puddle/v2"
 )
 
-// DSNFromEnv builds the application-pool DSN by delegating to
-// pgcommon.ConfigFromEnv() — the same env vars (DATABASE_URL/PG_HOST/
-// PG_PORT/PG_USER/PG_PASSWORD/PG_DBNAME/PG_SSLMODE) platform-pgcommon
-// itself reads, so there is exactly one DSN-assembly implementation.
+// DSNFromEnv builds a PostgreSQL connection URL for the application pool by
+// delegating host/port/user/password/dbname/sslmode parsing and DSN
+// assembly to pgcommon.ConfigFromEnv() — the same env vars
+// (DATABASE_URL/PG_HOST/PG_PORT/PG_USER/PG_PASSWORD/PG_DBNAME/PG_SSLMODE)
+// platform-pgcommon itself reads to build the pool Config used by main.go,
+// so there is exactly one DSN-assembly implementation instead of two drifting
+// in parallel. Warnings from ConfigFromEnv (invalid/insecure settings
+// replaced by defaults) are surfaced at the call site that owns a logger
+// (see cmd/server/main.go); this helper only returns the DSN string.
+//
+// URL format is required because the migration runner (pgmigrate.Runner)
+// calls url.Parse on the DSN after prepending "pgx5://"; a keyword/value DSN
+// would produce invalid URL escapes (%20 for spaces) and fail at startup.
+// pgcommon builds the DSN via net/url, which already produces this format.
 func DSNFromEnv() string {
 	cfg, _ := pgcommon.ConfigFromEnv()
 	if os.Getenv("DATABASE_URL") != "" {
+		// DATABASE_URL is returned verbatim by pgcommon.ConfigFromEnv — set
+		// statement_timeout via its own query string, not appended here.
 		return cfg.DSN
 	}
 	return ApplyStatementTimeout(cfg.DSN)
 }
 
-// ApplyStatementTimeout appends a server-side statement_timeout option to
-// dsn (PG_STATEMENT_TIMEOUT, a Go duration string) so hung queries release
-// pool connections instead of holding them for the full HTTP deadline.
+// ApplyStatementTimeout appends a server-side statement_timeout option to dsn
+// so hung queries release pool connections instead of holding them for the
+// full HTTP deadline. PG_STATEMENT_TIMEOUT accepts a Go duration string
+// (e.g. "5s", "500ms"). This has no pgcommon equivalent — pgcommon.Config has
+// no statement-timeout field — so it remains a small extension layered on
+// top of the pgcommon-built DSN rather than a full DSN builder. Ignored when
+// dsn is empty or PG_STATEMENT_TIMEOUT is unset. Idempotent: a DSN that
+// already carries statement_timeout is returned unchanged.
 func ApplyStatementTimeout(dsn string) string {
 	if dsn == "" {
 		return dsn
 	}
 	if t := os.Getenv("PG_STATEMENT_TIMEOUT"); t != "" {
 		if d, err := time.ParseDuration(t); err == nil && d > 0 {
+			if strings.Contains(dsn, "statement_timeout") {
+				return dsn
+			}
 			dsn += fmt.Sprintf("&options=-c%%20statement_timeout%%3D%d", d.Milliseconds())
 		}
 	}
 	return dsn
+}
+
+// SystemPoolConfig returns pgcommon.Config for the BYPASSRLS system pool
+// (§10.1), matching iam-org-membership. The system pool deliberately has
+// no GUCProvider — cross-tenant reconciler / exporter queries run under a
+// BYPASSRLS role — but still connects through PgBouncer in production, so
+// PGBouncerMode is forced true unconditionally (SimpleProtocol + MinConns:0).
+// A bare pgcommon.Config{DSN, Logger} literal would leave PGBouncerMode at
+// the Go zero-value false and drop ConfigFromEnv pool sizing, breaking
+// transaction-pooling deployments even when the app pool correctly reads
+// PG_BOUNCER_MODE.
+//
+// Pool sizing, lifetimes, and SlowQueryThreshold are copied from
+// ConfigFromEnv so sysPool and the app pool share one env-driven source
+// of truth. Tracer is left unset — call sites wire NewOTelTracer so
+// db.query spans export through gincommon's TracerProvider.
+func SystemPoolConfig(dsn string, log port.Logger) pgcommon.Config {
+	cfg, _ := pgcommon.ConfigFromEnv()
+	cfg.DSN = ApplyStatementTimeout(dsn)
+	cfg.GUCProvider = nil
+	cfg.PGBouncerMode = true
+	cfg.Tracer = nil
+	if log != nil {
+		cfg.Logger = NewLoggerAdapter(log)
+	} else {
+		cfg.Logger = nil
+	}
+	return cfg
 }
 
 // SystemDSNFromEnv returns the DSN for the privileged cross-tenant pool used
@@ -62,7 +111,7 @@ func SystemDSNFromEnv() string {
 // MIGRATION_DATABASE_URL must be set whenever PG_BOUNCER_MODE=true.
 func MigrationDSNFromEnv() string {
 	if dsn := os.Getenv("MIGRATION_DATABASE_URL"); dsn != "" {
-		return dsn
+		return ApplyStatementTimeout(dsn)
 	}
 	return DSNFromEnv()
 }
@@ -82,42 +131,44 @@ func NewTxRunner(pool *pgcommon.Pool, events port.EventPublisher) *TxRunner {
 	return &TxRunner{pool: pool, events: events}
 }
 
+// writeRetryOpts is pgcommon's documented high-throughput OLTP preset.
+// Deadlock (40P01) and serialization failure (40001) retry with exponential
+// backoff + jitter. Nested withPool joins (already inside a tx) do not
+// retry — the outer TxRunner owns the attempt.
+var writeRetryOpts = pgcommon.RetryOptions{
+	MaxAttempts:    3,
+	InitialWait:    10 * time.Millisecond,
+	MaxWait:        500 * time.Millisecond,
+	Multiplier:     2.0,
+	JitterFraction: 0.25,
+}
+
 // RunInTx runs fn inside a transaction, injects a tx-bound publisher into
-// the ctx, and maps low-level connection errors into a domain
-// keycloak_unavailable/org_membership_unavailable-adjacent 503 shape
-// (ErrObjectStoreUnavailable reuse would be wrong here — a generic wrapped
-// error is returned; callers classify via errors.As on *domain.Error for
-// anything already typed, or treat the fallback as a transient failure).
+// the ctx, and maps low-level connection errors into
+// domain.ErrDBUnavailable (503) so handlers get a consistent 5xx shape
+// (§17). SQL-level errors (unique violation, FK, check) bubble up
+// unchanged for service-layer classification. Contended writes retry via
+// pgcommon.RunInTxWithRetryOpts on deadlock / serialization failure.
 func (r *TxRunner) RunInTx(ctx context.Context, fn func(ctx context.Context) error) error {
-	return wrapConnErr(pgcommon.RunInTx(ctx, r.pool, pgx.TxOptions{}, func(ctx context.Context, tx pgx.Tx) error {
-		txCtx := withTx(ctx, tx)
+	return wrapConnErr(pgcommon.RunInTxWithRetryOpts(ctx, r.pool, pgx.TxOptions{}, writeRetryOpts, func(ctx context.Context, tx pgx.Tx) error {
+		txCtx := WithTx(ctx, tx)
 		if r.events != nil {
-			txCtx = port.WithEventPublisher(txCtx, &txBoundPublisher{pub: r.events, tx: tx})
+			txCtx = port.WithEventPublisher(txCtx, r.events)
 		}
 		return fn(txCtx)
 	}))
 }
 
-// txBoundPublisher adapts port.EventPublisher (requires pgx.Tx) to
-// port.ContextEventPublisher (used via context lookup by the service layer).
-type txBoundPublisher struct {
-	pub port.EventPublisher
-	tx  pgx.Tx
-}
-
-func (p *txBoundPublisher) EnqueueCtx(ctx context.Context, event *domain.Event) error {
-	return p.pub.Enqueue(ctx, p.tx, event)
-}
-
-// txKey stores the active pgx.Tx in context so repository methods can join
-// an in-flight transaction rather than opening a nested one.
-type txKey struct{}
-
-func withTx(ctx context.Context, tx pgx.Tx) context.Context {
+// WithTx stores the active pgx.Tx in ctx so repository withPool joins and
+// EventPublisher.Enqueue writes the outbox on the same transaction.
+func WithTx(ctx context.Context, tx pgx.Tx) context.Context {
 	return context.WithValue(ctx, txKey{}, tx)
 }
 
+type txKey struct{}
+
 // TxFromContext retrieves the active pgx.Tx set by RunInTx, if any.
+// Repository helpers call withPool which joins the tx when present.
 func TxFromContext(ctx context.Context) (pgx.Tx, bool) {
 	tx, ok := ctx.Value(txKey{}).(pgx.Tx)
 	return tx, ok
@@ -135,26 +186,60 @@ func withPool(ctx context.Context, pool *pgcommon.Pool, fn func(pgx.Tx) error) e
 	}))
 }
 
-// wrapConnErr passes SQL-protocol errors, ErrNoRows, and context
-// cancellations through unchanged (service layer classifies them); any
-// other error is a connectivity failure surfaced as
-// ErrOrgMembershipUnavailable's sibling for Postgres — kept generic so
-// callers can errors.Is(err, pgx.ErrNoRows) etc. without a new domain code.
+// wrapConnErr converts non-protocol database errors into
+// ErrDBUnavailable. SQL-protocol errors (*pgconn.PgError) that are
+// not connectivity/resource classes pass through so the service layer can
+// distinguish an integrity violation from a network outage.
+//
+// SQLSTATE class 08 (connection exception), 53 (insufficient resources),
+// 57 (operator intervention) and 58 (system error) are remapped to
+// domain.ErrDBUnavailable here so HTTP HandleError never needs to inspect
+// a raw *pgconn.PgError — those classes are availability failures (503).
+// puddle.ErrClosedPool (surfaced by pgxpool.Pool.BeginTx/Acquire on a
+// closed pool — pgcommon's own coredomain.ErrPoolClosed wraps the same
+// underlying value but is unexported outside that module, so puddle's
+// sentinel is the one this package can actually check) is the other
+// positively-identifiable connectivity failure: a closed pool is never a
+// SQL-protocol response, but is unambiguously "the database is
+// unavailable", not a caller's business error.
+//
+// Everything else — including a plain Go error a caller's own RunInTx/
+// withPool callback returns for its own business reasons — passes through
+// completely unchanged. This function has no way to distinguish "the pool
+// itself failed" from "fn's own business logic failed" for any error
+// shape beyond the ones positively recognized above, since
+// pgcommon.RunInTxWithRetryOpts returns both shapes identically; defaulting
+// the unrecognized case to ErrDBUnavailable (as this used to) silently
+// discarded the caller's real error under a misleading "database
+// unavailable" 503 for every unrecognized failure — including deliberate
+// business-rule errors a service intentionally returns from inside a
+// transaction. HandleError (inbound/http/errors.go) already re-classifies
+// a leaked raw PgError of these same connectivity/resource classes into
+// 503 independently, so a genuine low-level connectivity failure that
+// somehow isn't positively recognized here still degrades no worse than a
+// generic 500, never a masked/wrong business error.
 func wrapConnErr(err error) error {
 	if err == nil {
 		return nil
 	}
-	if _, ok := errors.AsType[*domain.Error](err); ok { //nolint:errcheck // only the match bool is needed; err itself is returned unchanged below
+	var de *domain.Error
+	if errors.As(err, &de) {
 		return err
 	}
-	if _, ok := errors.AsType[*pgconn.PgError](err); ok { //nolint:errcheck // only the match bool is needed; err itself is returned unchanged below
-		return err
+	if pgcommon.IsConnectionException(err) || pgcommon.IsInsufficientResources(err) || isOperatorOrSystemErrorSQLState(err) || errors.Is(err, puddle.ErrClosedPool) {
+		return domain.NewError(domain.ErrDBUnavailable, "database unavailable")
 	}
-	if errors.Is(err, pgx.ErrNoRows) {
-		return err
+	return err
+}
+
+// isOperatorOrSystemErrorSQLState reports whether err is a Postgres error
+// in SQLSTATE class 57 or 58. pgcommon v1.3.0 has dedicated helpers for
+// 08/53 but not these two; we classify via the pgconn Error() text
+// ("… (SQLSTATE 57P01)") so callers never import pgconn.
+func isOperatorOrSystemErrorSQLState(err error) bool {
+	if !pgcommon.IsPgError(err) {
+		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	return fmt.Errorf("postgres: database unavailable: %w", err)
+	msg := err.Error()
+	return strings.Contains(msg, "SQLSTATE 57") || strings.Contains(msg, "SQLSTATE 58")
 }

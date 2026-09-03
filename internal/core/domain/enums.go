@@ -1,22 +1,22 @@
 // Package domain holds the Realm Provisioner's entities, value objects, and
 // invariants. It imports no adapter, Gin, pgx, gocloak, or AWS SDK package
-// (enforced by .go-arch-lint.yml) — every name here is frozen by LLD §23 and
+// (enforced by .go-arch-lint.yml) — every name here is frozen by LLD §25 and
 // must match character-for-character.
 package domain
 
-// RealmStrategy is the Postgres enum `realm_strategy` (§4.1, §23).
+// RealmStrategy is the Postgres enum `realm_strategy` (§4.1, §25).
 type RealmStrategy string
 
-// RealmStrategy values (§23).
+// RealmStrategy values (§25).
 const (
 	RealmStrategyShared    RealmStrategy = "shared"
 	RealmStrategyDedicated RealmStrategy = "dedicated"
 )
 
-// RealmStatus is the Postgres enum `realm_status` (§4.1, §23).
+// RealmStatus is the Postgres enum `realm_status` (§4.1, §25).
 type RealmStatus string
 
-// RealmStatus values (§23).
+// RealmStatus values (§25).
 const (
 	RealmStatusProvisioning RealmStatus = "provisioning"
 	RealmStatusActive       RealmStatus = "active"
@@ -26,49 +26,49 @@ const (
 	RealmStatusDeleted      RealmStatus = "deleted"
 )
 
-// IdpProtocol is the Postgres enum `idp_protocol` (§4.1, §23).
+// IdpProtocol is the Postgres enum `idp_protocol` (§4.1, §25).
 type IdpProtocol string
 
-// IdpProtocol values (§23).
+// IdpProtocol values (§25).
 const (
 	IdpProtocolSAML IdpProtocol = "saml"
 	IdpProtocolOIDC IdpProtocol = "oidc"
 )
 
-// IdpConfigStatus is the Postgres enum `idp_config_status` (§4.1, §23).
+// IdpConfigStatus is the Postgres enum `idp_config_status` (§4.1, §25).
 type IdpConfigStatus string
 
-// IdpConfigStatus values (§23).
+// IdpConfigStatus values (§25).
 const (
 	IdpConfigStatusActive            IdpConfigStatus = "active"
 	IdpConfigStatusDisabled          IdpConfigStatus = "disabled"
 	IdpConfigStatusPendingValidation IdpConfigStatus = "pending_validation"
 )
 
-// ValidationOutcome is the Postgres enum `validation_outcome` (§4.1, §23).
+// ValidationOutcome is the Postgres enum `validation_outcome` (§4.1, §25).
 type ValidationOutcome string
 
-// ValidationOutcome values (§23).
+// ValidationOutcome values (§25).
 const (
 	ValidationOutcomePass         ValidationOutcome = "pass"
 	ValidationOutcomeWarningsOnly ValidationOutcome = "warnings_only"
 	ValidationOutcomeFailing      ValidationOutcome = "failing"
 )
 
-// ReconStatus is the Postgres enum `recon_status` (§4.1, §23).
+// ReconStatus is the Postgres enum `recon_status` (§4.1, §25).
 type ReconStatus string
 
-// ReconStatus values (§23).
+// ReconStatus values (§25).
 const (
 	ReconStatusPending ReconStatus = "pending"
 	ReconStatusApplied ReconStatus = "applied"
 	ReconStatusFailed  ReconStatus = "failed"
 )
 
-// OpStatus is the Postgres enum `op_status` (§4.1, §23).
+// OpStatus is the Postgres enum `op_status` (§4.1, §25).
 type OpStatus string
 
-// OpStatus values (§23).
+// OpStatus values (§25).
 const (
 	OpStatusInProgress OpStatus = "in_progress"
 	OpStatusSucceeded  OpStatus = "succeeded"
@@ -76,29 +76,29 @@ const (
 )
 
 // ProcessedEventsConsumer is the frozen `processed_events.consumer`
-// discriminator (§23) — one value per inbound SQS queue.
+// discriminator (§25) — one value per inbound SQS queue.
 type ProcessedEventsConsumer string
 
-// ProcessedEventsConsumer values (§23), one per inbound SQS queue.
+// ProcessedEventsConsumer values (§25), one per inbound SQS queue.
 const (
 	ConsumerMembership ProcessedEventsConsumer = "membership"
 	ConsumerTenant     ProcessedEventsConsumer = "tenant"
 	ConsumerBilling    ProcessedEventsConsumer = "billing"
 )
 
-// SuspensionSource is the frozen `TenantSuspended.source` value set (§23).
+// SuspensionSource is the frozen `TenantSuspended.source` value set (§25).
 type SuspensionSource string
 
-// SuspensionSource values (§23).
+// SuspensionSource values (§25).
 const (
 	SuspensionSourceBillingLapse SuspensionSource = "billing_lapse"
 	SuspensionSourceOperator     SuspensionSource = "operator"
 )
 
-// ReactivationSource is the frozen `TenantReactivated.source` value set (§23).
+// ReactivationSource is the frozen `TenantReactivated.source` value set (§25).
 type ReactivationSource string
 
-// ReactivationSource values (§23).
+// ReactivationSource values (§25).
 const (
 	ReactivationSourceBilling  ReactivationSource = "billing"
 	ReactivationSourceOperator ReactivationSource = "operator"

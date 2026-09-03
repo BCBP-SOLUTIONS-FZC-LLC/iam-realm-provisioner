@@ -10,7 +10,10 @@ import (
 )
 
 // AssignRequiresMFA is idempotent (assign-if-absent, §8.6).
-func (a *Admin) AssignRequiresMFA(ctx context.Context, realmName string, userID uuid.UUID) error {
+func (a *Admin) AssignRequiresMFA(ctx context.Context, realmName string, userID uuid.UUID) (err error) {
+	ctx, done := a.begin(ctx, "assign_requires_mfa")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return wrapErr("assign_requires_mfa: token", err)
@@ -33,7 +36,10 @@ func (a *Admin) AssignRequiresMFA(ctx context.Context, realmName string, userID 
 }
 
 // RevokeRequiresMFA is idempotent (revoke-if-present, §8.6).
-func (a *Admin) RevokeRequiresMFA(ctx context.Context, realmName string, userID uuid.UUID) error {
+func (a *Admin) RevokeRequiresMFA(ctx context.Context, realmName string, userID uuid.UUID) (err error) {
+	ctx, done := a.begin(ctx, "revoke_requires_mfa")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return wrapErr("revoke_requires_mfa: token", err)
@@ -57,7 +63,10 @@ func (a *Admin) RevokeRequiresMFA(ctx context.Context, realmName string, userID 
 
 // HasRequiresMFA reports whether userID currently holds the requires-mfa
 // realm role in realmName.
-func (a *Admin) HasRequiresMFA(ctx context.Context, realmName string, userID uuid.UUID) (bool, error) {
+func (a *Admin) HasRequiresMFA(ctx context.Context, realmName string, userID uuid.UUID) (has bool, err error) {
+	ctx, done := a.begin(ctx, "has_requires_mfa")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return false, wrapErr("has_requires_mfa: token", err)
@@ -84,7 +93,10 @@ func (a *Admin) hasRealmRole(ctx context.Context, tok, realmName string, userID 
 // ResetMFA deletes every OTP/WebAuthn credential for userID and, if
 // requiresMFA, re-adds CONFIGURE_TOTP so the next login forces re-enroll
 // (RP-9). Idempotent — no enrolled credentials is a no-op success.
-func (a *Admin) ResetMFA(ctx context.Context, realmName string, userID uuid.UUID, requiresMFA bool) error {
+func (a *Admin) ResetMFA(ctx context.Context, realmName string, userID uuid.UUID, requiresMFA bool) (err error) {
+	ctx, done := a.begin(ctx, "reset_mfa")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return wrapErr("reset_mfa: token", err)
@@ -112,9 +124,18 @@ func (a *Admin) ResetMFA(ctx context.Context, realmName string, userID uuid.UUID
 		if err != nil {
 			return wrapErr("reset_mfa: get_user", err)
 		}
+		// Dedup against CONFIGURE_TOTP already present — RP-9 carries no
+		// idempotency ledger by design (fail-closed, no reconciler), so a
+		// repeated reset for the same user (a plausible admin workflow)
+		// would otherwise accumulate duplicate entries in Keycloak's
+		// requiredActions list indefinitely.
 		actions := []string{"CONFIGURE_TOTP"}
 		if user.RequiredActions != nil {
-			actions = append(actions, *user.RequiredActions...)
+			for _, a := range *user.RequiredActions {
+				if a != "CONFIGURE_TOTP" {
+					actions = append(actions, a)
+				}
+			}
 		}
 		user.RequiredActions = &actions
 		if err := a.client.UpdateUser(ctx, tok, realmName, *user); err != nil {
@@ -127,7 +148,10 @@ func (a *Admin) ResetMFA(ctx context.Context, realmName string, userID uuid.UUID
 // CreateOrUpdateIdp configures a SAML/OIDC IdP on the dedicated realm
 // (RP-6, behind the §11.6 gate enforced by the service layer). idp.Secret
 // passes through transiently — never persisted by this adapter.
-func (a *Admin) CreateOrUpdateIdp(ctx context.Context, realmName string, idp port.IdpKeycloakConfig) error {
+func (a *Admin) CreateOrUpdateIdp(ctx context.Context, realmName string, idp port.IdpKeycloakConfig) (err error) {
+	ctx, done := a.begin(ctx, "configure_idp")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return wrapErr("configure_idp: token", err)
@@ -166,7 +190,10 @@ func (a *Admin) CreateOrUpdateIdp(ctx context.Context, realmName string, idp por
 
 // DeleteIdp removes the Keycloak IdP (RP-7 — the caller/service also
 // removes the OpenBao secret and the local row).
-func (a *Admin) DeleteIdp(ctx context.Context, realmName, alias string) error {
+func (a *Admin) DeleteIdp(ctx context.Context, realmName, alias string) (err error) {
+	ctx, done := a.begin(ctx, "delete_idp")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return wrapErr("delete_idp: token", err)
@@ -180,7 +207,10 @@ func (a *Admin) DeleteIdp(ctx context.Context, realmName, alias string) error {
 // ApplyRealmConfig applies a realm-affecting setting synchronously
 // (RP-INV-6, §8.10). Only local_accounts_enabled is currently implemented;
 // idp:<alias> settings toggle that IdP's Enabled flag.
-func (a *Admin) ApplyRealmConfig(ctx context.Context, realmName, settingKey string, desiredValue any) error {
+func (a *Admin) ApplyRealmConfig(ctx context.Context, realmName, settingKey string, desiredValue any) (err error) {
+	ctx, done := a.begin(ctx, "apply_realm_config")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return wrapErr("apply_realm_config: token", err)

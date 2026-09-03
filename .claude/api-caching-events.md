@@ -27,7 +27,7 @@ Middleware chain (`router.go`): 1 MB body-size cap → `gincommon.TimeoutMiddlew
 | RP-15 | `DELETE /tenants/:id/users/:keycloak_user_id` | system | — | Idempotent Keycloak user delete — deleting an absent user is a success (backs O&M's PI-9-style reconciler). |
 | RP-16 | `POST /tenants/:id/users/:keycloak_user_id/revoke-sessions` | system | — | Idempotent session/token revocation, best-effort/fail-open from the caller's perspective. |
 
-**RP-9's route param note:** the frozen §23 path spells the segment `:uid`; Gin requires one wildcard name per path position across sibling routes sharing a prefix, and RP-15/RP-16 already use `:keycloak_user_id` at that position — so RP-9 uses the same internal capture name. This is a routing-internals detail only; the actual URL a caller hits is unchanged, and no wire contract is broken.
+**RP-9's route param note:** the frozen §25 path spells the segment `:uid`; Gin requires one wildcard name per path position across sibling routes sharing a prefix, and RP-15/RP-16 already use `:keycloak_user_id` at that position — so RP-9 uses the same internal capture name. This is a routing-internals detail only; the actual URL a caller hits is unchanged, and no wire contract is broken.
 
 Every mutating endpoint above marked "required" enforces `RequireIdempotencyKey` — a missing header is `400 missing_idempotency_key`; a reused key against an in-flight or previously-failed operation is `409 operation_in_progress`; a reused key against a `succeeded` operation replays the stored JSON result rather than re-executing.
 
@@ -54,12 +54,13 @@ Every mutating endpoint above marked "required" enforces `RequireIdempotencyKey`
 | `conversion_failed` | 502 | RP-3/RP-4 Keycloak sequence failure (with `WithDetails` context) |
 | `org_membership_unavailable` | 503 | O&M I-8 residual-MFA check unreachable (membership-realm-q consumer) |
 | `object_store_unavailable` | 503 | S3 realm-export failure (RP-C3 offboarding) |
+| `db_unavailable` | 503 | Postgres connectivity / resource SQLSTATE (08/53/57/58) |
 
 `Error.Status()` derives the HTTP code from `Code` via a lookup table; an unrecognized code defaults to 500. `Error.WithDetails(map[string]any)` attaches structured context echoed into the response body's `details` field.
 
 ## Events
 
-### Produced — `iam-tenant-events` SNS topic, 9 event types (§23, §7.5)
+### Produced — `iam-tenant-events` SNS topic, 9 event types (§25, §7.5)
 
 Envelope `source = "iam-realm-provisioner"`. Cron-originated events (RP-C1/RP-C3) use the sentinel actor `SystemActorID = "00000000-0000-0000-0000-0000000000a1"`.
 
@@ -89,4 +90,4 @@ Each queue has a `-dlq` sibling, `maxReceiveCount=5`. Dedup via `processed_event
 
 ### AsyncAPI & Schema Drift
 
-`api/asyncapi.yaml` — design-time source of truth, embedded via `api/embed.go`, served live at `/asyncapi` and `/asyncapi.yaml` (gated by `DOCS_ENABLED`/`DOCS_AUTH_TOKEN` in production). Declares 4 servers (the SNS topic + 3 SQS queues), 4 channels, and per-message schemas. This repo has no live AWS Glue Schema Registry comparison wired into CI (unlike some sibling services' `platform-schemagov` pipeline) — `internal/eventschema/asyncapi_drift_test.go` is the CI-enforceable substitute: it structurally parses the `iamTenantEvents` channel's `messages:` block out of the YAML and asserts its key set equals `eventschema.ByEventType`'s map keys exactly.
+`api/asyncapi.yaml` — design-time source of truth, embedded via `api/embed.go`, served live at `/asyncapi` and `/asyncapi.yaml` (gated by `DOCS_ENABLED`/`DOCS_AUTH_TOKEN` in production). Declares 4 servers (the SNS topic + 3 SQS queues), 4 channels, and per-message schemas. Two complementary schema-governance layers now exist: `internal/eventschema/asyncapi_drift_test.go` is a fast, no-AWS CI check — it structurally parses the `iamTenantEvents` channel's `messages:` block out of the YAML and asserts its key set equals `eventschema.ByEventType`'s map keys exactly — and `.github/workflows/schema-registry.yml`/`schema-prune.yml`/`schema-health-quarterly.yml` (the `platform-schemagov` CLI) validate/diff/register this service's 9 schemas against the shared `iam-tenant-events` Glue registry for real. See `docs/runbook-schema-registry.md` and `.claude/operations.md` §13.2.1.

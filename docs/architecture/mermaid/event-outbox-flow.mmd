@@ -1,0 +1,67 @@
+sequenceDiagram
+    participant SVC as core/service
+    participant TX as pgcommon.RunInTx
+    participant DB as PostgreSQL (business table)
+    participant OB as outbox_events
+    participant Codec as ValidatingCodec (enqueue) → GlueCodec (publish, prod) / NoopCodec (dev)
+    participant Runner as Outbox Runner (poll 500 ms)
+    participant SNS as SNS — single topic iam.tenant.events<br/>(events.NewSNSPublisher, NOT a RoutingPublisher)
+    participant OMQ as SQS tenant-orgm-q / tenant-audit-q / tenant-notif-q / tenant-authz-q<br/>(O&M's own subscriptions — this service never self-consumes)
+
+    Note over SVC,OB: Phase 1 — Atomic write + event enqueue (RP-EVT-1 / CONS-1)<br/>Every one of the 9 published events shares its RunInTx with the local state change that caused it
+
+    SVC ->>+ TX: RunInTx(ctx, func(txCtx))
+    TX ->>+ DB: UPSERT/UPDATE tenant_realms (or keycloak_idp_configs, record_version optimistic lock)
+    DB -->>- TX: row affected
+    TX ->>+ Codec: Encode(ctx, event.Type, jsonPayload) — enqueue-time
+    Note over Codec: ValidatingCodec validates against embedded internal/eventschema/*.json<br/>(fail-closed — unknown/invalid type never inserts, TX rolls back)
+    Codec -->>- TX: encoded (plain JSON at this stage)
+    TX ->>+ OB: INSERT outbox_events(id UUID v7, event_type, payload, source='iam-realm-provisioner',<br/>tenant_id, trace_id, created_at, scheduled_at)
+    OB -->>- TX: inserted
+    TX ->>+ DB: COMMIT
+    DB -->>- TX: committed — business row + outbox row durable together
+    TX -->>- SVC: nil
+
+    Note over Runner,OMQ: Phase 2 — Outbound publish (at-least-once, FAIL-3) — this service is a<br/>CO-PRODUCER on iam.tenant.events with O&M (which produces only TenantCreated/TrialStarted<br/>on the same topic) — schema names are disjoint (RP-D5)
+
+    loop every OUTBOX_POLL_INTERVAL (500 ms)
+        Runner ->>+ OB: SELECT ... WHERE published_at IS NULL LIMIT 50 FOR UPDATE SKIP LOCKED
+        OB -->>- Runner: unpublished batch
+        loop for each envelope
+            Runner ->>+ Codec: Encode — publish-time GlueCodec
+            Note over Codec: Prepends 18-byte Glue header {0x03,0x00,schema_version_UUID}<br/>from registry GLUE_REGISTRY_TENANT_NAME (shared "iam-tenant-events" registry, §7.3.1).<br/>NoopCodec pass-through when unset (dev).
+            Codec -->>- Runner: encoded bytes
+            Runner ->>+ SNS: Publish(TopicArn=SNS_TOPIC_TENANT_ARN,<br/>MessageAttributes{EventType, TenantID, Source, EventID, Subject})
+            SNS -->>- Runner: MessageID
+            Runner ->> OB: UPDATE outbox_events SET published_at = now()
+            Note over Runner: retry to OUTBOX_MAX_ATTEMPTS (5) with backoff, DLQ beyond (outbox_dead_letters_total)
+        end
+    end
+
+    SNS ->>+ OMQ: fan-out by per-event SNS subscription filter policy<br/>(9 event types — TrialTenantProvisioned, TenantRealmReady, TenantConverted,<br/>DirectPaidSignup, TrialExpired, TrialReactivated, TenantSuspended,<br/>TenantOffboarded, TenantReactivated{source=operator})
+    deactivate OMQ
+    Note over OMQ: O&M settles tenants row · Audit · Notification · AuthZ cache invalidation
+
+    Note over SVC,OMQ: ── This service is ALSO a consumer — 3 inbound SQS queues, each its own -dlq (maxReceiveCount=5) ──
+
+    participant SNS_M as SNS iam.membership.events (O&M-produced)
+    participant Q1 as membership-realm-q
+    participant C1 as MembershipConsumer → MfaService.SyncRequiresMfa
+    participant SNS_T2 as SNS iam.tenant.events (O&M's TrialStarted)
+    participant Q2 as tenant-realm-q
+    participant C2 as TenantConsumer → record local trial_ends_at (RP-4)
+    participant SNS_B as SNS billing.events (Billing-produced)
+    participant Q3 as billing-realm-q
+    participant C3 as BillingConsumer → re-enable suspended dedicated realm
+
+    SNS_M ->>+ Q1: filter EventType IN [DepartmentMembershipGranted,<br/>DepartmentMembershipLevelChanged, TenantRoleGranted, TenantRoleRevoked]
+    Q1 -->>- C1: message
+    C1 ->> C1: processed_events(event_id, consumer='membership') dedup — MarkProcessed inside RunInTx after Keycloak reconcile
+
+    SNS_T2 ->>+ Q2: filter EventType IN [TrialStarted]
+    Q2 -->>- C2: message
+    C2 ->> C2: RunInTx { UPDATE tenant_realms.trial_ends_at, MarkProcessed(consumer='tenant') } — same tx
+
+    SNS_B ->>+ Q3: filter EventType IN [TenantReactivated]
+    Q3 -->>- C3: message
+    C3 ->> C3: RunInTx { EnableRealm outside tx, then MarkProcessed(consumer='billing') } — Keycloak-effect-first

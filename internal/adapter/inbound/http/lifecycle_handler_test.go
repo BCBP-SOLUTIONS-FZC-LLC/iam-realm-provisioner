@@ -233,10 +233,27 @@ func TestExpireTrial_KeycloakUnavailable(t *testing.T) {
 func TestExpireTrial_OperationInProgress(t *testing.T) {
 	d := newServiceDeps()
 	tenantID := uuid.New()
-	d.idempotency.rows["expire-5"] = &domain.ProvisioningOperation{IdempotencyKey: "expire-5", TenantID: tenantID, Status: domain.OpStatusFailed}
+	d.idempotency.rows["expire-5"] = &domain.ProvisioningOperation{IdempotencyKey: "expire-5", TenantID: tenantID, Status: domain.OpStatusInProgress}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "expire-5")
 	rec := doRequest(d.engine(), http.MethodPost, expireTrialPath(tenantID), headers, "")
 	assertStatusAndCode(t, rec, http.StatusConflict, "operation_in_progress")
+}
+
+// TestExpireTrial_FailedIdempotencyKey_IsRetried pins the fix for a real bug:
+// a `failed` row must never permanently 409 every future retry of the same
+// key (idempotency_key is the table's PRIMARY KEY and nothing ever prunes
+// provisioning_operations) — Begin reclaims it and the request proceeds
+// into real business logic instead of short-circuiting to a replay/conflict.
+// The 404 here (no such tenant_realm in the fake repo) is the proof: had the
+// old found=true-for-any-existing-row behavior still been in effect, this
+// would have 409'd before ever reaching the repository lookup.
+func TestExpireTrial_FailedIdempotencyKey_IsRetried(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	d.idempotency.rows["expire-5"] = &domain.ProvisioningOperation{IdempotencyKey: "expire-5", TenantID: tenantID, Status: domain.OpStatusFailed}
+	headers := withHeader(sysHeaders(), "Idempotency-Key", "expire-5")
+	rec := doRequest(d.engine(), http.MethodPost, expireTrialPath(tenantID), headers, "")
+	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
 }
 
 func TestExpireTrial_MissingIdempotencyKey(t *testing.T) {

@@ -38,6 +38,7 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/logger"
 	pgmigrate "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/migrate"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgmetrics"
 )
 
 // buildVersion is injected by -ldflags at build time (see Dockerfile / Makefile).
@@ -51,41 +52,61 @@ func main() {
 
 	validateRequiredEnv(appEnv)
 
-	// ── 1. Logger ─────────────────────────────────────────────────────────
+	// ── 1. Logger — Zap via platform-gincommon ────────────────────────────
 	log, err := logger.NewLogger(appEnv)
 	if err != nil {
 		panic("init logger: " + err.Error())
 	}
 
-	metrics.Register()
-
-	// ── 2. Tracing (opt-in) ───────────────────────────────────────────────
-	shutdownTracing := func() {}
-	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" {
-		shutdownTracing = gincommon.InitTracingFromEnv()
-	}
+	// ── 2. Tracing — always install gincommon's TracerProvider so in-process
+	// spans get valid trace IDs even when OTEL_EXPORTER_OTLP_ENDPOINT is unset
+	// (dev). ObservabilityMiddlewares' EnsureInitTelemetry is then a no-op.
+	shutdownTracing := gincommon.InitTracingFromEnv()
 
 	cfg := gincommon.Config{
 		Logger:       log,
 		ServiceName:  envOr("APP_NAME", "iam-realm-provisioner"),
 		BuildVersion: envOr("BUILD_VERSION", buildVersion),
 	}
-	// events.Init registers platform-events' own outbox/publish/consume
-	// metrics on the same default Prometheus registry metrics.Register()
-	// uses — without this call outbox_dead_letters_total etc. stay dark.
-	events.Init(cfg.ServiceName, cfg.BuildVersion)
+	// ObservabilityMiddlewares is gincommon's public metrics-init API. Call
+	// it here (before any collector registration or exporter goroutine) so
+	// business / events / pgcommon metrics land on gincommon.MetricsRegisterer
+	// with matching {service, version} const labels. NewRouter applies the
+	// same middleware slice to the Gin engine; gincommon's metrics.Init is sync.Once.
+	_ = gincommon.ObservabilityMiddlewares(cfg)
 
-	// ── 3. Database ───────────────────────────────────────────────────────
+	metrics.Register()
+
+	// platform-events outbox/publish/consume metrics and platform-pgcommon
+	// query/pool metrics share gincommon's registerer so a single /metrics
+	// scrape (promhttp on METRICS_PORT) serves HTTP + business + outbox +
+	// pg collectors together.
+	events.InitWithRegisterer(cfg.ServiceName, cfg.BuildVersion, gincommon.MetricsRegisterer())
+	pgmetrics.InitWithRegisterer(cfg.ServiceName, cfg.BuildVersion, gincommon.MetricsRegisterer())
+
+	// ── 3. Database — pgcommon.ConfigFromEnv reads DATABASE_URL/PG_* directly
+	// so pool sizing, PgBouncer mode, and DSN assembly have exactly one
+	// implementation instead of a second one hand-rolled here. ────────────
+	queryTracer := pgadapter.NewOTelTracer(cfg.ServiceName)
+
 	pgCfg, pgWarnings := pgcommon.ConfigFromEnv()
 	for _, w := range pgWarnings {
 		log.Warn("postgres config warning", map[string]interface{}{"key": w.Key, "reason": w.Reason})
 	}
+	// DSNFromEnv (not a bare pgCfg.DSN) so the DATABASE_URL bypass applies
+	// here too: PG_STATEMENT_TIMEOUT must be ignored when DATABASE_URL is
+	// set verbatim, per DSNFromEnv/ApplyStatementTimeout's own contract.
 	dsn := pgadapter.DSNFromEnv()
+	// Migrations must bypass PgBouncer because the migration runner acquires
+	// a pg_advisory_lock, which is session-scoped and breaks under
+	// transaction pooling. MIGRATION_DATABASE_URL points directly at
+	// Postgres; falls back to dsn when unset.
 	migrationDSN := pgadapter.MigrationDSNFromEnv()
 
 	pgCfg.DSN = dsn
 	pgCfg.GUCProvider = pgcommon.GUCSetFromContext
 	pgCfg.Logger = pgadapter.NewLoggerAdapter(log)
+	pgCfg.Tracer = queryTracer
 	pool, err := pgcommon.NewPool(context.Background(), pgCfg)
 	if err != nil {
 		panic(fmt.Sprintf("connect to postgres: %v", err))
@@ -97,10 +118,12 @@ func main() {
 	// realm_provisioner_migrator (§10.1). Falls back to DSNFromEnv() for
 	// dev — cross-tenant queries then RLS-filter to zero rows (safe no-op).
 	sysDSN := pgadapter.SystemDSNFromEnv()
-	sysPool, err := pgcommon.NewPool(context.Background(), pgcommon.Config{
-		DSN:    sysDSN,
-		Logger: pgadapter.NewLoggerAdapter(log),
-	})
+	// SystemPoolConfig reads ConfigFromEnv internally, forces PGBouncerMode,
+	// and wires the gincommon logger — matching iam-org-membership. Tracer
+	// is set here so db.query spans export through gincommon's provider.
+	sysCfg := pgadapter.SystemPoolConfig(sysDSN, log)
+	sysCfg.Tracer = queryTracer
+	sysPool, err := pgcommon.NewPool(context.Background(), sysCfg)
 	if err != nil {
 		panic(fmt.Sprintf("connect sysPool: %v", err))
 	}
@@ -230,26 +253,31 @@ func main() {
 		tenantRealmRepo, idempotencyRepo, keycloakAdmin, txRunner, sharedRealm,
 	).WithLogger(log)
 	mfaSvc := service.NewMfaService(tenantRealmRepo, keycloakAdmin, orgMembershipClient).WithLogger(log)
-	idpSvc := service.NewIdpService(tenantRealmRepo, idpConfigRepo, idpValidationRepo, openbaoClient, keycloakAdmin).WithLogger(log)
+	idpSvc := service.NewIdpService(tenantRealmRepo, idpConfigRepo, idpValidationRepo, idempotencyRepo, openbaoClient, keycloakAdmin).WithLogger(log)
 	realmConfigSvc := service.NewRealmConfigService(tenantRealmRepo, reconRepo, keycloakAdmin).WithLogger(log)
 
 	internalH := httpadapter.NewInternalHandler(provisioningSvc, lifecycleSvc, mfaSvc, idpSvc, realmConfigSvc)
 
 	// ── 9. Inbound SQS consumers (§7.1) — wired with a durable no-op
 	// handler (§7.1). ─────────────────────────────────────────────────────
-	membershipConsumer := consumeradapter.NewMembershipConsumer(mfaSvc, processedEventsRepo, log)
-	tenantConsumer := consumeradapter.NewTenantConsumer(tenantRealmRepo, processedEventsRepo, log)
-	billingConsumer := consumeradapter.NewBillingConsumer(tenantRealmRepo, keycloakAdmin, processedEventsRepo, log)
+	// txRunner so every consumer's processed_events mark joins withPool
+	// (IDEMP-2), matching iam-org-membership. Membership has no local
+	// write; Tenant/Billing commit the projection write in the same tx.
+	membershipConsumer := consumeradapter.NewMembershipConsumer(mfaSvc, processedEventsRepo, txRunner, log)
+	tenantConsumer := consumeradapter.NewTenantConsumer(tenantRealmRepo, processedEventsRepo, txRunner, log)
+	billingConsumer := consumeradapter.NewBillingConsumer(tenantRealmRepo, keycloakAdmin, processedEventsRepo, txRunner, log)
 
 	var sqsConsumers []events.Consumer
 	consumerCfgs := []struct {
-		envVar  string
-		label   string
-		handler events.Handler
+		envVar      string
+		concurrency string
+		defaultConc int
+		label       string
+		handler     events.Handler
 	}{
-		{"SQS_MEMBERSHIP_REALM_QUEUE_URL", "membership-realm-q", membershipConsumer.Handle},
-		{"SQS_TENANT_REALM_QUEUE_URL", "tenant-realm-q", tenantConsumer.Handle},
-		{"SQS_BILLING_REALM_QUEUE_URL", "billing-realm-q", billingConsumer.Handle},
+		{"SQS_MEMBERSHIP_REALM_QUEUE_URL", "SQS_MEMBERSHIP_REALM_CONCURRENCY", 4, "membership-realm-q", membershipConsumer.Handle},
+		{"SQS_TENANT_REALM_QUEUE_URL", "SQS_TENANT_REALM_CONCURRENCY", 4, "tenant-realm-q", tenantConsumer.Handle},
+		{"SQS_BILLING_REALM_QUEUE_URL", "SQS_BILLING_REALM_CONCURRENCY", 2, "billing-realm-q", billingConsumer.Handle},
 	}
 	for _, cc := range consumerCfgs {
 		url := os.Getenv(cc.envVar)
@@ -262,6 +290,7 @@ func main() {
 			sqsClient,
 			cc.handler,
 			events.WithConsumerCodec(eventbusadapter.GlueDecodeCodec{}),
+			events.WithConcurrency(envInt(cc.concurrency, cc.defaultConc)),
 		)
 		if err != nil {
 			panic(fmt.Sprintf("build %s consumer: %v", cc.label, err))
@@ -278,6 +307,13 @@ func main() {
 		}()
 	}
 
+	// ── 9b. DB-state gauge exporters (§11.2) ──────────────────────────────
+	// realm_active_gauge / realm_config_pending_gauge / template_drift are
+	// counts of current table state, so no request or reconciler path can
+	// maintain them. Refreshed here from the BYPASSRLS sysPool, matching
+	// the sibling iam-org-membership exporter goroutines.
+	runBusinessExporters(ctx, pgadapter.NewGaugeRepository(sysPool), log)
+
 	// ── 10. Router ────────────────────────────────────────────────────────
 	router := httpadapter.NewRouter(httpadapter.RouterConfig{
 		GinConfig: cfg,
@@ -293,7 +329,12 @@ func main() {
 			}
 			return nil
 		}),
-		SysPostgres: pingerFunc(func(ctx context.Context) error { return sysPool.Ping(ctx) }),
+		SysPostgres: pingerFunc(func(ctx context.Context) error {
+			if hs := sysPool.Health(ctx); !hs.Healthy {
+				return fmt.Errorf("sys database not healthy")
+			}
+			return nil
+		}),
 		Outbox: pingerFunc(func(context.Context) error {
 			select {
 			case <-outboxRunner.Ready():
@@ -359,6 +400,16 @@ func main() {
 		}
 	}
 	cancelBackground()
+	// DrainAndClose waits for in-flight WithConn/RunInTx callbacks then
+	// force-closes — pgcommon's documented graceful path. defer Close()
+	// above remains a safety net for panic/early-return and is idempotent
+	// after DrainAndClose returns (must not run concurrently).
+	if err := pool.DrainAndClose(shutdownCtx); err != nil {
+		log.Error("app pool drain error", map[string]interface{}{"error": err.Error()})
+	}
+	if err := sysPool.DrainAndClose(shutdownCtx); err != nil {
+		log.Error("sysPool drain error", map[string]interface{}{"error": err.Error()})
+	}
 	shutdownTracing()
 	if err := gincommon.Shutdown(log); err != nil {
 		log.Error("logger/tracer flush error", map[string]interface{}{"error": err.Error()})
@@ -395,18 +446,37 @@ func envDuration(key string, def time.Duration) time.Duration {
 	return def
 }
 
+// isDevEnv reports whether appEnv is one of the local/CI-only values that
+// permit a hard dependency's safe placeholder default (§12.1 fail-fast).
+func isDevEnv(appEnv string) bool {
+	return appEnv == "dev" || appEnv == "development" || appEnv == "local" || appEnv == "test"
+}
+
 // mustEnv panics with a descriptive message if key is empty outside
 // APP_ENV=dev — used for hard dependencies (Keycloak, Org & Membership)
 // with no safe placeholder default (§12.1 fail-fast).
 func mustEnv(key, appEnv string) string {
 	v := os.Getenv(key)
 	if v == "" {
-		if appEnv == "dev" || appEnv == "development" || appEnv == "local" || appEnv == "test" {
+		if isDevEnv(appEnv) {
 			return "http://localhost:8081"
 		}
 		panic(fmt.Sprintf("startup aborted — required env var %s is not set", key))
 	}
 	return v
+}
+
+// devDefaultValues maps a required env var to the literal placeholder
+// .env-example ships for local development. validateRequiredEnv rejects
+// any of these surviving into a non-dev APP_ENV unchanged — the failure
+// mode this catches is a dev .env pasted into a staging/production secret
+// verbatim: every other check here only looks for *emptiness*, which such
+// a paste would never trigger, so the service would start and fail
+// confusingly at first real Keycloak/O&M call instead of at boot.
+var devDefaultValues = map[string]string{
+	"KEYCLOAK_BASE_URL":            "http://localhost:8091",
+	"KEYCLOAK_ADMIN_CLIENT_SECRET": "dev-secret-change-me",
+	"ORG_MEMBERSHIP_BASE_URL":      "http://localhost:8082",
 }
 
 // validateRequiredEnv panics with every missing/misconfigured required env
@@ -426,13 +496,19 @@ func validateRequiredEnv(appEnv string) {
 	}
 	var missing []string
 	for _, r := range reqs {
-		if os.Getenv(r.key) != "" {
+		v := os.Getenv(r.key)
+		if v == "" {
+			if r.devOK && isDevEnv(appEnv) {
+				continue
+			}
+			missing = append(missing, r.key+": "+r.reason)
 			continue
 		}
-		if r.devOK && (appEnv == "dev" || appEnv == "development" || appEnv == "local" || appEnv == "test") {
-			continue
+		if !isDevEnv(appEnv) {
+			if def, ok := devDefaultValues[r.key]; ok && v == def {
+				missing = append(missing, r.key+": holds the local-dev placeholder value outside APP_ENV=dev — set a real value")
+			}
 		}
-		missing = append(missing, r.key+": "+r.reason)
 	}
 	if os.Getenv("DATABASE_URL") == "" &&
 		(os.Getenv("PG_HOST") == "" || os.Getenv("PG_USER") == "" || os.Getenv("PG_PASSWORD") == "") {

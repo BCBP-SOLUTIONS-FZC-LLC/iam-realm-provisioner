@@ -42,15 +42,24 @@ service:
   httpPort: 8080
   metricsPort: 9090
 
-# HPA — CPU/memory only. §14 carries no queue-depth-based scaling
-# requirement for this service (unlike a cascade-consumer-heavy sibling),
-# so no custom-metrics adapter is wired here.
+# HPA — CPU/memory by default. §14 carries no queue-depth-based scaling
+# requirement for this service (unlike a cascade-consumer-heavy sibling), so
+# no custom-metrics adapter is wired in by default; RP-1/RP-4 traffic is
+# driven by tenant lifecycle events (signup/conversion/trial expiry), not
+# sustained high RPS.
 autoscaling:
   enabled: true
   minReplicas: 2
   maxReplicas: 4
   targetCPUUtilizationPercentage: 70
   targetMemoryUtilizationPercentage: 80
+  # Optional RPS-based scaling (unset/0 = disabled, CPU/memory only).
+  # PREREQUISITE: prometheus-adapter installed with the rule at
+  # deploy/monitoring/prometheus-adapter-rule.yaml — without it this metric
+  # is silently absent from the custom metrics API and the HPA falls back
+  # to CPU/memory only. Enable only if a given deployment's RP-1/RP-4
+  # traffic justifies it.
+  targetRPSPerReplica: 0
 
 resources:
   requests:
@@ -75,6 +84,12 @@ env:
   # embed host/user/dbname/sslmode, so no discrete PG_HOST/PG_USER/PG_DBNAME
   # is set here.
   PG_MAX_CONNS: "10"
+  # platform-pgcommon's own recommendation when PGBouncerMode is true
+  # (pkg/pgcommon/config.go): "MinConns: 0 — let PgBouncer manage the
+  # backend pool size". Left unset, ConfigFromEnv() defaults PG_MIN_CONNS
+  # to 2 regardless of PG_BOUNCER_MODE, keeping 2 idle backend connections
+  # per pod open against PgBouncer unnecessarily.
+  PG_MIN_CONNS: "0"
   PG_BOUNCER_MODE: "true"
   PG_STATEMENT_TIMEOUT: "5s"
   PG_SLOW_QUERY_THRESHOLD: "200ms"
@@ -89,6 +104,9 @@ env:
   SQS_MEMBERSHIP_REALM_QUEUE_URL: ""
   SQS_TENANT_REALM_QUEUE_URL: ""
   SQS_BILLING_REALM_QUEUE_URL: ""
+  SQS_MEMBERSHIP_REALM_CONCURRENCY: "4"
+  SQS_TENANT_REALM_CONCURRENCY: "4"
+  SQS_BILLING_REALM_CONCURRENCY: "2"
 
   OUTBOX_POLL_INTERVAL: "500ms"
   OUTBOX_BATCH_SIZE: "50"
@@ -238,7 +256,16 @@ readinessProbe:
   initialDelaySeconds: 0
   periodSeconds: 10
   failureThreshold: 3
-  timeoutSeconds: 3
+  # /readyz runs Postgres.Health, SysPostgres.Health, Outbox.Health, and
+  # Keycloak.Ready concurrently with no additional deadline of its own, so
+  # the worst case is bounded by the single slowest check rather than their
+  # sum — but Keycloak.Ready alone can still legitimately take up to
+  # KEYCLOAK_TIMEOUT_MS (8s, below) under real latency (not an outage, just
+  # slowness). A 3s probe timeout would time out the kubelet HTTP GET
+  # itself before the handler's own graceful "not ready: keycloak slow"
+  # response could ever return, flapping the pod out of the Service under
+  # exactly the latency this probe exists to detect cleanly.
+  timeoutSeconds: 10
 
 # NetworkPolicy — enabled by default (§13). Public API traffic (RP-1..RP-16)
 # reaches the "http" port via the gateway/mesh. :9090/metrics is restricted
@@ -380,7 +407,13 @@ cronJobs:
     concurrencyPolicy: Forbid
     successfulJobsHistoryLimit: 3
     failedJobsHistoryLimit: 3
-    activeDeadlineSeconds: 240
+    # Must exceed RECONCILER_TIMEOUT (5m/300s, env block below) — this was
+    # previously 240s, 60s *shorter* than the app's own internal context
+    # deadline, so Kubernetes would hard-kill the Job before the app could
+    # ever exit cleanly on its own terms. 360s leaves the same ~60s buffer
+    # the other CronJobs keep above the shared timeout, while still well
+    # under the 10-minute schedule interval.
+    activeDeadlineSeconds: 360
     resources:
       requests:
         cpu: 100m
@@ -402,7 +435,10 @@ cronJobs:
     concurrencyPolicy: Forbid
     successfulJobsHistoryLimit: 3
     failedJobsHistoryLimit: 3
-    activeDeadlineSeconds: 300
+    # Must exceed RECONCILER_TIMEOUT (5m/300s) — see realmConfigReconcile's
+    # comment above for why an equal value hard-kills the Job before the
+    # app's own internal deadline can fire.
+    activeDeadlineSeconds: 360
     resources:
       requests:
         cpu: 100m
@@ -417,7 +453,10 @@ cronJobs:
     concurrencyPolicy: Forbid
     successfulJobsHistoryLimit: 3
     failedJobsHistoryLimit: 3
-    activeDeadlineSeconds: 300
+    # Must exceed RECONCILER_TIMEOUT (5m/300s) — see realmConfigReconcile's
+    # comment above for why an equal value hard-kills the Job before the
+    # app's own internal deadline can fire.
+    activeDeadlineSeconds: 360
     resources:
       requests:
         cpu: 100m

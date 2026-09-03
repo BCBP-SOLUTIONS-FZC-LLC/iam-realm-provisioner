@@ -1,9 +1,11 @@
 //go:build integration
 
 // Package postgres_test covers IdempotencyRepository (§4.4, §9.2) against
-// `provisioning_operations`: Begin's ON CONFLICT DO NOTHING probe,
-// Complete/Fail's terminal transitions, and a genuine cross-tenant
-// idempotency-key collision edge case that RLS interacts badly with (see
+// `provisioning_operations`: Begin's ON CONFLICT DO UPDATE probe (which
+// reclaims a `failed` row back to `in_progress` but never touches a
+// `succeeded` or genuinely `in_progress` one), Complete/Fail's terminal
+// transitions, and a genuine cross-tenant idempotency-key collision edge
+// case that RLS interacts badly with (see
 // TestIdempotencyRepository/Begin_CrossTenantKeyCollision_DefeatsIdempotency
 // below).
 package postgres_test
@@ -81,7 +83,7 @@ func TestIdempotencyRepository(t *testing.T) {
 		require.NotNil(t, existing.CompletedAt)
 	})
 
-	t.Run("Fail_ThenBeginReportsFailed", func(t *testing.T) {
+	t.Run("Fail_ThenBeginReclaimsTheRowAndProceeds", func(t *testing.T) {
 		t.Parallel()
 		tenantID := uuid.New()
 		tctx := withTenant(ctx, tenantID)
@@ -92,15 +94,70 @@ func TestIdempotencyRepository(t *testing.T) {
 		require.False(t, found)
 		require.NoError(t, repo.Fail(tctx, key))
 
+		// Begin reclaims a `failed` row back to `in_progress` and reports
+		// found=false — the caller proceeds and re-executes the operation,
+		// exactly as Fail's own doc comment promises ("caller retries with
+		// the same key, which re-executes the operation"). Without this,
+		// idempotency_key's PRIMARY KEY plus no cleanup job for
+		// provisioning_operations would let one transient failure
+		// permanently 409 every future retry of the same key.
+		existing, found, err := repo.Begin(tctx, key, tenantID, domain.OpProvisionTrial)
+		require.NoError(t, err)
+		assert.False(t, found)
+		assert.Nil(t, existing)
+
+		// The reclaimed row really is reset, not left half-failed: a
+		// subsequent duplicate Begin (as if two requests raced after the
+		// reclaim) reports it in_progress, not failed, with the stale
+		// result/completed_at cleared.
+		reclaimed, found, err := repo.Begin(tctx, key, tenantID, domain.OpProvisionTrial)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.NotNil(t, reclaimed)
+		assert.Equal(t, domain.OpStatusInProgress, reclaimed.Status)
+		assert.Nil(t, reclaimed.CompletedAt)
+		assert.Empty(t, reclaimed.Result)
+	})
+
+	t.Run("Succeeded_ThenFailedRow_Begin_ReportsSucceededNeverReclaimed", func(t *testing.T) {
+		t.Parallel()
+		tenantID := uuid.New()
+		tctx := withTenant(ctx, tenantID)
+		key := "provision-trial:" + tenantID.String()
+
+		_, found, err := repo.Begin(tctx, key, tenantID, domain.OpProvisionTrial)
+		require.NoError(t, err)
+		require.False(t, found)
+		result := json.RawMessage(`{"ok":true}`)
+		require.NoError(t, repo.Complete(tctx, key, result))
+
+		// Only a `failed` row is ever reclaimed — a `succeeded` row must
+		// stay a pure replay target forever, never re-executed.
 		existing, found, err := repo.Begin(tctx, key, tenantID, domain.OpProvisionTrial)
 		require.NoError(t, err)
 		require.True(t, found)
 		require.NotNil(t, existing)
-		assert.Equal(t, domain.OpStatusFailed, existing.Status)
-		// A failed row is never replaced by Begin's ON CONFLICT DO NOTHING —
-		// the service layer must reissue the *same* key to retry, which
-		// re-executes the Keycloak call and eventually calls Complete on
-		// this same row (§9.2). Begin itself never resurrects a failed row.
+		assert.Equal(t, domain.OpStatusSucceeded, existing.Status)
+		assert.JSONEq(t, string(result), string(existing.Result))
+	})
+
+	t.Run("Begin_DuplicateKey_InProgressIsNeverReclaimed", func(t *testing.T) {
+		t.Parallel()
+		tenantID := uuid.New()
+		tctx := withTenant(ctx, tenantID)
+		key := "provision-trial:" + tenantID.String()
+
+		_, found, err := repo.Begin(tctx, key, tenantID, domain.OpProvisionTrial)
+		require.NoError(t, err)
+		require.False(t, found)
+
+		// A genuinely still-in_progress row must never be reclaimed —
+		// doing so risks two concurrent executions of the same operation.
+		existing, found, err := repo.Begin(tctx, key, tenantID, domain.OpProvisionTrial)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.NotNil(t, existing)
+		assert.Equal(t, domain.OpStatusInProgress, existing.Status)
 	})
 
 	t.Run("Complete_UnknownKey_IsSilentNoOp", func(t *testing.T) {

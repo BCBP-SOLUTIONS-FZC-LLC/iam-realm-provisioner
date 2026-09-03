@@ -21,7 +21,7 @@ type ProvisioningOperation struct {
 }
 
 // Operation names — additive per-endpoint discriminators for
-// `provisioning_operations.operation` (§23 notes this set is additive, not
+// `provisioning_operations.operation` (§25 notes this set is additive, not
 // enumerated exhaustively in the frozen inventory).
 const (
 	OpProvisionTrial    = "provision_trial"

@@ -27,6 +27,7 @@ const (
 	ErrConversionFailed           ErrorCode = "conversion_failed"             // 502
 	ErrOrgMembershipUnavailable   ErrorCode = "org_membership_unavailable"    // 503
 	ErrObjectStoreUnavailable     ErrorCode = "object_store_unavailable"      // 503
+	ErrDBUnavailable              ErrorCode = "db_unavailable"                // 503
 
 	// ErrInvalidRequest is additive to the frozen §17 taxonomy -- a generic
 	// malformed-JSON/failed-binding-validation 400, distinct from the
@@ -55,6 +56,7 @@ var httpStatus = map[ErrorCode]int{
 	ErrConversionFailed:           502,
 	ErrOrgMembershipUnavailable:   503,
 	ErrObjectStoreUnavailable:     503,
+	ErrDBUnavailable:              503,
 }
 
 // Error is this service's domain error type: a stable code, an HTTP status

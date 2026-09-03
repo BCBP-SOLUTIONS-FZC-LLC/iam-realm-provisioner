@@ -172,15 +172,34 @@ func TestValidateIdpConfig_WarnChecks_RequireAcknowledgement(t *testing.T) {
 	}
 }
 
-// carriesRegion is checked against the raw slo_url twice (checks 2 and 5)
-// — a single region-pinned slo_url fails both simultaneously.
-func TestValidateIdpConfig_SLOURLRegion_FailsBothDependentChecks(t *testing.T) {
+// check 5 (CheckSLOResponseRegion) examines slo_response_url, which
+// defaults to slo_url when the caller never supplies a distinct value —
+// the overwhelming common case, since a SAML SingleLogoutService's
+// ResponseLocation defaults to its Location when unset. A caller that
+// never sets slo_response_url therefore fails both checks 2 and 5
+// simultaneously off the one region-pinned slo_url.
+func TestValidateIdpConfig_SLOURLRegion_NoDistinctResponseURL_FailsBothDependentChecks(t *testing.T) {
 	cfg := validBaselineSAMLConfig()
 	cfg["slo_url"] = "https://idp.example.com/ap-south-1/slo"
 	result := ValidateIdpConfig(domain.IdpProtocolSAML, cfg, nil)
 	assert.Equal(t, domain.ValidationOutcomeFailing, result.Outcome)
 	assert.Contains(t, result.Failed, domain.CheckSLOURLRegion)
 	assert.Contains(t, result.Failed, domain.CheckSLOResponseRegion)
+}
+
+// CRITICAL: when a caller DOES supply a distinct slo_response_url, check 5
+// must examine THAT value independently of slo_url — not silently re-check
+// slo_url under a different check ID (the bug this test guards against: a
+// region-pinned slo_response_url must fail check 5 even when slo_url
+// itself is perfectly region-neutral).
+func TestValidateIdpConfig_DistinctSLOResponseURL_ValidatedIndependently(t *testing.T) {
+	cfg := validBaselineSAMLConfig()
+	cfg["slo_url"] = "https://idp.example.com/slo/saml" // region-neutral, must pass check 2
+	cfg["slo_response_url"] = "https://idp.example.com/ap-south-1/slo-response"
+	result := ValidateIdpConfig(domain.IdpProtocolSAML, cfg, nil)
+	assert.Equal(t, domain.ValidationOutcomeFailing, result.Outcome)
+	assert.NotContains(t, result.Failed, domain.CheckSLOURLRegion, "slo_url itself is region-neutral and must pass check 2")
+	assert.Contains(t, result.Failed, domain.CheckSLOResponseRegion, "a region-pinned slo_response_url must fail check 5 even though slo_url passes")
 }
 
 // Optional fields left empty are treated as pass, not fail — an IdP config

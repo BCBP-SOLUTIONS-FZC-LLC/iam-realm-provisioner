@@ -158,6 +158,13 @@ func (m *fakeTenantRealmRepository) ListExpiredTrials(ctx context.Context, limit
 	}
 	return out, nil
 }
+func (m *fakeTenantRealmRepository) ListSuspendedPastRetention(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error) {
+	var out []*domain.TenantRealm
+	for _, r := range m.rows {
+		out = append(out, r)
+	}
+	return out, nil
+}
 func (m *fakeTenantRealmRepository) CountsByShard(ctx context.Context) (map[string]int, error) {
 	out := map[string]int{}
 	for _, r := range m.rows {
@@ -178,6 +185,15 @@ var _ port.IdempotencyStore = (*fakeIdempotencyStore)(nil)
 
 func (m *fakeIdempotencyStore) Begin(ctx context.Context, key string, tenantID uuid.UUID, operation string) (*domain.ProvisioningOperation, bool, error) {
 	if existing, ok := m.rows[key]; ok {
+		if existing.Status == domain.OpStatusFailed {
+			// Mirrors IdempotencyRepository.Begin's ON CONFLICT DO UPDATE
+			// ... WHERE status='failed' reclaim — a failed row is reset and
+			// the caller proceeds, never permanently 409s.
+			existing.Status = domain.OpStatusInProgress
+			existing.Result = nil
+			existing.CompletedAt = nil
+			return nil, false, nil
+		}
 		cp := *existing
 		return &cp, true, nil
 	}
@@ -205,7 +221,7 @@ type fakeEventPublisher struct {
 	events []*domain.Event
 }
 
-func (p *fakeEventPublisher) EnqueueCtx(ctx context.Context, event *domain.Event) error {
+func (p *fakeEventPublisher) Enqueue(ctx context.Context, event *domain.Event) error {
 	p.events = append(p.events, event)
 	return nil
 }
@@ -353,8 +369,8 @@ func (m *fakeReconciliationRepository) ListPending(ctx context.Context, limit in
 func (m *fakeReconciliationRepository) MarkApplied(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
-func (m *fakeReconciliationRepository) MarkFailed(ctx context.Context, id uuid.UUID, lastErr string) error {
-	return nil
+func (m *fakeReconciliationRepository) MarkFailed(ctx context.Context, id uuid.UUID, lastErr string, maxAttempts int) (domain.ReconStatus, error) {
+	return domain.ReconStatusPending, nil
 }
 
 // ── fakeOrgMembershipClient. ─────────────────────────────────────────────────

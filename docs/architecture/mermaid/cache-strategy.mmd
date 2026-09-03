@@ -1,0 +1,61 @@
+flowchart TD
+    subgraph design["LLD §6 design — Valkey rp: keyspace (this service is NOT on a hot path)"]
+        d1["rp:kcadmin:token\n→ Keycloak admin service-account access token\nTTL: token expires_in minus 30s safety margin\nInvalidated by TTL only, refreshed on 401"]
+        d2["rp:idem:{key}\n→ {operation, status, result_ref} fast-path mirror\nof a provisioning_operations row\nTTL: 24h, invalidated by TTL only"]
+    end
+
+    subgraph actual["Actual implementation in this repo (RP-D4, Session-specific decision #3)"]
+        a1["internal/adapter/outbound/keycloak/admin_token.go\ntokenCache — IN-PROCESS fallback tier, per replica\nNo valkey/ outbound adapter exists yet in this repo —\nLLD §6.2 Valkey tier is not implemented, correctness is\nunaffected, only token-endpoint call rate rises per replica"]
+        a2["provisioning_operations (Postgres) is read directly —\nno rp:idem:{key} fast-path cache exists in code —\nidempotency.Begin/Complete/Fail always hit Postgres"]
+    end
+
+    subgraph tokencache["tokenCache.Token(ctx) — single-flight admin-token cache"]
+        t1{{"token is non-empty AND\nnow < expiresAt?"}}
+        t2["Return cached token\n(cache hit — no Keycloak call)"]
+        t3{{"refresh already\ninflight (chan != nil)?"}}
+        t4["Wait on the inflight channel,\nthen re-check the now-refreshed cache\n(single-flight — one refresh serves every\nconcurrent caller during a migration burst)"]
+        t5["Claim inflight, call LoginClient\n(client-credentials grant)\ntrigger label: proactive (aged out) or\n401 (InvalidateUnauthorized was called)"]
+        t6["metrics.AdminTokenRefreshTotal{trigger}++\nmetrics.KeycloakCallDuration{op=token}.Observe"]
+        t7{{"refresh\nsucceeded?"}}
+        t8["Cache token, expiresAt = now + expires_in − 30s\nclose(inflight channel)"]
+        t9["metrics.KeycloakCallFailuresTotal{op=token}++\nclose(inflight channel), token stays empty"]
+
+        t1 -- yes --> t2
+        t1 -- no --> t3
+        t3 -- yes --> t4
+        t3 -- no --> t5
+        t5 --> t6
+        t6 --> t7
+        t7 -- yes --> t8
+        t7 -- no --> t9
+    end
+
+    subgraph invalidation["Invalidation paths"]
+        i1["Invalidate() — post-create realm-admin grant refresh\n(deliberate re-mint, trigger stays 'proactive')"]
+        i2["InvalidateUnauthorized() — Keycloak rejected the\ncached token with 401 — drops it and sets\nunauthorized=true so the NEXT mint is\nattributed to trigger='401' (rotation visibility, §11.6)"]
+    end
+
+    subgraph idemfast["Idempotency ledger 'fast path' (§6.2) and failure mode (§6.3)"]
+        f1["Every mutating RP-1..RP-6/RP-10/RP-12/RP-14 call starts\nwith idempotency.Begin(key, tenantID, operation)"]
+        f2{{"provisioning_operations row\nfound for this key?"}}
+        f3["status=succeeded → replay stored result JSON,\nno Keycloak call, no transaction (IDEMP-3)"]
+        f4["status=in_progress or failed →\n409 operation_in_progress (retry with same key)"]
+        f5["not found → row inserted in_progress,\nrequest proceeds Keycloak-effect-first (write-flow.mmd)"]
+        f1 --> f2
+        f2 -- yes, succeeded --> f3
+        f2 -- yes, other --> f4
+        f2 -- no --> f5
+    end
+
+    subgraph failure["Cache failure mode (§6.4)"]
+        m1["Nothing in this service is on a hot path and\ncorrectness never depends on any cache"]
+        m2["A dropped/missing in-process token → one extra\nKeycloak token-endpoint round trip, not a request failure"]
+        m3["/readyz does NOT fail on the token cache being cold —\nit checks Postgres, sys-Postgres, outbox, and\nKeycloak Ready() (admin-token bootstrap), CACHE-9"]
+        m1 --> m2 --> m3
+    end
+
+    design -.->|"documented but only the token-cache tier is built"| actual
+    actual --> tokencache
+    tokencache --> invalidation
+    actual --> idemfast
+    tokencache --> failure

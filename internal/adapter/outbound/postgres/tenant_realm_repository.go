@@ -11,7 +11,7 @@ import (
 )
 
 const tenantRealmColumns = `tenant_id, realm_name, strategy, keycloak_shard, status,
-	realm_template_version, trial_ends_at, converted_at, disabled_at, exported_at,
+	realm_template_version, trial_ends_at, converted_at, disabled_at, suspension_source, exported_at,
 	export_s3_key, record_version, created_at, updated_at, deleted_at`
 
 // TenantRealmRepository implements port.TenantRealmRepository (§4.2).
@@ -28,7 +28,7 @@ func NewTenantRealmRepository(pool *pgcommon.Pool) *TenantRealmRepository {
 func scanTenantRealm(row pgx.Row) (*domain.TenantRealm, error) {
 	var t domain.TenantRealm
 	err := row.Scan(&t.TenantID, &t.RealmName, &t.Strategy, &t.KeycloakShard, &t.Status,
-		&t.RealmTemplateVersion, &t.TrialEndsAt, &t.ConvertedAt, &t.DisabledAt, &t.ExportedAt,
+		&t.RealmTemplateVersion, &t.TrialEndsAt, &t.ConvertedAt, &t.DisabledAt, &t.SuspensionSource, &t.ExportedAt,
 		&t.ExportS3Key, &t.RecordVersion, &t.CreatedAt, &t.UpdatedAt, &t.DeletedAt)
 	if err != nil {
 		return nil, err
@@ -64,8 +64,8 @@ func (r *TenantRealmRepository) Upsert(ctx context.Context, t *domain.TenantReal
 	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
 			INSERT INTO tenant_realms (tenant_id, realm_name, strategy, keycloak_shard, status,
-				realm_template_version, trial_ends_at, converted_at, disabled_at, exported_at, export_s3_key)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+				realm_template_version, trial_ends_at, converted_at, disabled_at, suspension_source, exported_at, export_s3_key)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 			ON CONFLICT (tenant_id) DO UPDATE SET
 				realm_name = EXCLUDED.realm_name,
 				strategy = EXCLUDED.strategy,
@@ -75,12 +75,13 @@ func (r *TenantRealmRepository) Upsert(ctx context.Context, t *domain.TenantReal
 				trial_ends_at = EXCLUDED.trial_ends_at,
 				converted_at = EXCLUDED.converted_at,
 				disabled_at = EXCLUDED.disabled_at,
+				suspension_source = EXCLUDED.suspension_source,
 				exported_at = EXCLUDED.exported_at,
 				export_s3_key = EXCLUDED.export_s3_key,
 				record_version = tenant_realms.record_version + 1,
 				updated_at = now()`,
 			t.TenantID, t.RealmName, t.Strategy, t.KeycloakShard, t.Status,
-			t.RealmTemplateVersion, t.TrialEndsAt, t.ConvertedAt, t.DisabledAt, t.ExportedAt, t.ExportS3Key)
+			t.RealmTemplateVersion, t.TrialEndsAt, t.ConvertedAt, t.DisabledAt, t.SuspensionSource, t.ExportedAt, t.ExportS3Key)
 		return err
 	})
 }
@@ -94,11 +95,11 @@ func (r *TenantRealmRepository) Update(ctx context.Context, t *domain.TenantReal
 			UPDATE tenant_realms SET
 				realm_name = $2, strategy = $3, keycloak_shard = $4, status = $5,
 				realm_template_version = $6, trial_ends_at = $7, converted_at = $8,
-				disabled_at = $9, exported_at = $10, export_s3_key = $11,
+				disabled_at = $9, suspension_source = $10, exported_at = $11, export_s3_key = $12,
 				record_version = record_version + 1, updated_at = now()
-			WHERE tenant_id = $1 AND record_version = $12`,
+			WHERE tenant_id = $1 AND record_version = $13`,
 			t.TenantID, t.RealmName, t.Strategy, t.KeycloakShard, t.Status,
-			t.RealmTemplateVersion, t.TrialEndsAt, t.ConvertedAt, t.DisabledAt, t.ExportedAt,
+			t.RealmTemplateVersion, t.TrialEndsAt, t.ConvertedAt, t.DisabledAt, t.SuspensionSource, t.ExportedAt,
 			t.ExportS3Key, t.RecordVersion)
 		if err != nil {
 			return err
@@ -152,6 +153,40 @@ func (r *TenantRealmRepository) ListExpiredTrials(ctx context.Context, limit int
 			WHERE strategy = 'shared' AND status = 'active' AND trial_ends_at < now()
 			ORDER BY trial_ends_at ASC
 			LIMIT $1`, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			t, err := scanTenantRealm(rows)
+			if err != nil {
+				return err
+			}
+			out = append(out, t)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ListSuspendedPastRetention returns dedicated realms suspended by the
+// RP-C3 billing-lapse sweep (never operator suspensions, §8.8 —
+// suspension_source narrows this at the SQL level, not in application
+// code) whose disabled_at is older than retentionDays
+// (idx_tenant_realms_lapse_offboard). Runs against a BYPASSRLS pool since
+// the reconciler sweeps across every tenant.
+func (r *TenantRealmRepository) ListSuspendedPastRetention(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error) {
+	var out []*domain.TenantRealm
+	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT `+tenantRealmColumns+` FROM tenant_realms
+			WHERE status = 'suspended' AND suspension_source = 'billing_lapse'
+				AND disabled_at < now() - make_interval(days => $1)
+			ORDER BY disabled_at ASC
+			LIMIT $2`, retentionDays, limit)
 		if err != nil {
 			return err
 		}

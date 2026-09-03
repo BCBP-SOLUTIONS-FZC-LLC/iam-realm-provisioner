@@ -21,7 +21,7 @@ const (
 )
 
 // §11.6 Region-Agnostic IdP Configuration Checklist check IDs. CRITICAL
-// checks (1-2, 4-6, 10-12) block with 400 idp_region_portability_failed;
+// checks (1-6, 10-12) block with 400 idp_region_portability_failed;
 // WARN checks (7-9, 13) allow with a recorded acknowledgement.
 const (
 	CheckSSOURLRegion        = "check_1_sso_url_region"

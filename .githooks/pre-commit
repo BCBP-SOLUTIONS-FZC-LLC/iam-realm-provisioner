@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Local commit gates: formatting, vet, and lint.
+# Ported from iam-user-profile's .githooks/pre-commit — dropped the Swagger
+# staleness check (this service has no Swagger setup; it has no public HTTP
+# surface, and its API-drift gate is the AsyncAPI/eventschema test in
+# `make test`, not a pre-commit-friendly regenerate-and-diff step).
+set -euo pipefail
+
+echo "[pre-commit] running tidy..."
+make tidy
+
+echo "[pre-commit] running fmt-check..."
+make fmt-check
+
+echo "[pre-commit] running vet..."
+make vet
+
+echo "[pre-commit] running lint..."
+make lint

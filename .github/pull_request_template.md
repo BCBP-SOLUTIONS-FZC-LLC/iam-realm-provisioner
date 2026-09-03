@@ -39,7 +39,7 @@ Provide a clear description of the changes.
 - [ ] AsyncAPI spec updated if a new event type or payload field was added (`api/asyncapi.yaml`)
 - [ ] Event schema JSON files updated to match (`internal/eventschema/*.json`)
 - [ ] `internal/eventschema/asyncapi_drift_test.go` passes — the AsyncAPI channel's message list and `eventschema.ByEventType`'s keys stay in lockstep
-- [ ] Frozen §23 event/field names were not renamed
+- [ ] Frozen §25 event/field names were not renamed
 
 ### RP-INV-1 / Secret Handling
 *Complete only when a Keycloak or OpenBao code path was added or changed.*

@@ -69,7 +69,7 @@ func expireTrialTenant(ctx context.Context, jctx *Context, idemKey string, row *
 		if !ok {
 			return nil
 		}
-		return pub.EnqueueCtx(ctx, &domain.Event{
+		return pub.Enqueue(ctx, &domain.Event{
 			Type:     domain.EventTrialExpired,
 			TenantID: row.TenantID,
 			Actor:    domain.SystemActorID,

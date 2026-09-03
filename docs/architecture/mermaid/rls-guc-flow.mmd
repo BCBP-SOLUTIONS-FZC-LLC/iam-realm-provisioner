@@ -1,0 +1,43 @@
+sequenceDiagram
+    participant MW as GUCBridgeMiddleware
+    participant RC as requestctx.RequestContext
+    participant GUC as pgcommon.WithGUCSet / GUCSetFromContext
+    participant Pool as pgx Pool (platform-pgcommon)
+    participant PGB as PgBouncer (transaction pooling, prod)
+    participant DB as PostgreSQL (RLS)
+
+    Note over MW,GUC: Runs after gincommon.ProtectedMiddlewares (RequireAuth + ContextMiddleware),<br/>before RequireJSONContentType / RequireSystemRole (router.go, registerInternalRoutes) —<br/>router.go: protected := ProtectedMiddlewares + GUCBridgeMiddleware + RequireJSONContentType
+
+    MW ->>+ RC: gincommon.RequestContext(c) → parseBridgedIdentity{UserID, TenantID, Roles, ClientIP}
+    RC -->>- MW: requestctx.RequestContext (or 401 missing_identity_headers on parse failure)
+
+    MW ->>+ GUC: bind tenant_id into ctx for every downstream RunInTx / pool checkout
+    GUC -->>- MW: ctx now carries the GUC binding
+    Note over MW: cmd/server/main.go: pgCfg.GUCProvider = pgcommon.GUCSetFromContext<br/>— the security-critical wiring line, set once at pool construction
+
+    Note over Pool,DB: On every pool checkout — pool was built with GUCProvider = GUCSetFromContext.<br/>Binding happens BEFORE the app query, inside the SAME transaction (RLS-6).
+
+    Pool ->>+ PGB: acquire backend from pool
+    PGB -->>- Pool: pooled connection (may be shared with a prior tenant's transaction)
+
+    Pool ->>+ DB: BEGIN
+    Pool ->> DB: SELECT set_config('app.tenant_id', '{tenantID}', true)
+    Note over DB: is_local => true ⇒ SET LOCAL semantics.<br/>Value scoped to THIS transaction only.<br/>Never a session-scoped SET — would persist on a pooled<br/>PgBouncer backend and leak across tenants (RLS-6 hazard).<br/>CI greps every .go file for a non-LOCAL SET app.tenant_id (arch-lint.sh).
+
+    Pool ->> DB: SELECT / UPDATE / INSERT (application query)
+    Note over DB: FORCE ROW LEVEL SECURITY on the 5 tenant-scoped tables<br/>(tenant_realms, keycloak_idp_configs, keycloak_idp_config_validations,<br/>realm_config_reconciliations, provisioning_operations):<br/>  REVOKE ALL FROM PUBLIC<br/>  POLICY tenant_isolation USING (rls_check_tenant(tenant_id, 'tenant_realms'))<br/>                          WITH CHECK (rls_check_tenant(tenant_id, 'tenant_realms'))<br/>  — second arg is a literal per table (its own name), passed through for the audit log<br/>app_tenant_id — STABLE SECURITY DEFINER, reads current_setting('app.tenant_id', true),<br/>returns NULL on any error (missing/malformed) — fail closed.<br/>rls_check_tenant — STABLE STRICT SECURITY DEFINER, true iff p_tenant_id = app_tenant_id() —<br/>on mismatch/missing GUC, 1%-sampled log_rls_violation() insert into rls_violation_log (Layer 3),<br/>self-swallowing so a logging failure never aborts the caller's transaction.
+
+    DB -->> Pool: rows (tenant-scoped) or WITH CHECK violation
+
+    Pool ->> DB: COMMIT (or ROLLBACK)
+    Note over DB: SET LOCAL value discarded on tx end.<br/>Next transaction on the same backend starts with a fresh, empty app.tenant_id.
+    DB -->>- Pool: tx complete
+
+    Pool ->>+ PGB: release backend to pool
+    PGB -->>- Pool: connection returned (safe to hand to next tenant — no residual GUC)
+
+    Note over DB,PGB: Canonical RLS Case 5 test (test/postgres/rls_test.go, RLS-6):<br/>Pool pinned to MaxConns=1 — tenant A tx → commit → return conn →<br/>tenant B tx on the SAME backend → assert B sees 0 of A's rows.<br/>Structural tests additionally confirm all 5 tables have<br/>rowsecurity=true AND forcerowsecurity=true, and that outbox_events/<br/>processed_events are deliberately exempt (2 RLS-exempt operational tables).
+
+    Note over MW,DB: Cross-tenant reads (reconciler jobs, RP-13 whole-estate audit) use a<br/>SEPARATE BYPASSRLS pool (sysPool, realm_provisioner_migrator role) with<br/>NO GUCProvider at all — never the app pool with an empty GUC, which would<br/>see 0 rows under RLS rather than leaking (FAIL-5).
+
+    Note over MW,DB: rls_violation_log itself has RLS deliberately DISABLED (audit-only,<br/>9th table) so log_rls_violation() writing to it cannot recurse into its<br/>own policy check.

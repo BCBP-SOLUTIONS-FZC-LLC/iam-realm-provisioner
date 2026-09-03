@@ -3,8 +3,9 @@
 // Package postgres_test covers ProcessedEventsRepository (§4.5, §7) against
 // the RLS-exempt `processed_events` dedup ledger: IsProcessed/MarkProcessed,
 // the (event_id, consumer) composite-PK dedup (both via ON CONFLICT DO
-// NOTHING and the raw unique-violation it backs), MarkProcessedInTx joining
-// an existing transaction, and CleanupExpired's TTL sweep.
+// NOTHING and the raw unique-violation it backs), MarkProcessed joining an
+// ambient transaction (the consumers' path) as well as MarkProcessedInTx
+// joining an explicitly passed one, and CleanupExpired's TTL sweep.
 package postgres_test
 
 import (
@@ -115,8 +116,53 @@ func TestProcessedEventsRepository(t *testing.T) {
 		assert.False(t, processed, "the dedup write must roll back with the rest of the caller's transaction")
 	})
 
-	t.Run("CleanupExpired_DeletesOnlyRowsOlderThanTTL", func(t *testing.T) {
+	// The two subtests below cover what the consumers actually call.
+	// MarkProcessed goes through withPool, so it joins an ambient
+	// transaction when one is bound into ctx and opens its own when not —
+	// that is what makes TenantConsumer/BillingConsumer's projection write
+	// and dedup mark commit as a unit (§7.1, IDEMP-2) without those
+	// consumers ever handling a pgx.Tx.
+	t.Run("MarkProcessed_JoinsAnAmbientTransaction", func(t *testing.T) {
 		t.Parallel()
+		eventID := uuid.NewString()
+		txRunner := pgadapter.NewTxRunner(appPool, nil)
+		require.NoError(t, txRunner.RunInTx(ctx, func(txCtx context.Context) error {
+			return repo.MarkProcessed(txCtx, domain.ConsumerTenant, eventID)
+		}))
+
+		processed, err := repo.IsProcessed(ctx, domain.ConsumerTenant, eventID)
+		require.NoError(t, err)
+		assert.True(t, processed)
+	})
+
+	t.Run("MarkProcessed_RollsBackWithTheAmbientTransaction", func(t *testing.T) {
+		t.Parallel()
+		eventID := uuid.NewString()
+		errBoom := errors.New("boom: caller's projection update failed")
+		txRunner := pgadapter.NewTxRunner(appPool, nil)
+		err := txRunner.RunInTx(ctx, func(txCtx context.Context) error {
+			if err := repo.MarkProcessed(txCtx, domain.ConsumerTenant, eventID); err != nil {
+				return err
+			}
+			return errBoom
+		})
+		require.ErrorIs(t, err, errBoom)
+
+		processed, err := repo.IsProcessed(ctx, domain.ConsumerTenant, eventID)
+		require.NoError(t, err)
+		assert.False(t, processed,
+			"a consumer whose projection write fails must not leave the event marked processed — redelivery has to retry it")
+	})
+
+	// CleanupExpired_DeletesOnlyRowsOlderThanTTL and Prune_HonoursBatchLimit
+	// both sweep processed_events (an RLS-exempt, non-tenant-scoped global
+	// table, §4.5) with unscoped criteria — each other's backdated rows are
+	// indistinguishable from its own, so running them as parallel siblings
+	// races: one test's sweep can consume rows the other just inserted,
+	// producing a flaky deleted-count mismatch. Neither is t.Parallel(),
+	// so they run sequentially relative to each other before any of this
+	// parent's other (genuinely independent) parallel subtests start.
+	t.Run("CleanupExpired_DeletesOnlyRowsOlderThanTTL", func(t *testing.T) {
 		oldEventID := uuid.NewString()
 		recentEventID := uuid.NewString()
 		_, err := rawPool.Exec(ctx, `INSERT INTO processed_events (event_id, consumer, processed_at) VALUES ($1, 'tenant', now() - interval '10 days')`, oldEventID)
@@ -134,5 +180,21 @@ func TestProcessedEventsRepository(t *testing.T) {
 		recentProcessed, err := repo.IsProcessed(ctx, domain.ConsumerTenant, recentEventID)
 		require.NoError(t, err)
 		assert.True(t, recentProcessed, "a row inside the TTL window must survive the sweep")
+	})
+
+	t.Run("Prune_HonoursBatchLimit", func(t *testing.T) {
+		ids := []string{uuid.NewString(), uuid.NewString(), uuid.NewString()}
+		for _, id := range ids {
+			_, err := rawPool.Exec(ctx, `INSERT INTO processed_events (event_id, consumer, processed_at) VALUES ($1, 'tenant', now() - interval '10 days')`, id)
+			require.NoError(t, err)
+		}
+
+		deleted, err := repo.Prune(ctx, 7, 2)
+		require.NoError(t, err)
+		assert.Equal(t, 2, deleted)
+
+		deleted, err = repo.Prune(ctx, 7, 2)
+		require.NoError(t, err)
+		assert.Equal(t, 1, deleted)
 	})
 }

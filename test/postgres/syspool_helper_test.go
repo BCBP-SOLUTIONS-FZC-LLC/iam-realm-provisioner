@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/test/dbseed"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,7 +23,7 @@ import (
 // gets its CRUD privileges from Terraform, which this test harness doesn't
 // run, so they are granted here directly instead. BYPASSRLS alone bypasses
 // row-security policies, not GRANT-based table permissions.
-func setupSysPool(t testing.TB, rawPool *pgxpool.Pool) *pgcommon.Pool {
+func setupSysPool(t testing.TB, rawPool *dbseed.Pool) *pgcommon.Pool {
 	t.Helper()
 	ctx := context.Background()
 
@@ -34,10 +34,27 @@ func setupSysPool(t testing.TB, rawPool *pgxpool.Pool) *pgcommon.Pool {
 		TO realm_provisioner_migrator`)
 	require.NoError(t, err)
 
+	// GaugeRepository.RLSViolationCounts reads this table via sysPool —
+	// SELECT-only, this role never writes rls_violation_log. Production's
+	// equivalent grant is Terraform-owned (this repo has no rls_violation_log
+	// GRANT of its own to realm_provisioner_migrator; see the comment on
+	// RLSViolationCounts).
+	_, err = rawPool.Exec(ctx, `GRANT SELECT ON rls_violation_log TO realm_provisioner_migrator`)
+	require.NoError(t, err)
+
+	// RLSViolationCounts's persisted high-water mark (§4.2) — read via
+	// SELECT ... FOR UPDATE and written back after every scrape. Same
+	// Terraform-is-the-real-grant-owner caveat as rls_violation_log above.
+	_, err = rawPool.Exec(ctx, `GRANT SELECT, INSERT, UPDATE ON exporter_watermarks TO realm_provisioner_migrator`)
+	require.NoError(t, err)
+
 	cfg := rawPool.Config().ConnConfig
 	dsn := fmt.Sprintf("postgres://realm_provisioner_migrator:%s@%s:%d/%s?sslmode=disable",
 		migratorPassword, cfg.Host, cfg.Port, cfg.Database)
-	pool, err := pgcommon.NewPool(ctx, pgcommon.Config{DSN: dsn})
+	pool, err := pgcommon.NewPool(ctx, pgcommon.Config{
+		DSN:           dsn,
+		PGBouncerMode: false, // testcontainer talks to Postgres directly
+	})
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	return pool

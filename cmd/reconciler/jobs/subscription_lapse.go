@@ -10,73 +10,116 @@ import (
 	"github.com/google/uuid"
 )
 
-// SubscriptionLapse is RP-C3 (0 2 * * *, §8.8/§8.9): daily sweep of
-// dedicated tenants' subscription_status + timestamps (read from O&M via
-// jctx.SubscriptionStatus — see port.SubscriptionStatusReader's doc for the
-// open coordination item on the exact O&M endpoint) driving Keycloak
-// effects:
-//   - cancelled past CANCELLED_GRACE_DAYS -> disable dedicated realm,
-//     status='suspended', emit TenantSuspended(source='billing_lapse').
-//   - suspended (billing_lapse only — §8.8 excludes operator suspensions)
-//     past RETENTION_DAYS total -> export realm to S3 THEN delete it,
-//     status='exported'->'deleted', scrub row, emit TenantOffboarded
-//     (terminal, RP-INV-5). Never deletes without a confirmed export.
+// SubscriptionLapse is RP-C3 (0 2 * * *, §8.8/§8.9): the daily billing-lapse
+// sweep, in two independently-sourced phases:
+//
+//   - Suspend: O&M's I-16 GET /subscription-lapses (port.SubscriptionLapseReader)
+//     names every dedicated tenant already cancelled past its grace period —
+//     O&M owns that grace-period math, so RP never re-derives it. For each,
+//     disable the dedicated realm, set status='suspended' with
+//     suspension_source='billing_lapse', emit TenantSuspended(source=
+//     'billing_lapse'). Self-idempotent on O&M's side (suspending drops the
+//     tenant from the next poll) and on RP's side (the idempotency ledger).
+//   - Offboard: purely local — tenant_realms rows already
+//     status='suspended' AND suspension_source='billing_lapse' (never
+//     'operator', §8.8) whose disabled_at is past RETENTION_DAYS
+//     (port.TenantRealmRepository.ListSuspendedPastRetention). O&M's
+//     endpoint carries no signal for this half; it only ever reports the
+//     cancel event, not how long a tenant has been suspended. Export realm
+//     to S3 THEN delete it, status='exported'->'deleted', scrub row, emit
+//     TenantOffboarded (terminal, RP-INV-5). Never deletes without a
+//     confirmed export.
 func SubscriptionLapse(ctx context.Context, jctx *Context) (Result, error) {
 	var res Result
 
-	if jctx.SubscriptionStatus == nil {
-		jctx.Logger.WarnContext(ctx, "subscription-lapse: no SubscriptionStatusReader wired — skipping (see port.SubscriptionStatusReader doc)", nil)
-		return res, nil
-	}
-
-	infos, err := jctx.SubscriptionStatus.ListDedicatedTenantSubscriptions(ctx)
-	if err != nil {
+	if jctx.SubscriptionLapses == nil {
+		jctx.Logger.WarnContext(ctx, "subscription-lapse: no SubscriptionLapseReader wired — skipping suspend phase", nil)
+	} else if err := runSuspendPhase(ctx, jctx, &res); err != nil {
 		return res, err
 	}
 
-	now := time.Now().UTC()
-	for _, info := range infos {
-		if res.Attempted >= jctx.BatchLimit {
-			break
-		}
-		switch {
-		case info.SubscriptionStatus == "cancelled" && info.CancelledAt != nil && //nolint:misspell // "cancelled" matches O&M's actual enum value spelling (frozen contract)
-			now.Sub(*info.CancelledAt) >= time.Duration(jctx.CancelledGraceDays)*24*time.Hour:
-			res.Attempted++
-			if err := suspendLapsedTenant(ctx, jctx, info); err != nil {
-				jctx.Logger.WarnContext(ctx, "subscription-lapse: suspend defer", "tenant_id", info.TenantID, "error", err.Error())
-				res.Failed++
-				continue
-			}
-			metrics.LapseProcessedTotal.WithLabelValues("suspend").Inc()
-			res.Succeeded++
-
-		case info.SubscriptionStatus == "suspended" && info.SuspensionSource == "billing_lapse" &&
-			info.SuspendedAt != nil && now.Sub(*info.SuspendedAt) >= time.Duration(jctx.RetentionDays)*24*time.Hour:
-			res.Attempted++
-			if err := offboardTenant(ctx, jctx, info); err != nil {
-				jctx.Logger.WarnContext(ctx, "subscription-lapse: offboard defer", "tenant_id", info.TenantID, "error", err.Error())
-				res.Failed++
-				continue
-			}
-			metrics.LapseProcessedTotal.WithLabelValues("offboard").Inc()
-			res.Succeeded++
-
-		default:
-			res.Skipped++
-		}
+	if err := runOffboardPhase(ctx, jctx, &res); err != nil {
+		return res, err
 	}
+
 	jctx.Logger.InfoContext(ctx, "subscription-lapse complete", "attempted", res.Attempted, "succeeded", res.Succeeded, "failed", res.Failed, "skipped", res.Skipped)
 	return res, nil
 }
 
-func suspendLapsedTenant(ctx context.Context, jctx *Context, info port.TenantSubscriptionInfo) error {
-	realm, err := jctx.TenantRealms.FindByTenantID(ctx, info.TenantID)
+func runSuspendPhase(ctx context.Context, jctx *Context, res *Result) error {
+	lapsed, err := jctx.SubscriptionLapses.ListLapsedSubscriptions(ctx)
 	if err != nil {
 		return err
 	}
-	idemKey := "lapse-suspend:" + info.TenantID.String()
-	_, found, err := jctx.Idempotency.Begin(ctx, idemKey, info.TenantID, domain.OpSuspend)
+	for _, l := range lapsed {
+		if res.Attempted >= jctx.BatchLimit {
+			break
+		}
+		if l.RealmType != "dedicated" {
+			// A "shared" entry is a trial tenant — owned by RP-C1/RP-C2's
+			// own expiry/hard-delete path, not this billing-lapse sweep.
+			// Anything other than "dedicated"/"shared" (empty, garbled,
+			// a value O&M added without this service knowing) is folded
+			// into the same Skipped counter to fail safe — never suspend
+			// on ambiguous input — but it gets a distinguishing WARN so a
+			// genuinely-dedicated tenant misreported by schema drift isn't
+			// silently indistinguishable from a routine shared-realm skip.
+			if l.RealmType != "shared" {
+				jctx.Logger.WarnContext(ctx, "subscription-lapse: unexpected realm_type from O&M, skipping",
+					"tenant_id", l.TenantID, "realm_type", l.RealmType)
+			}
+			res.Skipped++
+			continue
+		}
+		res.Attempted++
+		if err := suspendLapsedTenant(ctx, jctx, l); err != nil {
+			jctx.Logger.WarnContext(ctx, "subscription-lapse: suspend defer", "tenant_id", l.TenantID, "error", err.Error())
+			res.Failed++
+			continue
+		}
+		metrics.LapseProcessedTotal.WithLabelValues("suspend").Inc()
+		res.Succeeded++
+	}
+	return nil
+}
+
+func runOffboardPhase(ctx context.Context, jctx *Context, res *Result) error {
+	remaining := jctx.BatchLimit - res.Attempted
+	if remaining <= 0 {
+		return nil
+	}
+	candidates, err := jctx.TenantRealms.ListSuspendedPastRetention(ctx, jctx.RetentionDays, remaining)
+	if err != nil {
+		return err
+	}
+	for _, realm := range candidates {
+		if res.Attempted >= jctx.BatchLimit {
+			break
+		}
+		res.Attempted++
+		if err := offboardTenant(ctx, jctx, realm); err != nil {
+			jctx.Logger.WarnContext(ctx, "subscription-lapse: offboard defer", "tenant_id", realm.TenantID, "error", err.Error())
+			res.Failed++
+			continue
+		}
+		metrics.LapseProcessedTotal.WithLabelValues("offboard").Inc()
+		res.Succeeded++
+	}
+	return nil
+}
+
+func suspendLapsedTenant(ctx context.Context, jctx *Context, l port.LapsedSubscription) error {
+	realm, err := jctx.TenantRealms.FindByTenantID(ctx, l.TenantID)
+	if err != nil {
+		return err
+	}
+	if realm.Status == domain.RealmStatusSuspended || realm.IsOffboarded() {
+		// Already acted on — O&M's next poll should have dropped this
+		// entry, but a same-day redelivery/race is a no-op, not an error.
+		return nil
+	}
+	idemKey := "lapse-suspend:" + l.TenantID.String()
+	_, found, err := jctx.Idempotency.Begin(ctx, idemKey, l.TenantID, domain.OpSuspend)
 	if err != nil {
 		return err
 	}
@@ -91,6 +134,8 @@ func suspendLapsedTenant(ctx context.Context, jctx *Context, info port.TenantSub
 	err = jctx.TxRunner.RunInTx(ctx, func(ctx context.Context) error {
 		realm.Status = domain.RealmStatusSuspended
 		realm.DisabledAt = &now
+		source := domain.SuspensionSourceBillingLapse
+		realm.SuspensionSource = &source
 		if err := jctx.TenantRealms.Update(ctx, realm); err != nil {
 			return err
 		}
@@ -98,19 +143,15 @@ func suspendLapsedTenant(ctx context.Context, jctx *Context, info port.TenantSub
 		if !ok {
 			return nil
 		}
-		var cancelledAt *string
-		if info.CancelledAt != nil {
-			s := info.CancelledAt.UTC().Format(time.RFC3339)
-			cancelledAt = &s
-		}
-		return pub.EnqueueCtx(ctx, &domain.Event{
+		cancelledAt := l.CancelledAt.UTC().Format(time.RFC3339)
+		return pub.Enqueue(ctx, &domain.Event{
 			Type:     domain.EventTenantSuspended,
-			TenantID: info.TenantID,
+			TenantID: l.TenantID,
 			Actor:    domain.SystemActorID,
 			Data: domain.TenantSuspendedPayload{
-				TenantID:    info.TenantID,
+				TenantID:    l.TenantID,
 				Realm:       realm.RealmName,
-				CancelledAt: cancelledAt,
+				CancelledAt: &cancelledAt,
 				SuspendedAt: now.Format(time.RFC3339),
 				Source:      domain.SuspensionSourceBillingLapse,
 			},
@@ -123,13 +164,9 @@ func suspendLapsedTenant(ctx context.Context, jctx *Context, info port.TenantSub
 	return jctx.Idempotency.Complete(ctx, idemKey, nil)
 }
 
-func offboardTenant(ctx context.Context, jctx *Context, info port.TenantSubscriptionInfo) error {
-	realm, err := jctx.TenantRealms.FindByTenantID(ctx, info.TenantID)
-	if err != nil {
-		return err
-	}
-	idemKey := "offboard:" + info.TenantID.String()
-	_, found, err := jctx.Idempotency.Begin(ctx, idemKey, info.TenantID, "offboard")
+func offboardTenant(ctx context.Context, jctx *Context, realm *domain.TenantRealm) error {
+	idemKey := "offboard:" + realm.TenantID.String()
+	_, found, err := jctx.Idempotency.Begin(ctx, idemKey, realm.TenantID, "offboard")
 	if err != nil {
 		return err
 	}
@@ -170,12 +207,12 @@ func offboardTenant(ctx context.Context, jctx *Context, info port.TenantSubscrip
 		if !ok {
 			return nil
 		}
-		return pub.EnqueueCtx(ctx, &domain.Event{
+		return pub.Enqueue(ctx, &domain.Event{
 			Type:     domain.EventTenantOffboarded,
-			TenantID: info.TenantID,
+			TenantID: realm.TenantID,
 			Actor:    domain.SystemActorID,
 			Data: domain.TenantOffboardedPayload{
-				TenantID:     info.TenantID,
+				TenantID:     realm.TenantID,
 				Realm:        realm.RealmName,
 				ExportS3Key:  exportKey,
 				OffboardedAt: now.Format(time.RFC3339),

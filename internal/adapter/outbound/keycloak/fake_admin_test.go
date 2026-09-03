@@ -3,11 +3,42 @@ package keycloak
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 )
+
+// TestMain shrinks retryTransport's backoff to near-zero for this whole
+// test binary. Every fake-admin-backed test in this package goes through
+// New's real transport chain (newFakeAdmin calls the production
+// constructor directly, deliberately, so these tests exercise the exact
+// chain production uses) — without this, every test simulating a 5xx or a
+// transport error would sit through retryTransport's real (up to
+// several-second) backoff schedule 3 times before returning. Tests that
+// need to assert the real backoff *shape* (exponential growth, jitter
+// bounds, Retry-After honoring) set their own values and restore these via
+// t.Cleanup instead of relying on this reduced default.
+func TestMain(m *testing.M) {
+	origAttempts, origBase, origMax := retryMaxAttempts, retryBaseDelay, retryMaxDelay
+	retryMaxAttempts = 2
+	retryBaseDelay = time.Millisecond
+	retryMaxDelay = time.Millisecond
+
+	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{
+		ServiceName:  "iam-realm-provisioner",
+		BuildVersion: "test",
+	})
+	metrics.Register()
+
+	code := m.Run()
+	retryMaxAttempts, retryBaseDelay, retryMaxDelay = origAttempts, origBase, origMax
+	os.Exit(code)
+}
 
 // nopLogger is a no-op port.Logger for tests that don't assert on log
 // output (e.g. CreateTrialUser's "send verify email failed" WARN path).

@@ -16,8 +16,8 @@ import (
 
 	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/test/dbseed"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -125,22 +125,55 @@ func TestReconciliationRepository(t *testing.T) {
 		}
 	})
 
-	t.Run("MarkFailed_IncrementsAttemptsAndStaysPending", func(t *testing.T) {
+	t.Run("MarkFailed_IncrementsAttemptsAndStaysPendingUnderCap", func(t *testing.T) {
 		t.Parallel()
 		tenantID := uuid.New()
 		require.NoError(t, sysRepo.Insert(ctx, newReconciliation(tenantID, "local_accounts_enabled")))
 		id := reconciliationIDForTenant(t, ctx, rawPool, tenantID)
 
-		require.NoError(t, sysRepo.MarkFailed(ctx, id, "keycloak: connection refused"))
-		require.NoError(t, sysRepo.MarkFailed(ctx, id, "keycloak: timeout"))
+		status1, err := sysRepo.MarkFailed(ctx, id, "keycloak: connection refused", 20)
+		require.NoError(t, err)
+		assert.Equal(t, domain.ReconStatusPending, status1)
+		status2, err := sysRepo.MarkFailed(ctx, id, "keycloak: timeout", 20)
+		require.NoError(t, err)
+		assert.Equal(t, domain.ReconStatusPending, status2)
 
 		var status, lastError string
 		var attempts int
 		require.NoError(t, rawPool.QueryRow(ctx, `SELECT status, attempts, last_error FROM realm_config_reconciliations WHERE id = $1`, id).
 			Scan(&status, &attempts, &lastError))
-		assert.Equal(t, "pending", status, "a failed attempt stays pending for the next RP-C4 tick")
+		assert.Equal(t, "pending", status, "a failed attempt under the cap stays pending for the next RP-C4 tick")
 		assert.Equal(t, 2, attempts)
 		assert.Equal(t, "keycloak: timeout", lastError)
+	})
+
+	// RP-C4 poison-pill cap (§8.10): once the incremented attempt count
+	// reaches maxAttempts, MarkFailed must atomically move the row to the
+	// terminal 'failed' status instead of leaving it pending forever, and
+	// it must then disappear from ListPending — otherwise it would keep
+	// consuming a batch slot on every future tick with no way to converge.
+	t.Run("MarkFailed_ReachesCap_TerminatesAndLeavesPendingSweep", func(t *testing.T) {
+		t.Parallel()
+		tenantID := uuid.New()
+		require.NoError(t, sysRepo.Insert(ctx, newReconciliation(tenantID, "local_accounts_enabled")))
+		id := reconciliationIDForTenant(t, ctx, rawPool, tenantID)
+
+		status, err := sysRepo.MarkFailed(ctx, id, "keycloak: connection refused", 1)
+		require.NoError(t, err)
+		assert.Equal(t, domain.ReconStatusFailed, status, "the 1st attempt against a cap of 1 must terminate immediately")
+
+		var dbStatus string
+		var attempts int
+		require.NoError(t, rawPool.QueryRow(ctx, `SELECT status, attempts FROM realm_config_reconciliations WHERE id = $1`, id).
+			Scan(&dbStatus, &attempts))
+		assert.Equal(t, "failed", dbStatus)
+		assert.Equal(t, 1, attempts)
+
+		pending, err := sysRepo.ListPending(ctx, 10)
+		require.NoError(t, err)
+		for _, rec := range pending {
+			assert.NotEqual(t, id, rec.ID, "a terminally-failed row must never be returned by ListPending again")
+		}
 	})
 
 	t.Run("MarkApplied_CrossTenantThroughAppPoolSilentlyAffectsNothing", func(t *testing.T) {
@@ -162,7 +195,7 @@ func TestReconciliationRepository(t *testing.T) {
 	})
 }
 
-func reconciliationIDForTenant(t testing.TB, ctx context.Context, rawPool *pgxpool.Pool, tenantID uuid.UUID) uuid.UUID {
+func reconciliationIDForTenant(t testing.TB, ctx context.Context, rawPool *dbseed.Pool, tenantID uuid.UUID) uuid.UUID {
 	t.Helper()
 	var id uuid.UUID
 	require.NoError(t, rawPool.QueryRow(ctx, `SELECT id FROM realm_config_reconciliations WHERE tenant_id = $1`, tenantID).Scan(&id))

@@ -263,4 +263,61 @@ spec:
               {{ "{{ $labels.queue_name }}" }} (maxReceiveCount=5 exhausted on the
               source queue). Inspect the DLQ — a malformed envelope or a
               persistent handler error needs manual replay/fix.
+
+        # ── Forward-compat signal (ticket) — matching iam-org-membership ──
+        - alert: IAMRealmProvisionerUnknownEventType
+          expr: |
+            rate(iam_realm_provisioner_unknown_event_acknowledged_total[10m]) > 0
+          for: 30m
+          labels:
+            severity: ticket
+            team: platform
+          annotations:
+            summary: "A producer is emitting an event type this consumer doesn't handle"
+            description: >-
+              iam-realm-provisioner is silently ack'ing events of type
+              {{ "{{ $labels.event_type }}" }} on topic
+              {{ "{{ $labels.topic }}" }} (recorded in processed_events).
+              This is forward-compat behavior, but the producer has added a
+              type we should be handling.
+
+    - name: iam_realm_provisioner_tenant_isolation
+      rules:
+
+        # ── RLS-6 cross-tenant access (§17.5 Case 5) ──────────────────────
+        - alert: IAMRealmProvisionerRLSCrossTenantAccess
+          # cross_tenant_access means a valid app.tenant_id GUC pointed at a
+          # row belonging to a different tenant — either a real attack or a
+          # serious application bug. No `for` clause: one occurrence pages.
+          expr: |
+            increase(iam_realm_provisioner_rls_violations_total{violation_type="cross_tenant_access"}[5m]) > 0
+          labels:
+            severity: critical
+            team: platform
+            compliance: tenant-isolation
+          annotations:
+            summary: RLS blocked a cross-tenant access attempt
+            description: >-
+              A caller with a valid tenant GUC attempted to read/write a row
+              belonging to a different tenant. Investigate the last 5 minutes
+              of rls_violation_log for row_tenant_id, app_tenant_id,
+              session_role, client_addr, and query_text. This alert has no
+              `for` clause — one occurrence is enough to page.
+
+        # ── RLS-6 missing/invalid GUC (§17.5 Case 5) ──────────────────────
+        - alert: IAMRealmProvisionerRLSMissingGUC
+          expr: |
+            rate(iam_realm_provisioner_rls_violations_total{violation_type="missing_or_invalid_guc"}[5m]) > 0
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: RLS violations from missing or invalid tenant GUC
+            description: >-
+              Sustained rate of missing_or_invalid_guc violations over 10m.
+              A caller path is not binding app.tenant_id via SET LOCAL
+              (RLS-6) before touching a tenant-scoped table. Check
+              GUCBridgeMiddleware wiring for the HTTP path, or the
+              SysPool/RLS-scoped pool choice for a reconciler/consumer path.
 {{- end }}

@@ -1,0 +1,62 @@
+sequenceDiagram
+    participant H as InternalHandler
+    participant SVC as ProvisioningService.ProvisionTrial
+    participant IDEM as provisioning_operations (ledger)
+    participant KC as Keycloak Admin API (gocloak)
+    participant TX as pgcommon.RunInTx
+    participant DB as PostgreSQL (tenant_realms)
+    participant OB as outbox_events
+    participant Runner as Outbox Runner
+    participant SNS as SNS (iam.tenant.events)
+
+    Note over H,SNS: Keycloak-effect-first, then local commit (§9.1) — the Keycloak mutation<br/>runs entirely OUTSIDE any Postgres transaction. Only on success does RunInTx<br/>commit the local row AND enqueue the outbox event atomically.
+
+    H ->>+ SVC: ProvisionTrial(ctx, idempotencyKey, req)
+
+    SVC ->>+ IDEM: Begin(idempotencyKey, tenantID, OpProvisionTrial)
+    alt key already succeeded
+        IDEM -->> SVC: existing row, status=succeeded
+        SVC -->> H: replay stored result (no Keycloak call, no tx — IDEMP-3)
+    else key in_progress or failed
+        IDEM -->> SVC: existing row, status != succeeded
+        SVC -->> H: 409 operation_in_progress
+    else new key
+        IDEM -->>- SVC: not found — proceed, row now in_progress
+
+        rect rgb(255, 245, 230)
+        Note over SVC,KC: Phase 1 — Keycloak effect (no Postgres transaction open)
+        SVC ->>+ KC: CreateTrialUser(email, tenantID, hashed_password_seed)
+        alt Keycloak call fails
+            KC -->> SVC: error
+            SVC ->> IDEM: Fail(idempotencyKey)
+            SVC -->> H: 502 keycloak_unavailable — NO local trace left (FAIL-1)
+        else user created
+            KC -->>- SVC: keycloak_user_id (sub)
+        end
+        end
+
+        rect rgb(230, 245, 255)
+        Note over SVC,OB: Phase 2 — local commit, only after the Keycloak effect succeeded
+        SVC ->>+ TX: RunInTx(ctx, func(txCtx))
+        TX ->>+ DB: BEGIN (SET LOCAL app.tenant_id, RLS-6)
+        TX ->> DB: UPSERT tenant_realms(tenant_id, realm='trial', strategy='shared', status='active')
+        DB -->> TX: row committed-pending
+        TX ->>+ OB: Enqueue — INSERT outbox_events(TrialTenantProvisioned{tenant_id, realm, keycloak_user_id})
+        OB -->>- TX: inserted
+        TX ->> DB: COMMIT
+        DB -->>- TX: committed — local row + outbox row durable together (CONS-1)
+        TX -->>- SVC: nil
+        end
+
+        SVC ->> IDEM: Complete(idempotencyKey, marshaled result)
+        SVC -->>- H: 201 ProvisionTrialResult
+    end
+
+    Note over Runner,SNS: Outbox runner polls every OUTBOX_POLL_INTERVAL (500 ms)<br/>and publishes independently — not part of the request's latency budget
+    Runner ->>+ OB: SELECT ... WHERE published_at IS NULL FOR UPDATE SKIP LOCKED
+    OB -->>- Runner: unpublished batch
+    Runner ->>+ SNS: Publish(TopicArn=iam.tenant.events, TrialTenantProvisioned envelope)
+    SNS -->>- Runner: MessageID
+    Runner ->> OB: UPDATE outbox_events SET published_at = now()
+
+    Note over SVC,DB: Crash recovery (CONS-2): if the process dies after the Keycloak<br/>effect but before RunInTx commits, the ledger row is stuck in_progress<br/>with a real Keycloak user already created. A caller retry with the SAME<br/>Idempotency-Key re-enters ProvisionTrial — CreateTrialUser reconciles to a<br/>no-op (user already exists), then the local commit lands. A committed<br/>local row therefore ALWAYS reflects a real Keycloak state — never the<br/>reverse, and a Keycloak failure at any point leaves NO local trace.

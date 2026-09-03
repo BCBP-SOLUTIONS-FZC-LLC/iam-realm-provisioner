@@ -54,7 +54,7 @@ type IdpValidationResult struct {
 const ValidatorVersion = 1
 
 // ValidateIdpConfig runs the §11.6 Region-Agnostic IdP Configuration
-// Checklist against cfg. CRITICAL failures (checks 1-2, 4-6, 10-12) block
+// Checklist against cfg. CRITICAL failures (checks 1-6, 10-12) block
 // with 400; WARN failures (7-9, 13) require a recorded acknowledgement.
 func ValidateIdpConfig(protocol domain.IdpProtocol, cfg map[string]any, acked map[string]bool) IdpValidationResult {
 	checks := map[string]domain.CheckOutcome{}
@@ -88,6 +88,18 @@ func ValidateIdpConfig(protocol domain.IdpProtocol, cfg map[string]any, acked ma
 	if protocol == domain.IdpProtocolSAML {
 		ssoURL := str("sso_url")
 		sloURL := str("slo_url")
+		// slo_response_url is the SAML SingleLogoutService's optional
+		// distinct ResponseLocation (RFC/SAML-core: if unset, the IdP
+		// sends the LogoutResponse back to the same Location as the
+		// LogoutRequest) — defaults to sloURL so a caller that never sets
+		// it (the overwhelming common case) is validated identically to
+		// before. When a caller DOES supply a distinct response location,
+		// check 5 must examine that value, not silently re-check sloURL
+		// under a different check ID.
+		sloResponseURL := str("slo_response_url")
+		if sloResponseURL == "" {
+			sloResponseURL = sloURL
+		}
 		acsURL := str("acs_url")
 		entityID := str("entity_id")
 		signingCert := str("signing_cert")
@@ -98,7 +110,7 @@ func ValidateIdpConfig(protocol domain.IdpProtocol, cfg map[string]any, acked ma
 		record(domain.CheckSLOURLRegion, sloURL == "" || !carriesRegion(sloURL), true)
 		record(domain.CheckCustomerSigningCert, signingCert != "", true)
 		record(domain.CheckACSURLRegion, acsURL == "" || isRegionNeutralAuthURL(acsURL), true)
-		record(domain.CheckSLOResponseRegion, sloURL == "" || !carriesRegion(sloURL), true)
+		record(domain.CheckSLOResponseRegion, sloResponseURL == "" || !carriesRegion(sloResponseURL), true)
 		record(domain.CheckEntityIDRegion, entityID == "" || !carriesRegion(entityID), true)
 		record(domain.CheckNameIDFormat, nameIDFormat != "transient", false)
 		record(domain.CheckAttributeMapperURN, !mapperURNsCarryRegion(cfg), false)

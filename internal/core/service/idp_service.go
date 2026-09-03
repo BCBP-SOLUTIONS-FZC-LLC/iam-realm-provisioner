@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -11,12 +13,32 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 )
 
+// validIdpAlias restricts idp_alias to a safe charset — letters, digits,
+// hyphen, underscore, 1-64 chars. This is this service's only guard
+// against a caller-supplied alias containing a path-traversal sequence
+// (e.g. "../"): openbao.Client.idpPath builds
+// "<prefix>/<tenant_id>/<idp_alias>" via plain string interpolation, with
+// no sanitization at that layer, and idp_alias otherwise flows there
+// unvalidated all the way from RP-6's JSON body / RP-7's URL path param.
+// No dot is permitted at all, so "." and ".." can never appear as a
+// component.
+var validIdpAlias = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+
+func validateIdpAliasFormat(alias string) error {
+	if !validIdpAlias.MatchString(alias) {
+		return domain.NewError(domain.ErrInvalidRequest, "idp_alias must match ^[a-zA-Z0-9_-]{1,64}$").
+			WithDetails(map[string]any{"idp_alias": alias})
+	}
+	return nil
+}
+
 // IdpService implements RP-6/RP-7/RP-13 (§8.4/8.5, RP-INV-4 — the §11.6
 // gate).
 type IdpService struct {
 	realms      port.TenantRealmRepository
 	idpConfigs  port.IdpConfigRepository
 	validations port.IdpValidationRepository
+	idempotency port.IdempotencyStore
 	openbao     port.OpenBaoClient
 	keycloak    port.KeycloakAdmin
 	log         port.SlogStyleLogger
@@ -27,16 +49,27 @@ func NewIdpService(
 	realms port.TenantRealmRepository,
 	idpConfigs port.IdpConfigRepository,
 	validations port.IdpValidationRepository,
+	idempotency port.IdempotencyStore,
 	openbao port.OpenBaoClient,
 	keycloak port.KeycloakAdmin,
 ) *IdpService {
-	return &IdpService{realms: realms, idpConfigs: idpConfigs, validations: validations, openbao: openbao, keycloak: keycloak}
+	return &IdpService{realms: realms, idpConfigs: idpConfigs, validations: validations, idempotency: idempotency, openbao: openbao, keycloak: keycloak}
 }
 
 // WithLogger attaches a logger and returns s for chaining.
 func (s *IdpService) WithLogger(log port.Logger) *IdpService {
 	s.log = port.NewSlogStyleLogger(log)
 	return s
+}
+
+// failIdempotency marks idempotencyKey's provisioning_operations row
+// failed. This is a best-effort side effect on an already-failing path —
+// the original error is what the caller returns regardless of whether this
+// succeeds, so a failure here is only logged.
+func (s *IdpService) failIdempotency(ctx context.Context, idempotencyKey string) {
+	if err := s.idempotency.Fail(ctx, idempotencyKey); err != nil {
+		s.log.WarnContext(ctx, "idempotency: mark failed did not persist", "idempotency_key", idempotencyKey, "error", err.Error())
+	}
 }
 
 // ConfigureIdpRequest is the RP-6 request body (§5.2.1).
@@ -58,13 +91,30 @@ type ConfigureIdpResult struct {
 // ConfigureIdp implements RP-6 (§8.4-8.5): configures a SAML/OIDC IdP on
 // the dedicated realm, behind the §11.6 gate. CRITICAL failures block with
 // 400; unacknowledged WARNs return 422; pass/acked writes the secret to
-// OpenBao then creates/updates the Keycloak IdP.
-func (s *IdpService) ConfigureIdp(ctx context.Context, tenantID uuid.UUID, req ConfigureIdpRequest) (*ConfigureIdpResult, error) {
-	realm, err := s.realms.FindByTenantID(ctx, tenantID)
+// OpenBao then creates/updates the Keycloak IdP. Ledgered against
+// idempotencyKey like every other mutating RP endpoint (§9.2) — the route
+// already requires the header (RequireIdempotencyKey), this is what backs
+// that contract with an actual dedup/replay.
+func (s *IdpService) ConfigureIdp(ctx context.Context, idempotencyKey string, tenantID uuid.UUID, req ConfigureIdpRequest) (*ConfigureIdpResult, error) {
+	if err := validateIdpAliasFormat(req.IdpAlias); err != nil {
+		return nil, err
+	}
+
+	existing, found, err := s.idempotency.Begin(ctx, idempotencyKey, tenantID, domain.OpConfigureIdp)
 	if err != nil {
 		return nil, err
 	}
+	if found {
+		return replayOrConflict[ConfigureIdpResult](existing)
+	}
+
+	realm, err := s.realms.FindByTenantID(ctx, tenantID)
+	if err != nil {
+		s.failIdempotency(ctx, idempotencyKey)
+		return nil, err
+	}
 	if !realm.IsDedicated() {
+		s.failIdempotency(ctx, idempotencyKey)
 		return nil, domain.NewError(domain.ErrIdpRequiresDedicatedRealm, "IdP configuration requires a dedicated realm")
 	}
 
@@ -92,16 +142,38 @@ func (s *IdpService) ConfigureIdp(ctx context.Context, tenantID uuid.UUID, req C
 	}
 
 	if validation.Outcome == domain.ValidationOutcomeFailing {
+		s.failIdempotency(ctx, idempotencyKey)
 		return nil, domain.NewError(domain.ErrIdpRegionPortabilityFailed, "one or more §11.6 CRITICAL checks failed").
 			WithDetails(map[string]any{"validator_version": ValidatorVersion, "failed_checks": validation.Failed, "warnings": validation.Warned})
 	}
 	if validation.Outcome == domain.ValidationOutcomeWarningsOnly {
+		s.failIdempotency(ctx, idempotencyKey)
 		return nil, domain.NewError(domain.ErrIdpWarningsUnacknowledged, "one or more §11.6 WARN checks require acknowledgement").
 			WithDetails(map[string]any{"warnings": validation.Warned})
 	}
 
+	// isNewConfig gates the compensating OpenBao-secret delete below: an
+	// update to an already-configured alias must never delete the secret
+	// on a later failure — the pre-existing Keycloak IdP is still live and
+	// completely unaffected by a failed CreateOrUpdateIdp call below, so
+	// its secret must stay in OpenBao even though WriteIdpSecret already
+	// overwrote OpenBao's copy with the new (never-applied) value. Any
+	// lookup error other than a confirmed not-found is treated the same
+	// as "might be an update" — failing safe, since leaving a possibly
+	// orphaned secret is far cheaper than destroying a live one.
+	isNewConfig := false
+	if _, findErr := s.idpConfigs.FindByAlias(ctx, tenantID, req.IdpAlias); findErr != nil {
+		var de *domain.Error
+		if errors.As(findErr, &de) && de.Code == domain.ErrIdpConfigNotFound {
+			isNewConfig = true
+		} else {
+			s.log.WarnContext(ctx, "configure_idp: existing config lookup failed, treating as update for compensating-delete safety", "tenant_id", tenantID, "idp_alias", req.IdpAlias, "error", findErr.Error())
+		}
+	}
+
 	if req.Secret != "" {
 		if err := s.openbao.WriteIdpSecret(ctx, tenantID, req.IdpAlias, map[string]any{"secret": req.Secret}); err != nil {
+			s.failIdempotency(ctx, idempotencyKey)
 			return nil, err
 		}
 	}
@@ -109,6 +181,16 @@ func (s *IdpService) ConfigureIdp(ctx context.Context, tenantID uuid.UUID, req C
 		Alias: req.IdpAlias, Protocol: string(req.Protocol), DisplayName: req.DisplayName,
 		Enabled: true, Config: req.Config, Secret: req.Secret,
 	}); err != nil {
+		if req.Secret != "" && isNewConfig {
+			// Compensating cleanup (§9.3): this alias had no prior config,
+			// so the secret just written was never applied to any live
+			// Keycloak IdP — best-effort delete it rather than leave an
+			// orphaned secret in OpenBao with nothing referencing it.
+			if delErr := s.openbao.DeleteIdpSecret(ctx, tenantID, req.IdpAlias); delErr != nil {
+				s.log.WarnContext(ctx, "configure_idp: compensating openbao secret delete failed", "tenant_id", tenantID, "idp_alias", req.IdpAlias, "error", delErr.Error())
+			}
+		}
+		s.failIdempotency(ctx, idempotencyKey)
 		return nil, err
 	}
 
@@ -117,15 +199,25 @@ func (s *IdpService) ConfigureIdp(ctx context.Context, tenantID uuid.UUID, req C
 		DisplayName: req.DisplayName, Enabled: true, Config: req.Config,
 		Status: domain.IdpConfigStatusActive,
 	}); err != nil {
+		s.failIdempotency(ctx, idempotencyKey)
 		return nil, err
 	}
 
-	return &ConfigureIdpResult{IdpAlias: req.IdpAlias, Status: string(domain.IdpConfigStatusActive)}, nil
+	result := &ConfigureIdpResult{IdpAlias: req.IdpAlias, Status: string(domain.IdpConfigStatusActive)}
+	body := marshalIdempotencyResult(ctx, s.log, "configure_idp", result)
+	if err := s.idempotency.Complete(ctx, idempotencyKey, body); err != nil {
+		s.log.WarnContext(ctx, "configure_idp: idempotency complete failed", "tenant_id", tenantID, "error", err.Error())
+	}
+	return result, nil
 }
 
 // RemoveIdp implements RP-7: removes the Keycloak IdP, the OpenBao secret,
 // and the local row. Idempotent.
 func (s *IdpService) RemoveIdp(ctx context.Context, tenantID uuid.UUID, idpAlias string) error {
+	if err := validateIdpAliasFormat(idpAlias); err != nil {
+		return err
+	}
+
 	realm, err := s.realms.FindByTenantID(ctx, tenantID)
 	if err != nil {
 		return err

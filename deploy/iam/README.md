@@ -35,7 +35,7 @@ ServiceAccount's projected JWT, not IRSA/STS). See `deploy/openbao/`.
 | `sqs:GetQueueAttributes` / `ReceiveMessage` on the three DLQs | Ops visibility into DLQ depth (`deploy/monitoring/app-alerts.yml`'s `{membership,tenant,billing}-realm-q` DLQ alerts) — read-only for triage, not a consume-and-delete grant | §11.5 |
 | `glue:GetSchemaVersion` (+ read-only siblings) | `GlueCodec` pre-fetches schema version IDs at startup, refreshed periodically | §13.4 |
 | `s3:PutObject` / `GetObject` / `ListBucket` on `REALM_EXPORT_BUCKET` | RP-C3's dedicated-realm export before offboarding delete (RP-INV-5, §8.9/§15.2) | §8.9 |
-| `kms:Encrypt` / `GenerateDataKey` on `REALM_EXPORT_KMS_KEY` | Server-side encryption of the realm export object | §15.2 |
+| `kms:Encrypt` / `GenerateDataKey` on `REALM_EXPORT_KMS_KEY` (scoped to `kms:ViaService: s3.<region>.amazonaws.com`) | Server-side encryption of the realm export object, restricted to S3-driven SSE-KMS calls only | §15.2 |
 | `logs:CreateLogStream` / `PutLogEvents` | Container stdout to CloudWatch (if not using an OTel collector for logs) | — |
 
 No S3 `DeleteObject`/`kms:Decrypt` grants — realm exports are write-once,

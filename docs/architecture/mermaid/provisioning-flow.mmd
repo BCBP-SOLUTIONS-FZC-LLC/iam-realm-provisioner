@@ -1,0 +1,55 @@
+sequenceDiagram
+    autonumber
+    participant SG as Signup Service
+    participant RP as InternalHandler + ProvisioningService
+    participant KC as Keycloak (Admin API, gocloak)
+    participant PG as provisioner Postgres
+    participant OB as outbox_events
+    participant Runner as Outbox Runner
+    participant SNS as SNS (iam.tenant.events)
+    participant SQS as SQS fan-out (tenant-orgm-q, tenant-audit-q)
+    participant OM as Org & Membership
+
+    Note over SG,OM: RP-1 Trial provisioning (LLD §8.1, HLD §8.2.1/§8.10.1) — end to end.<br/>No dedicated realm is created (RP-INV-2) — the trial user lands in the shared 'trial' realm<br/>with a protocol-mapper-injected tenant_id JWT claim.
+
+    SG ->>+ RP: POST /api/v1/internal/tenants/provision-trial<br/>{tenant_id, slug, admin_email, admin_name, hashed_password_seed} + Idempotency-Key
+
+    RP ->> RP: idempotency.Begin(key, tenant_id, OpProvisionTrial)<br/>found+succeeded → replay, found+other → 409 operation_in_progress
+
+    RP ->> KC: create user in 'trial' realm<br/>(email_verified=false, attribute tenant_id=<uuid>, sub preserved)
+    alt Keycloak create fails
+        KC -->> RP: error
+        RP ->> RP: idempotency.Fail(key)
+        RP -->>- SG: 502 keycloak_unavailable (no local commit, retryable with same key)
+    else user created
+        KC -->> RP: keycloak_user_id (sub)
+        RP ->>+ KC: trigger VERIFY_EMAIL required-action email (24h link)
+        KC -->>- RP: sent
+
+        RP ->>+ PG: RunInTx {
+        RP ->> PG: UPSERT tenant_realms(tenant_id, realm='trial', strategy='shared', status='active')
+        RP ->>+ OB: outbox.Enqueue(TrialTenantProvisioned{tenant_id, realm:'trial', keycloak_user_id})
+        OB -->>- RP: inserted
+        RP ->> PG: }  COMMIT
+        PG -->>- RP: committed (local row + outbox row atomic, RP-EVT-1)
+
+        RP ->> RP: idempotency.Complete(key, result)
+        RP -->> SG: 201 {tenant_id, realm:'trial', strategy:'shared',<br/>keycloak_user_id(sub), email_verification_sent:true}
+    end
+
+    Note over SG,OM: O&M's own tenants row was already created synchronously via O&M's I-1<br/>(caller-supplied tenant_id, RP-6) BEFORE this call — TrialTenantProvisioned settles/reconciles it,<br/>it does not create it.
+
+    Note over Runner,SQS: Outbox runner polls OUTBOX_POLL_INTERVAL (500 ms), publishes independently of the request
+    Runner ->>+ OB: SELECT unpublished WHERE published_at IS NULL FOR UPDATE SKIP LOCKED
+    OB -->>- Runner: TrialTenantProvisioned envelope
+    Runner ->>+ SNS: Publish(TopicArn=iam.tenant.events,<br/>MessageAttributes{EventType, TenantID, Source, EventID})
+    SNS -->>- Runner: MessageID
+    Runner ->> OB: UPDATE outbox_events SET published_at = now()
+
+    SNS ->>+ SQS: fan-out by subscription filter policy
+    SQS -->>- OM: TrialTenantProvisioned message
+
+    OM ->> OM: processed_events dedup (event_id, consumer='orgm')<br/>settle tenants row: confirm keycloak_realm='trial', link keycloak_user_id
+    OM ->> SQS: DeleteMessage (ACK)
+
+    Note over RP,OM: If the process crashes after the Keycloak user is created but before<br/>RunInTx commits, a retry with the same Idempotency-Key re-enters this flow —<br/>CreateTrialUser reconciles to a no-op (user already exists), then the local<br/>commit + outbox enqueue land — see write-flow.mmd for the general pattern.

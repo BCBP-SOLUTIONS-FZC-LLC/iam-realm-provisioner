@@ -19,7 +19,7 @@ import (
 // asserts api/asyncapi.yaml's 9 `send` message definitions on the
 // iamTenantEvents channel name exactly the 9 events this service has an
 // embedded JSON Schema for (internal/eventschema.ByEventType) — the same
-// 9 names frozen in LLD §23. A mismatch here means either a new event was
+// 9 names frozen in LLD §25. A mismatch here means either a new event was
 // added to the AsyncAPI spec without a schema (or vice versa), which is
 // exactly the class of drift the Glue-registry gate exists to catch.
 func TestAsyncAPIVsSchemaDrift(t *testing.T) {
@@ -54,5 +54,5 @@ func TestAsyncAPIVsSchemaDrift(t *testing.T) {
 	sort.Strings(schemaNames)
 
 	assert.Equal(t, schemaNames, specNames,
-		"api/asyncapi.yaml's iamTenantEvents.messages must name exactly the 9 events embedded in internal/eventschema — update both together on any change (§7.3, §23)")
+		"api/asyncapi.yaml's iamTenantEvents.messages must name exactly the 9 events embedded in internal/eventschema — update both together on any change (§7.3, §25)")
 }

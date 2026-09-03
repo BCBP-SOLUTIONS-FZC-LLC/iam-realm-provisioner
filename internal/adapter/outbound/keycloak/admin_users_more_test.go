@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
@@ -304,6 +305,29 @@ func TestListUsersByTenant_ListError(t *testing.T) {
 	})
 	_, err := a.ListUsersByTenant(context.Background(), "acme", tenantID)
 	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrKeycloakUnavailable, de.Code, "a generic 5xx must not be mistaken for realm-not-found")
+}
+
+// CRITICAL: a 404 on this endpoint specifically means the realm itself is
+// absent (a realm that exists but matches zero users returns 200 with an
+// empty list, never a 404) — RevertConversion relies on this exact
+// distinction to detect "I'm resuming a retry whose earlier attempt
+// already deleted this realm" rather than treating it as a generic
+// failure that could permanently strand the caller.
+func TestListUsersByTenant_RealmNotFound_ReturnsDistinguishableCode(t *testing.T) {
+	tenantID := uuid.New()
+	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
+		mux.HandleFunc("GET "+realmPath("acme", "users"), func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusNotFound, `{"error":"Realm not found."}`)
+		})
+	})
+	_, err := a.ListUsersByTenant(context.Background(), "acme", tenantID)
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrTenantRealmNotFound, de.Code)
 }
 
 // --- DisableUsersInRealm / EnableUsersInRealm ---

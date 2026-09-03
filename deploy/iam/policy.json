@@ -77,7 +77,12 @@
         "kms:Encrypt",
         "kms:GenerateDataKey"
       ],
-      "Resource": "${realm_export_kms_key_arn}"
+      "Resource": "${realm_export_kms_key_arn}",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "s3.${aws_region}.amazonaws.com"
+        }
+      }
     },
     {
       "Sid": "CloudWatchLogs",

@@ -1,7 +1,7 @@
 // Package eventschema embeds the JSON Schema documents used to validate
 // outbound event payloads before they are written to the transactional
 // outbox (internal/adapter/outbound/eventbus/validating_codec.go). One
-// schema per published event type (§7.5, §23) — the 9 frozen event names.
+// schema per published event type (§7.5, §25) — the 9 frozen event names.
 // These are payload-only schemas (they describe the shape of the
 // envelope's `data` field, not the envelope itself); see api/asyncapi.yaml
 // for the full documented contract including the envelope and the 4
@@ -56,7 +56,7 @@ var TenantOffboarded []byte
 //go:embed tenant_reactivated.json
 var TenantReactivated []byte
 
-// ByEventType maps the frozen PascalCase event type name (§23) to its
+// ByEventType maps the frozen PascalCase event type name (§25) to its
 // embedded schema, for the validating codec to compile at startup.
 var ByEventType = map[string][]byte{
 	"TrialTenantProvisioned": TrialTenantProvisioned,

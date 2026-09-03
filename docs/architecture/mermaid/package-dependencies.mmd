@@ -1,0 +1,78 @@
+graph LR
+    domain(["core/domain\nanyVendorDeps (google/uuid) — no internal imports"])
+    port(["core/port"])
+    service(["core/service"])
+    requestctx(["pkg/requestctx"])
+    observability(["adapter/outbound/metrics\n(cross-cutting leaf)"])
+    httptransport(["adapter/outbound/httpx\n(cross-cutting leaf — traceparent injection)"])
+    eventschema(["internal/eventschema\n(embedded JSON Schema draft-07)"])
+    apispec(["api\n(embedded api/asyncapi.yaml)"])
+
+    keycloak(["adapter/outbound/keycloak\n(own component — RP-INV-1 sole gocloak import,\nCI-grepped by .github/scripts/arch-lint.sh)"])
+    postgres(["adapter/outbound/postgres\n(own component — TxFromContext for eventbus)"])
+    adapters_outbound(["adapters_outbound:\nadapter/outbound/eventbus\nadapter/outbound/openbao\nadapter/outbound/orgmembership\nadapter/outbound/s3"])
+    adapters_inbound(["adapters_inbound:\nadapter/inbound/http\nadapter/inbound/consumer"])
+    reconciler_jobs(["cmd/reconciler/jobs\n(own component)"])
+    cmd(["cmd:\ncmd/server\ncmd/reconciler"])
+
+    %% deps.port
+    port -->|mayDependOn| domain
+
+    %% deps.service
+    service -->|mayDependOn| domain
+    service -->|mayDependOn| port
+    service -->|mayDependOn| requestctx
+    service -->|mayDependOn| observability
+
+    %% deps.observability
+    observability -->|mayDependOn| domain
+
+    %% deps.keycloak
+    keycloak -->|mayDependOn| domain
+    keycloak -->|mayDependOn| port
+    keycloak -->|mayDependOn| observability
+    keycloak -->|mayDependOn| httptransport
+
+    %% deps.postgres
+    postgres -->|mayDependOn| domain
+    postgres -->|mayDependOn| port
+
+    %% deps.adapters_outbound
+    adapters_outbound -->|mayDependOn| domain
+    adapters_outbound -->|mayDependOn| port
+    adapters_outbound -->|mayDependOn| service
+    adapters_outbound -->|mayDependOn| eventschema
+    adapters_outbound -->|mayDependOn| observability
+    adapters_outbound -->|mayDependOn| httptransport
+    adapters_outbound -->|mayDependOn| postgres
+
+    %% deps.adapters_inbound
+    adapters_inbound -->|mayDependOn| domain
+    adapters_inbound -->|mayDependOn| port
+    adapters_inbound -->|mayDependOn| service
+    adapters_inbound -->|mayDependOn| requestctx
+    adapters_inbound -->|mayDependOn| apispec
+    adapters_inbound -->|mayDependOn| observability
+
+    %% deps.reconciler_jobs
+    reconciler_jobs -->|mayDependOn| domain
+    reconciler_jobs -->|mayDependOn| port
+    reconciler_jobs -->|mayDependOn| observability
+
+    %% deps.cmd
+    cmd -->|mayDependOn| domain
+    cmd -->|mayDependOn| port
+    cmd -->|mayDependOn| service
+    cmd -->|mayDependOn| requestctx
+    cmd -->|mayDependOn| eventschema
+    cmd -->|mayDependOn| apispec
+    cmd -->|mayDependOn| observability
+    cmd -->|mayDependOn| keycloak
+    cmd -->|mayDependOn| postgres
+    cmd -->|mayDependOn| adapters_inbound
+    cmd -->|mayDependOn| adapters_outbound
+    cmd -->|mayDependOn| reconciler_jobs
+
+    %% Excluded from the linter's scope entirely (exclude: test, scripts, deploy)
+    excluded["test/ · scripts/ · deploy/\n(excluded — not part of the runtime dependency graph)"]
+    excluded -.->|"imports (unchecked)"| service

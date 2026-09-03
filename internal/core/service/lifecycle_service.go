@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 )
@@ -138,6 +139,7 @@ func (s *LifecycleService) Reactivate(ctx context.Context, idempotencyKey string
 	err = s.tx.RunInTx(ctx, func(ctx context.Context) error {
 		row.Status = domain.RealmStatusActive
 		row.DisabledAt = nil
+		row.SuspensionSource = nil
 		if row.Strategy == domain.RealmStrategyShared && newTrialEndsAt != nil {
 			row.TrialEndsAt = newTrialEndsAt
 		}
@@ -153,12 +155,12 @@ func (s *LifecycleService) Reactivate(ctx context.Context, idempotencyKey string
 			if newTrialEndsAt != nil {
 				ends = newTrialEndsAt.UTC().Format(time.RFC3339)
 			}
-			return pub.EnqueueCtx(ctx, &domain.Event{
+			return pub.Enqueue(ctx, &domain.Event{
 				Type: domain.EventTrialReactivated, TenantID: tenantID,
 				Data: domain.TrialReactivatedPayload{TenantID: tenantID, NewTrialEndsAt: ends},
 			})
 		}
-		return pub.EnqueueCtx(ctx, &domain.Event{
+		return pub.Enqueue(ctx, &domain.Event{
 			Type: domain.EventTenantReactivated, TenantID: tenantID,
 			Data: domain.TenantReactivatedPayload{TenantID: tenantID, Realm: row.RealmName, Source: source, Reason: reason},
 		})
@@ -228,7 +230,7 @@ func (s *LifecycleService) ExpireTrial(ctx context.Context, idempotencyKey strin
 		if !ok {
 			return nil
 		}
-		return pub.EnqueueCtx(ctx, &domain.Event{
+		return pub.Enqueue(ctx, &domain.Event{
 			Type: domain.EventTrialExpired, TenantID: tenantID, Actor: domain.SystemActorID,
 			Data: domain.TrialExpiredPayload{TenantID: tenantID, TrialEndsAt: result.TrialEndsAt, GraceEndsAt: result.GraceEndsAt},
 		})
@@ -298,6 +300,8 @@ func (s *LifecycleService) Suspend(ctx context.Context, idempotencyKey string, t
 		now := time.Now().UTC()
 		row.Status = domain.RealmStatusSuspended
 		row.DisabledAt = &now
+		source := domain.SuspensionSourceOperator
+		row.SuspensionSource = &source
 		if err := s.realms.Update(ctx, row); err != nil {
 			return err
 		}
@@ -305,7 +309,7 @@ func (s *LifecycleService) Suspend(ctx context.Context, idempotencyKey string, t
 		if !ok {
 			return nil
 		}
-		return pub.EnqueueCtx(ctx, &domain.Event{
+		return pub.Enqueue(ctx, &domain.Event{
 			Type: domain.EventTenantSuspended, TenantID: tenantID,
 			Data: domain.TenantSuspendedPayload{
 				TenantID: tenantID, Realm: row.RealmName, SuspendedAt: now.Format(time.RFC3339),
@@ -328,7 +332,9 @@ func (s *LifecycleService) Suspend(ctx context.Context, idempotencyKey string, t
 
 // DeleteUser implements RP-15: idempotent Keycloak user delete — an absent
 // user is a success (§9, O&M's PI-9 reconciler retries safely).
-func (s *LifecycleService) DeleteUser(ctx context.Context, tenantID, keycloakUserID uuid.UUID) error {
+func (s *LifecycleService) DeleteUser(ctx context.Context, tenantID, keycloakUserID uuid.UUID) (err error) {
+	defer func() { metrics.UserDeleteTotal.WithLabelValues(outcome(err)).Inc() }()
+
 	row, err := s.realms.FindByTenantID(ctx, tenantID)
 	if err != nil {
 		return err
@@ -340,7 +346,9 @@ func (s *LifecycleService) DeleteUser(ctx context.Context, tenantID, keycloakUse
 // side, §8.13) ────────────────────────────────────────────────────────────
 
 // RevokeSessions implements RP-16: idempotent session/token revocation.
-func (s *LifecycleService) RevokeSessions(ctx context.Context, tenantID, keycloakUserID uuid.UUID) error {
+func (s *LifecycleService) RevokeSessions(ctx context.Context, tenantID, keycloakUserID uuid.UUID) (err error) {
+	defer func() { metrics.SessionRevokeTotal.WithLabelValues(outcome(err)).Inc() }()
+
 	row, err := s.realms.FindByTenantID(ctx, tenantID)
 	if err != nil {
 		return err

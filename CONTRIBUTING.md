@@ -15,7 +15,7 @@ This is an internal IAM microservice for the XpertPMS platform. This guide cover
 ```bash
 git clone https://github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner
 cd iam-realm-provisioner
-make setup       # copies .env-example → .env
+make setup       # copies .env-example → .env; installs .githooks/pre-commit
 make tidy        # go mod tidy
 make docker-up   # start PostgreSQL + LocalStack + Keycloak
 make migrate-up  # apply pending migrations (the server also self-migrates at startup)
@@ -32,6 +32,8 @@ make test-unit
 
 Host ports are deliberately non-default so this stack can run alongside sibling IAM services: Postgres `5544`, LocalStack `4571`, Keycloak `8091` (see `docker-compose.yml`).
 
+`make setup` installs `.githooks/pre-commit`, which runs `make tidy`, `fmt-check`, `vet`, and `lint` before every commit. Re-run `make install-hooks` any time `.githooks/pre-commit` changes.
+
 ## Project layout
 
 ```
@@ -42,7 +44,7 @@ internal/
   core/domain/       ← Entities, value objects, error taxonomy (§17), event payload structs — no external deps
   core/port/         ← Interfaces required by the core: KeycloakAdmin (the RP-INV-1 seam), repositories,
                        IdpValidationRepository, ReconciliationRepository, IdempotencyStore, ProcessedEventsStore,
-                       SubscriptionStatusReader (RP-C3 — no adapter wired yet, see CHANGELOG "Known gaps")
+                       SubscriptionLapseReader (RP-C3, backed by O&M's I-16)
   core/service/      ← Use cases: ProvisioningService, LifecycleService, IdpService, MfaService, RealmConfigService
   adapter/inbound/
     http/            ← Gin handlers for RP-1..RP-16, DTOs, middleware
@@ -54,7 +56,7 @@ internal/
     eventbus/        ← Outbox-backed publisher + ValidatingCodec (JSON Schema draft-07 at enqueue time)
     openbao/         ← KV v2 client for IdP secrets (Kubernetes auth), §12 / RP-D10
     orgmembership/   ← HTTP client for O&M (I-8 residual-MFA-requirement check)
-    s3/              ← Realm export target on offboarding (§15.2)
+    s3/              ← Realm export target on offboarding (§15.5)
     metrics/         ← iam_realm_provisioner_* Prometheus counters/histograms/gauges
   eventschema/        ← Embedded JSON Schema files (one per produced event) + ByEventType map
 cmd/reconciler/jobs/  ← trial_expiry, trial_hard_delete, subscription_lapse, realm_config_reconcile,
@@ -80,7 +82,7 @@ For layering details and the request-flow diagrams, see [ARCHITECTURE.md](ARCHIT
 
 1. Add the handler in `internal/adapter/inbound/http/`, wire the route in `cmd/server/main.go`.
 2. If the endpoint mutates state, honor the `Idempotency-Key` header via `IdempotencyStore`/`provisioning_operations` (§9.2) and follow the Keycloak-effect-first-then-local-commit ordering (§9.1): the Keycloak mutation happens before any DB transaction opens; only on success does the local row + outbox event commit atomically.
-3. Add unit tests in `test/unit/`; add HTTP-layer tests alongside the handler package if white-box coverage is needed (see `TEST_INTERNAL_PKGS` in the Makefile).
+3. Add service-level unit tests in `test/unit/`; add HTTP-layer tests alongside the handler package (see "Test layout" below).
 4. Update the endpoint catalogue in `README.md` and, if it's a new produced event, `api/asyncapi.yaml` + `internal/eventschema/`.
 
 ### Adding a new domain event type
@@ -89,7 +91,9 @@ For layering details and the request-flow diagrams, see [ARCHITECTURE.md](ARCHIT
 2. Build the event in the relevant service method and enqueue it via the outbox inside the same transaction as the business write (never "publish first, commit later").
 3. Add the message to `api/asyncapi.yaml`'s `iamTenantEvents` channel and add the matching JSON Schema file under `internal/eventschema/`, registering it in `ByEventType`.
 4. Run `go test ./internal/eventschema/... -run TestAsyncAPIVsSchemaDrift` — this is this service's CI-enforced drift gate between the AsyncAPI spec and the embedded schemas; it must pass before merge.
-5. §23 names are frozen at v1.0 sign-off — do not rename an existing event type or field; add a new versioned event instead if the meaning changes.
+5. Run `make schema-validate` — the `platform-schemagov` 8-pass validation (`schema-registry.yml`'s `pr-check` job re-runs this, plus a diff-against-registry check, on any PR touching `api/asyncapi.yaml`/`internal/eventschema/`).
+6. §25 names are frozen at v1.0 sign-off — do not rename an existing event type or field; add a new versioned event instead if the meaning changes.
+7. Merging to `main` triggers `schema-registry.yml`, which registers the new schema on the shared `iam-tenant-events` Glue registry (staging); see `docs/runbook-schema-registry.md`.
 
 ### Adding a new Keycloak admin operation
 
@@ -113,7 +117,7 @@ For layering details and the request-flow diagrams, see [ARCHITECTURE.md](ARCHIT
 
 | Layer | Location | Docker | Notes |
 |-------|----------|--------|-------|
-| Unit | `test/unit/` + white-box `_test.go` files listed in `TEST_INTERNAL_PKGS` (Makefile) | No | Mock ports via `testify/mock` |
+| Unit | `test/unit/` + white-box `_test.go` files listed in `TEST_INTERNAL_PKGS` (Makefile) | No | See "Test layout" below |
 | PostgreSQL / RLS | `test/postgres/` (`-tags=integration`) | Yes | Real Postgres via testcontainers; the 5 canonical §14.5 RLS cases plus extras |
 | Integration | `test/integration/` (`-tags=integration`) | Yes | Real Keycloak 26 + Postgres via testcontainers |
 | E2E | `test/e2e/` (`-tags=e2e`) | Yes | Full lifecycle flows against the app's own test harness |
@@ -123,6 +127,30 @@ All unit tests must pass without Docker (`make test-unit`). Run the race detecto
 ```bash
 make race
 ```
+
+### Test layout — where a unit test goes
+
+Default to **`test/unit/`**. Every file there is `package unit_test`, one flat
+package, importing `internal/core/{domain,port,service}` and exercising only
+the **exported** API. Shared mocks for every port live in
+`test/unit/mocks_test.go`; because the directory is a single package, a new
+helper or fake must not collide with a name already declared there.
+
+Put a test **next to the code** only when it cannot be written against the
+exported surface — it asserts on an unexported field, calls an unexported
+method, or exercises an unexported helper. Those files are the ones
+`TEST_INTERNAL_PKGS` picks up. Current examples:
+
+- `internal/core/service/internals_test.go` — constructor defaults on
+  unexported fields, `selectShard`, `marshalIdempotencyResult`.
+- `internal/core/service/idp_validator_test.go` — the unexported §11.6
+  region/signature predicates.
+- `internal/core/port/logger_test.go` — `kvToFields`.
+- Adapter packages (`http`, `consumer`, `postgres`, `keycloak`, …) test their
+  own internals and stay colocated throughout.
+
+If you find yourself exporting something solely to move its test into
+`test/unit/`, don't — leave the test colocated instead.
 
 ### Canonical test cases
 
@@ -215,11 +243,12 @@ docs: update Environment variables table for BAO_IDP_PATH_PREFIX
 
 ## Deployment
 
-Releases are handled via the CI/CD pipeline (`.github/workflows/ci.yml`):
+Releases are handled via the CI/CD pipeline (`.github/workflows/ci.yml`). SemVer rules, the runtime contract, image-tag scheme, and the intended tagged-release checklist are in [VERSIONING.md](VERSIONING.md).
 
 1. `validate-test` (race detector + coverage gate + arch-lint + e2e) and `validate-quality` (fmt/tidy/vet/lint/vuln/mod-verify/Dockerfile checks) run in parallel with `build-image`.
 2. A single Docker image is built (`linux/amd64`, distroless static-debian12:nonroot) carrying both `iam-realm-provisioner-server` and `iam-realm-provisioner-reconciler`; Trivy CVE scan and smoke tests run against it.
 3. On push to `main`, the image is pushed to GHCR and signed with Cosign keyless signing (Sigstore OIDC).
-4. The Helm chart in `deploy/helm/realm-provisioner/` is applied by the platform CD pipeline — one Deployment (the server) plus 6 CronJobs (the reconciler jobs), all dispatched from the same image with a `command` override.
+4. The Helm chart in `deploy/helm/iam-realm-provisioner/` is applied by the platform CD pipeline — one Deployment (the server) plus 6 CronJobs (the reconciler jobs), all dispatched from the same image with a `command` override.
+5. Separately, schema changes (`internal/eventschema/*.json`, `api/asyncapi.yaml`) trigger `schema-registry.yml`, which registers this service's 9 event schemas to the shared `iam-tenant-events` Glue registry (staging on push to `main`, production on release) — see `docs/runbook-schema-registry.md`.
 
 Notify the platform team on Slack if a migration or breaking env-var change requires coordinated rollout — especially anything touching the OpenBao path convention or the Keycloak admin credential.

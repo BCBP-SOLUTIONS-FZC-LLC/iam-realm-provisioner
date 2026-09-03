@@ -52,7 +52,7 @@ func (d *serviceDeps) handler() Handlers {
 		service.NewProvisioningService(d.realms, d.idempotency, d.keycloak, d.tx, "trial", []string{"kc-shard-1"}),
 		service.NewLifecycleService(d.realms, d.idempotency, d.keycloak, d.tx, "trial"),
 		service.NewMfaService(d.realms, d.keycloak, d.orgMembership),
-		service.NewIdpService(d.realms, d.idpConfigs, d.idpValidations, d.openbao, d.keycloak),
+		service.NewIdpService(d.realms, d.idpConfigs, d.idpValidations, d.idempotency, d.openbao, d.keycloak),
 		service.NewRealmConfigService(d.realms, d.reconciliations, d.keycloak),
 	)
 }

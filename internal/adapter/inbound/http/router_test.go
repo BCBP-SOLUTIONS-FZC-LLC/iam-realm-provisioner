@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 )
 
 func newHealthRouter(pg, sysPg, outbox, kc Pinger) http.Handler {
@@ -115,6 +116,30 @@ func TestReadyz_EachDependencyDown(t *testing.T) {
 				t.Fatalf("expected %s down, got %+v", tc.checkedKey, body.Checks)
 			}
 		})
+	}
+}
+
+// The 4 dependency checks must run concurrently, not sequentially — 4
+// pingers each sleeping ~50ms must complete well under 4x that (200ms),
+// proving they overlap rather than queue behind one another.
+func TestReadyz_ChecksRunConcurrently(t *testing.T) {
+	slowPinger := func() *fakePinger {
+		return &fakePinger{HealthFn: func(ctx context.Context) error {
+			time.Sleep(50 * time.Millisecond)
+			return nil
+		}}
+	}
+	r := newHealthRouter(slowPinger(), slowPinger(), slowPinger(), slowPinger())
+
+	start := time.Now()
+	rec := doRequest(r, http.MethodGet, "/readyz", nil, "")
+	elapsed := time.Since(start)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if elapsed >= 150*time.Millisecond {
+		t.Fatalf("expected concurrent checks to finish well under 4x50ms, took %s", elapsed)
 	}
 }
 

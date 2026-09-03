@@ -1,12 +1,12 @@
-# Realm Provisioner — Implementation Reference (condensed from the frozen LLD v1.0)
+# Realm Provisioner — Implementation Reference (condensed from the frozen LLD v1.3)
 
-Source: `docs/lld/iam-lld-realm-provisioner-service.md` (v1.0, Approved, 2026-08-31). This file is a
-working extraction for implementation — where it and the LLD ever disagree, **the LLD (and its §23)
+Source: `docs/lld/iam-lld-realm-provisioner-service.md` (v1.3, Approved, 2026-09-02). This file is a
+working extraction for implementation — where it and the LLD ever disagree, **the LLD (and its §25)
 governs**; re-read the source section cited before finalizing anything security- or name-sensitive.
 
 ---
 
-## 1. §23 Frozen Name Inventory (verbatim)
+## 1. §25 Frozen Name Inventory (verbatim)
 
 **Postgres — tables (7).** `tenant_realms`, `keycloak_idp_configs`, `keycloak_idp_config_validations`,
 `realm_config_reconciliations`, `provisioning_operations` (five tenant-scoped, `FORCE` RLS on
@@ -116,6 +116,7 @@ CREATE TABLE tenant_realms (
   trial_ends_at         timestamptz,
   converted_at          timestamptz,
   disabled_at           timestamptz,
+  suspension_source     text,                                  -- 'billing_lapse'|'operator'|NULL (§8.8) — set by RP-14/RP-C3, cleared by RP-10
   exported_at           timestamptz,
   export_s3_key         text,
   record_version        bigint NOT NULL DEFAULT 1 CHECK (record_version > 0),
@@ -123,12 +124,15 @@ CREATE TABLE tenant_realms (
   updated_at            timestamptz NOT NULL DEFAULT now(),
   deleted_at            timestamptz,
   CONSTRAINT chk_shard_dedicated  CHECK (strategy = 'shared' OR keycloak_shard IS NOT NULL),
-  CONSTRAINT chk_shared_is_trial  CHECK (strategy = 'dedicated' OR realm_name = 'trial')
+  CONSTRAINT chk_shared_is_trial  CHECK (strategy = 'dedicated' OR realm_name = 'trial'),
+  CONSTRAINT chk_suspension_source CHECK (suspension_source IS NULL OR suspension_source IN ('billing_lapse', 'operator'))
 );
 CREATE INDEX idx_tenant_realms_status   ON tenant_realms (status)         WHERE deleted_at IS NULL;
 CREATE INDEX idx_tenant_realms_trial_exp ON tenant_realms (trial_ends_at)  WHERE strategy = 'shared' AND status = 'active';
 CREATE INDEX idx_tenant_realms_strategy ON tenant_realms (strategy)       WHERE deleted_at IS NULL;
 CREATE UNIQUE INDEX uq_tenant_realms_dedicated_name ON tenant_realms (realm_name) WHERE strategy = 'dedicated' AND deleted_at IS NULL;
+CREATE INDEX idx_tenant_realms_lapse_offboard ON tenant_realms (disabled_at)
+  WHERE status = 'suspended' AND suspension_source = 'billing_lapse';  -- RP-C3 offboard query, §8.8
 
 -- §4.3 keycloak_idp_configs / keycloak_idp_config_validations
 CREATE TABLE keycloak_idp_configs (
@@ -199,7 +203,7 @@ CREATE TABLE processed_events (
 -- RLS-exempt (operational table), pruned past PROCESSED_EVENTS_TTL_DAYS (> 7-day SQS lifetime).
 ```
 
-**RLS (§4.5, §10.1).** All five tenant-scoped tables (`tenant_realms`, `keycloak_idp_configs`,
+**RLS (§4.3, §10.1).** All five tenant-scoped tables (`tenant_realms`, `keycloak_idp_configs`,
 `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`) carry
 `FORCE ROW LEVEL SECURITY` with a fail-closed policy using `NULLIF` on `app.tenant_id`, e.g.:
 
@@ -232,21 +236,22 @@ from gateway identity headers via `pkg/requestctx`, never the body.
 - Persists only `tenant_id` + realm row. No dedicated realm created (RP-INV-2). O&M's `tenants` row is created by Signup's own I-1 call, NOT by RP — RP's event only settles it.
 
 ### RP-2 `POST /tenants/provision-direct` — Signup Service
-- Body: `{tenant_id, tenant_name, tenant_slug, admin_email, admin_name, plan, billing_subscription_id}` (no hashed_password_seed shown but likely also present per RP-1 parity — check consistency at impl time, not frozen in §23)
+- Body: `{tenant_id, tenant_name, tenant_slug, admin_email, admin_name, plan, billing_subscription_id}` (no hashed_password_seed shown but likely also present per RP-1 parity — check consistency at impl time, not frozen in §25)
 - Flow (§8.2): select least-loaded shard → clone realm-template → `tenant-<slug>` → register OIDC clients (tender-web, tender-mobile, tender-gateway, per-service) → create admin user, trigger VERIFY_EMAIL → on any KC failure: compensating teardown, `502 keycloak_unavailable` retryable → else `RunInTx{ UPSERT tenant_realms(strategy='dedicated', shard, status='active', converted_at=now()), outbox TenantRealmReady + TenantConverted(direct_signup=true), op=succeeded }`.
 - Response 200: `{realm:'tenant-<slug>', strategy:'dedicated', oidc_clients[]}`.
 - `payment_method_id` if sent is ignored (Billing/PCI domain).
 
 ### RP-3 `POST /tenants/:id/convert` — Billing Service
 - Body: `{plan, billing_subscription_id, payment_method_id}` (`payment_method_id` ignored, never stored — PCI scope-out).
-- Flow (§8.3): load `tenant_realms` (must be `strategy='shared'`) → select shard → clone template → dedicated realm, OIDC clients (redirect scoped `/t/<slug>/*`) → loop each active trial user with matching `tenant_id` attr: create in dedicated realm preserving `sub`, copy email/name/attrs, copy TOTP credential; WebAuthn cannot migrate → flag `WEBAUTHN_REGISTER` required action → force-logout all shared-realm sessions for tenant → on partial failure: compensating teardown of new realm (shared untouched), `502 conversion_failed` retryable → else `RunInTx{ UPDATE tenant_realms(strategy='dedicated', shard, converted_at, status='active'), outbox TenantRealmReady + TenantConverted, op=succeeded }`.
+- Flow (§8.3): load `tenant_realms` (must be `strategy='shared'`) → select shard → clone template → dedicated realm (deterministic name from the **full** tenant UUID, not a truncated prefix — collision resistance matters once a realm-name conflict is treated as "my own retry," see below), OIDC clients (redirect scoped `/t/<slug>/*`) → loop each active trial user with matching `tenant_id` attr: create in dedicated realm preserving `sub`, copy email/name/attrs, copy TOTP credential; WebAuthn cannot migrate → flag `WEBAUTHN_REGISTER` required action → force-logout all shared-realm sessions for tenant → on partial failure: compensating teardown of the new realm **only while it has not yet received a migrated user** (once one user has been migrated the realm holds a user that no longer exists anywhere else — deleting it would be permanent data loss, not a rollback), `502 conversion_failed` retryable → else `RunInTx{ UPDATE tenant_realms(strategy='dedicated', shard, converted_at, status='active'), outbox TenantRealmReady + TenantConverted, op=succeeded }`. A retry with the same `Idempotency-Key` resumes rather than restarting: a `CreateRealmFromTemplate` name conflict on the deterministic realm name is tolerated as proof of the tenant's own earlier partial attempt, and a fresh per-tenant-user listing on the shared realm naturally picks up only whatever remains unmigrated.
 - Response 200: `{tenant_id, realm, strategy:'dedicated', keycloak_shard, oidc_clients[], users_migrated, webauthn_reenroll_required, shared_sessions_terminated:true}`.
 - Response field provenance: `tenant_id/realm/strategy/keycloak_shard` ← `tenant_realms` row; `oidc_clients` ← Keycloak state (not stored); `users_migrated/webauthn_reenroll_required/shared_sessions_terminated` ← per-op summary, mirrored into `provisioning_operations.result` for replay, carried on `TenantConverted` event — not a durable column.
 
 ### RP-4 `POST /tenants/:id/revert-conversion` — Billing / operator
 - Reversible-within-7-days undo of conversion (§8.3 note): recreate shared-realm tenant (extended trial expiry), migrate users back, tear down dedicated realm — mirror of §8.3, same idempotency ledger.
-- Beyond 7 days: `409 revert_window_expired` with `details.converted_at`; late reversion is an operator runbook (§22), not this endpoint.
+- Beyond 7 days: `409 revert_window_expired` with `details.converted_at`; late reversion is an operator runbook (§24), not this endpoint.
 - Body: `{reason?}` (optional, event/audit only).
+- Resume-safe against a local-commit failure after a successful realm delete: if `DeleteRealmIfExists` succeeded but the subsequent local commit failed, a retry's user-listing call against the now-absent dedicated realm returns a distinguishable not-found signal (rather than a generic transport error) — treated as proof the migration-and-delete already completed, skipping straight to the local commit instead of hard-failing forever against a realm that no longer exists.
 
 ### RP-5 `POST /tenants/:id/users` — Org & Membership (`CreateInvitedUser`)
 - Body: `{email, full_name, required_actions}` — O&M computes `required_actions` (`VERIFY_EMAIL`, `UPDATE_PASSWORD`, conditional `CONFIGURE_TOTP`); **RP applies verbatim, never re-derives** (F5).
@@ -255,7 +260,9 @@ from gateway identity headers via `pkg/requestctx`, never the body.
 
 ### RP-6 `PUT /tenants/:id/idp` — Org & Membership
 - Body: `{idp_alias, protocol, config(non-secret), secret, ack[]}`.
-- Flow (§8.4): load `tenant_realms` (must be `strategy='dedicated'` — federation needs dedicated realm) else `409 idp_requires_dedicated_realm` → run §11.6 validator → CRITICAL failure: `INSERT keycloak_idp_config_validations(outcome='failing')`, `400 idp_region_portability_failed {details.failed_checks[], details.validator_version}` → WARN(s) unacknowledged: `INSERT validations(outcome='warnings_only')`, `422 idp_warnings_unacknowledged {details.warnings[]}` → pass or WARN-acked: write secret to OpenBao KV (`secret/data/iam/realm-provisioner/idp/<tenant_id>/<alias>`) → create/update IdP + attribute mappers on Keycloak → `RunInTx{ UPSERT keycloak_idp_configs(status='active', NO secret column), INSERT validations(outcome), op=succeeded }`.
+- `idp_alias` must match `^[a-zA-Z0-9_-]{1,64}$` (checked before the idempotency ledger is even touched) — no dot permitted at all, since the OpenBao KV path is built by interpolating this value directly and a `.`/`..` sequence could otherwise resolve outside the tenant-scoped prefix.
+- Ledgered against `Idempotency-Key` like every other mutating endpoint (§9.2): `idempotency.Begin` → replay a `succeeded` row's stored result, else proceed.
+- Flow (§8.4): load `tenant_realms` (must be `strategy='dedicated'` — federation needs dedicated realm) else `409 idp_requires_dedicated_realm` → run §11.6 validator → CRITICAL failure: `INSERT keycloak_idp_config_validations(outcome='failing')`, `400 idp_region_portability_failed {details.failed_checks[], details.validator_version}` → WARN(s) unacknowledged: `INSERT validations(outcome='warnings_only')`, `422 idp_warnings_unacknowledged {details.warnings[]}` → pass or WARN-acked: write secret to OpenBao KV (`secret/data/iam/realm-provisioner/idp/<tenant_id>/<alias>`) → create/update IdP + attribute mappers on Keycloak — on failure here, if the secret was just written **and** this alias had no prior config (confirmed via a lookup before the write), best-effort delete the now-orphaned OpenBao secret; an update to an already-configured alias never deletes on failure, since the pre-existing Keycloak IdP is unaffected by the failed update → `RunInTx{ UPSERT keycloak_idp_configs(status='active', NO secret column), INSERT validations(outcome), op=succeeded }`.
 - Response 200: `{idp_alias, status:'active'}`. Emits audit event `TenantIdpConfigChanged` (Audit only — NOT one of the 9 tenant-lifecycle events, no `iam.tenant.events` publish for IdP changes).
 
 ### RP-7 `DELETE /tenants/:id/idp/:alias` — Org & Membership
@@ -287,7 +294,7 @@ from gateway identity headers via `pkg/requestctx`, never the body.
 - Runs §11.6 checklist across every tenant realm's IdP configs; returns `{total_tenants, total_idp_configs, passing, warnings_only, failing, failing_tenants[]}` (HLD §11.6 verbatim shape).
 
 ### RP-14 `POST /tenants/:id/suspend` — operator only (RP-D12, §8.12)
-- Body: `{reason}`. Requires platform-admin role (§10.6).
+- Body: `{reason}`. Requires platform-admin role (§10.4).
 - Flow: if `offboarded` → `409 tenant_offboarded`; if already `suspended` → `200` idempotent no-op replay; if dedicated realm → disable Keycloak realm `tenant-<slug>` → `RunInTx{ UPDATE tenant_realms(status='suspended', disabled_at=now()), outbox TenantSuspended(source='operator', reason), op=succeeded }`, `200 {status:'suspended'}`; if shared-trial tenant → disable ONLY that tenant's users in shared `trial` realm (NEVER disable the shared realm itself) → same outbox/response pattern.
 - Effect-only — does not set `subscription_status` (O&M's job). Reversible via RP-10.
 
@@ -367,6 +374,11 @@ Each dedups via `processed_events` `INSERT ... ON CONFLICT DO NOTHING` keyed `(e
 consumers need a decode-capable codec (`events.WithConsumerCodec`) regardless of this service's own
 publish-side config — the Glue wire header is self-describing.
 
+`tenant`/`billing` write to Postgres, so the mark commits **inside** the same `TxRunner.RunInTx` as the
+projection update (`MarkProcessed` joins the ambient tx) — neither lands without the other.
+`billing`'s Keycloak `EnableRealm` stays outside that tx (Keycloak-effect-first, §9.1). `membership`
+touches no local state, so it marks after success; its effect is a reconcile, making replay a no-op.
+
 **`membership-realm-q` semantics (§8.6, RP-EVT-6).**
 - Add `requires-mfa` **unconditionally** (assign-if-absent) on: `DepartmentMembershipGranted` at reviewer/approver level, `DepartmentMembershipLevelChanged` elevating to reviewer/approver, `TenantRoleGranted`.
 - Drop `requires-mfa` **only** on `TenantRoleRevoked`, and only after calling O&M's I-8
@@ -394,8 +406,8 @@ A message whose payload fails schema-decode routes to its DLQ rather than retryi
 |---|---|---|---|
 | `trial_expiry` | RP-C1 | `0 2 * * *` | Sweep own `tenant_realms` for `strategy='shared' AND status='active' AND trial_ends_at < now()` (uses `idx_tenant_realms_trial_exp`) — **never queries O&M**. For each: call RP-12 (`expire-trial`) per tenant so the effect goes through the same idempotency ledger. Batched (`batchLimit=100` per §12 config), self-retrying. |
 | `trial_hard_delete` | RP-C2 | `0 3 * * *` | For trials past `TRIAL_GRACE_DAYS` (30) grace: hard-delete users from shared realm via Admin API, soft-delete/scrub local `tenant_realms` row (retain only `tenant_id` for audit-FK, preserve `sub`). O&M runs its own separate cleanup cron for its `tenants` row — no coordination needed. |
-| `subscription_lapse` | RP-C3 | `0 2 * * *` | Daily sweep of dedicated tenants' `subscription_status`+timestamps (read from O&M) driving Keycloak effects: `cancelled` past `CANCELLED_GRACE_DAYS` (30) → disable dedicated realm, `status='suspended'`, emit `TenantSuspended(source='billing_lapse')`; `suspended` past `RETENTION_DAYS` (90) total → export realm to S3 (encrypted, confirm durable write) THEN delete realm, `status='exported'`→`'deleted'`, scrub row, emit `TenantOffboarded` (terminal, RP-INV-5). **Excludes** operator-sourced suspensions (`source='operator'`, no `cancelled_at`) from the auto-offboard leg — those stay `suspended` indefinitely until an operator explicitly reactivates/offboards. Never deletes without confirmed export (RP-EVT-4) — on export/S3 failure, leaves `suspended`, retries next tick. |
-| `realm_config_reconcile` | RP-C4 | `*/10 * * * *` | Retries every `realm_config_reconciliations` row with `status='pending'`: re-attempt the Keycloak apply; on success mark `applied`, `applied_at=now()`; on failure increment `attempts`, record `last_error`. |
+| `subscription_lapse` | RP-C3 | `0 2 * * *` | **Two phases sharing one `BatchLimit` budget** (`cmd/reconciler/jobs/subscription_lapse.go`). **Suspend** (skipped, WARN-logged, if `ORG_MEMBERSHIP_BASE_URL` unset): `port.SubscriptionLapseReader.ListLapsedSubscriptions` calls O&M's real **I-16** `GET /api/v1/internal/subscription-lapses` (`x-user-id`+`x-tenant-roles=iam-system`, no `x-tenant-id`) for tenants already cancelled past O&M's grace math; skips non-`dedicated` `realm_type` (owned by RP-C1/RP-C2 instead); per tenant, no-op if already `suspended`/`deleted`, else disable dedicated realm → `status='suspended'`, `disabled_at=now()`, `suspension_source='billing_lapse'`, emit `TenantSuspended(source='billing_lapse')`, key `lapse-suspend:<tenant_id>`. **Offboard** (always runs, purely local — no O&M call): `TenantRealmRepository.ListSuspendedPastRetention(ctx, RETENTION_DAYS, limit)` selects `status='suspended' AND suspension_source='billing_lapse' AND disabled_at < now()-retentionDays` via `idx_tenant_realms_lapse_offboard`; per candidate, export realm to S3 (encrypted, confirm durable write) THEN delete realm, `status='deleted'`, scrub row, emit `TenantOffboarded` (terminal, RP-INV-5), key `offboard:<tenant_id>`. **Excludes** operator-sourced suspensions (`suspension_source='operator'`) from the offboard leg **structurally** — the query's own `suspension_source='billing_lapse'` predicate, not a runtime check — so they stay `suspended` indefinitely until an operator explicitly reactivates/offboards. Never deletes without confirmed export (RP-EVT-4) — on export/S3 failure, leaves `suspended`, retries next tick. |
+| `realm_config_reconcile` | RP-C4 | `*/10 * * * *` | Retries every `realm_config_reconciliations` row with `status='pending'`: re-attempt the Keycloak apply; on success mark `applied`, `applied_at=now()`; on failure increment `attempts`, record `last_error`, and leave the row `pending` for the next tick UNLESS the just-incremented attempt count has reached `RECONCILER_MAX_ATTEMPTS` (default 20), in which case the row moves atomically to a terminal `failed` status instead — a poison-pill cap so a permanently-broken setting stops consuming a batch slot every tick forever. |
 | `outbox_prune` | — | (own ticker, not cron) | Calls `platform-events` `outbox.Runner.PrunePublished` on a retention ticker — runs as a `cmd/server` background goroutine per §3.1, not necessarily a separate reconciler CronJob (verify against sibling pattern — org-membership likely wires this in `cmd/server`, not `cmd/reconciler`). |
 | `processed_events_prune` | — | — | Prune `processed_events` rows older than `PROCESSED_EVENTS_TTL_DAYS`. |
 
@@ -461,19 +473,19 @@ forbidden non-`LOCAL` form.
 
 ## 7. §10 Security
 
-**Keycloak admin role set (§10.2, RP-2 resolved):**
+**Keycloak admin role set (§10.5, RP-2 resolved):**
 - Master realm: `create-realm` **only** (not full master `admin`). Required for `POST /admin/realms`.
 - Managed realms: `realm-admin` composite (covers `manage-realm`/`manage-users`/`manage-clients`/`manage-identity-providers`) — covers realm enable/disable, client registration, user CRUD (RP-15), IdP config (RP-6), realm-role assign/revoke (RP-1), credential reset (RP-9), session/token revocation (RP-16).
 - `create-realm` auto-confers admin on realms this account creates — no per-realm bootstrap hook needed since RP is sole creator (RP-INV-1).
 - Cross-realm migration (trial→dedicated) — ONE account holds rights on both source (`view-users`/`query-users` via `realm-admin` on `trial`) and target (`manage-users`/`manage-realm` via `realm-admin` on new realm).
 - Deferred hardening (not MVP): split bootstrap (`create-realm` only) vs runtime (`realm-admin`) accounts.
 
-**Credential protection (§10.2 — "the crown jewel").** Keycloak admin credential: OpenBao secret,
+**Credential protection (§10.5 — "the crown jewel").** Keycloak admin credential: OpenBao secret,
 surfaced via ESO (OpenBao/Vault provider) as an ephemeral volume — NEVER env var, image layer, or git
 artifact. RP-INV-1 means only this service's OpenBao role can `read` that path. Admin access token:
 cached only in Valkey/in-process (§6.1), never logged, never in Postgres, shortest practical lifetime.
 
-**Per-tenant IdP secrets (§10.2, §4.3, RP-D10).** Dynamic, unbounded, so accessed via OpenBao KV API
+**Per-tenant IdP secrets (§10.5, §4.2, RP-D10).** Dynamic, unbounded, so accessed via OpenBao KV API
 at runtime (not ESO). Path: `secret/data/iam/realm-provisioner/idp/<tenant_id>/<idp_alias>`. No
 reference/pointer ever stored in Postgres — path is fully derivable from `(tenant_id, idp_alias)`
 already on the row. OpenBao policy (Kubernetes auth, pod ServiceAccount token → OpenBao role → policy):
@@ -483,18 +495,18 @@ RP-6 request, straight to OpenBao + Keycloak — never persisted or echoed. Keyc
 encrypted copy (for federated-login-time use); OpenBao lets RP re-apply/rotate without customer
 re-submission. RP-7 removal deletes ALL copies (Keycloak IdP + OpenBao KV entry).
 
-**Network isolation (§10.3).** All routes `/api/v1/internal/*` except health/docs — mesh-only, mTLS,
+**Network isolation (§10.2).** All routes `/api/v1/internal/*` except health/docs — mesh-only, mTLS,
 internal-route guard. `/metrics` on its own listener, monitoring-namespace-only.
 
-**Input validation (§10.4).** `strategy`/`protocol` enum-checked; slug charset/length for realm
+**Input validation (§10.3).** `strategy`/`protocol` enum-checked; slug charset/length for realm
 naming; `Idempotency-Key` non-empty ≤256 chars; IdP `config` validated by §11.6 BEFORE any Keycloak
 write (RP-INV-4); `setting_key` allow-listed (else `400 unsupported_realm_setting`). No secret material
 ever accepted into or stored in Postgres.
 
-**Audit (§10.5).** Every mutation emits an event or `TenantIdpConfigChanged` audit event, carrying
+**Audit (§10.6).** Every mutation emits an event or `TenantIdpConfigChanged` audit event, carrying
 `actor`, `trace_id`, system sentinel for cron-origin ops.
 
-**Authorization (§10.6).** RP makes NO end-user authz decision (that's AuthZ Enrichment). Callers are
+**Authorization (§10.4).** RP makes NO end-user authz decision (that's AuthZ Enrichment). Callers are
 trusted mesh peers (internal-route guard + mTLS); `x-tenant-id` header scopes + RLS enforces. RP-13
 (operator-only) additionally requires operator role in `x-tenant-roles`/platform-admin claim. RP-14
 also requires platform-admin role.
@@ -538,14 +550,16 @@ iam_realm_provisioner_template_drift{realm_version}                             
 Plus passthrough `http_*`/`events_*` (incl. `outbox_dead_letters_total`)/`sqs_*` from the platform
 libs. No projection-lag metric (RP is a producer, not a projector).
 
-**Tracing (§11.3).** W3C `traceparent` on every outbound call (O&M, Keycloak, SNS). Outbox stamps
-`trace_id` so provision→event→O&M-projection is one trace. Keycloak spans named `keycloak.<op>` (e.g.
-`keycloak.create_realm`, `keycloak.migrate_user`).
+**Tracing (§11.3).** `gincommon.InitTracingFromEnv()` in both binaries (always; OTLP export is a no-op until
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set). `pgcommon.Config.Tracer` on both pools for `db.query` spans. W3C `traceparent`
+injected on every outbound HTTP call (O&M, OpenBao, Keycloak) by `adapter/outbound/httpx`; SNS carries `trace_id` on
+the outbox envelope instead, so provision→event→O&M-projection is one trace. Keycloak spans named `keycloak.<op>`
+(e.g. `keycloak.create_realm`, `keycloak.migrate_user`); CronJob runs rooted at `reconciler.<job>`.
 
 **Logging.** Structured (`platform-gincommon/pkg/logger`), fields: `tenant_id`, `operation`,
 `idempotency_key`, `keycloak_realm`, `actor`. NEVER log admin token, password seed, or IdP secret.
 
-**Dashboards (§11.4).** Grafana "IAM — Realm Provisioner": provision throughput/success by kind,
+**Dashboards and alerts (§11.5).** Grafana "IAM — Realm Provisioner": provision throughput/success by kind,
 conversion duration + users-migrated, KC call latency/error by op, admin-token refresh rate, IdP
 validation outcomes, MFA-role sync rate, realm-config pending gauge, trial-expiry/lapse
 processed+deferred, realm-export success, outbox/SQS/DLQ depths.
@@ -630,7 +644,7 @@ the pod ServiceAccount).
 
 `deploy/monitoring/` — `app-alerts.yml`, `slo-rules.yml`, `prometheus-adapter-rule.yaml`.
 
-**CI/CD (`.github/workflows/`, §13.4)** — copy sibling pipeline set:
+**CI/CD (`.github/workflows/`, §13.5)** — copy sibling pipeline set:
 - `validate-test.yml` — unit+integration (`go test -race`), coverage gate (`.github/scripts/coverage-gate.sh`), Postgres + Keycloak testcontainers.
 - `validate-quality.yml` — `golangci-lint`, `.go-arch-lint.yml` check (`.github/scripts/arch-lint.sh`), no-session-SET-GUC grep, no-gocloak-outside-`adapter/keycloak` grep (RP-INV-1), **AsyncAPI-vs-Glue drift gate** (pinned `platform-schemagov` validation of `api/asyncapi.yaml` against the `iam-tenant-events` Glue registry — fails PR on drift).
 - `ci.yml` — orchestrates the above, `build-image` (multi-stage Dockerfile + provenance scripts), `trivy` scan, `smoke` (`/healthz` 200, `/asyncapi.yaml` serves real spec), `pr-summary`, push to GHCR on default branch.
@@ -638,7 +652,7 @@ the pod ServiceAccount).
 - `changelog-check.yml` — enforces `CHANGELOG.md` `[Unreleased]` entry per PR.
 - Plus `.github/CODEOWNERS`, `dependabot.yml`, `ISSUE_TEMPLATE/`, `SECURITY.md`, `pull_request_template.md`.
 
-**Rollout (§13.5).** `golang-migrate` pre-deploy Job (tx-wrapped) via `pgcommon/pkg/migrate`, role
+**Rollout (§13.6).** `golang-migrate` pre-deploy Job (tx-wrapped) via `pgcommon/pkg/migrate`, role
 `provisioner_migrator`. Graceful shutdown: drain HTTP, let in-flight SQS messages finish
 (at-least-once + `processed_events` makes redelivery safe), let outbox runner finish current batch
 (`OUTBOX_DRAIN_TIMEOUT`). AWS access via IRSA (no static keys); OpenBao access via Kubernetes auth
@@ -713,12 +727,12 @@ scales linearly; report p50/p95/p99 per-user migration latency (loopback/mock-KC
 
 ## 12. §15 GDPR / Data Lifecycle
 
-**PII (§15.1).** `provisioner` DB holds minimal PII: `keycloak_idp_configs.config` may have
+**PII (§15.8).** `provisioner` DB holds minimal PII: `keycloak_idp_configs.config` may have
 organisational (not personal) URLs/entity IDs; `provisioning_operations.result` transiently mirrors a
 provisioning response (can include `admin_email`). Real PII lives in Keycloak (not mirrored). No
 personal fields in `tenant_realms`.
 
-**Erasure (§15.2):**
+**Erasure (§15.5):**
 - Trial expiry PII scrub — at 30-day-grace hard-delete: hard-delete trial user from shared `trial`
   realm via Admin API (removes email/name/profile), soft-delete local row, scrub residual PII,
   retain only `tenant_id` for audit-FK. Immutable `sub` preserved for audit continuity.
@@ -743,7 +757,7 @@ All items Resolved except decisions-already-made (not blockers): RP-1 (Resolved,
 (Resolved, Keycloak-ops-confirmed), RP-3 (Resolved, IAM-Platform+SRE-confirmed), RP-4 (Resolved,
 O&M-confirmed both sides), RP-5 (Decision: local mirror for shard-load — not open), RP-6 (Resolved,
 O&M-confirmed; 1 non-blocking O&M-side doc-gap), RP-7 (Decision: WebAuthn UX is web-team's, out of
-scope here), RP-8 (Decision: late-revert runbook authored separately, §22), RP-9 (Resolved — name
+scope here), RP-8 (Decision: late-revert runbook authored separately, §24), RP-9 (Resolved — name
 freeze DONE, v1.0), RP-10 (Resolved — HLD v1.42 OpenBao alignment), RP-11 (Resolved, O&M-confirmed both
 sides — `suspension_source` schema change made), RP-12 (Resolved via RP-D13), F5 (Resolved both
 sides — O&M sends `required_actions`), F6/OQ-8 (Resolved — built both sides, O&M P-34 + `ResetMFA`
@@ -779,6 +793,7 @@ direct-paid flow diagram on O&M's LLD) do not affect this service's implementati
 | `conversion_failed` | 502 | partial provisioning compensated; shared realm still authoritative | — |
 | `org_membership_unavailable` | 503 | O&M query 5xx/timeout; retryable | — |
 | `object_store_unavailable` | 503 | realm-export S3 write failed; offboarding deferred | — |
+| `db_unavailable` | 503 | Postgres connectivity / resource SQLSTATE (08/53/57/58) | — |
 
 ---
 
@@ -846,7 +861,7 @@ exist).
 
 ---
 
-## 17. §20 Decision Register (RP-D1..RP-D14, one-liners)
+## 17. §22 Decision Register (RP-D1..RP-D14, one-liners)
 
 - **RP-D1** — All logs/metrics/traces through `platform-gincommon` only.
 - **RP-D2** — All DB via `platform-pgcommon`; all events/outbox/dedup via `platform-events`.
@@ -865,7 +880,7 @@ exist).
 
 ---
 
-## 18. §21 Glossary (non-obvious terms)
+## 18. §23 Glossary (non-obvious terms)
 
 - **Shared `trial` realm** — the one Keycloak realm ALL trial tenants live in; distinguished by `tenant_id` JWT claim (RP-INV-2).
 - **Dedicated realm** — per-paid-tenant realm `tenant-<slug>`, created at conversion/direct-paid.
@@ -880,7 +895,7 @@ exist).
 
 ---
 
-## 19. §22 Operational Runbooks (topics — full text in `docs/runbook.md`)
+## 19. §24 Operational Runbooks (topics — full text in `docs/runbook.md`)
 
 1. Keycloak Admin API degraded — retry guidance, admin-token/rate-limit checks.
 2. Realm-config not landing — inspect `realm_config_reconciliations`, RP-C4 auto-retries.

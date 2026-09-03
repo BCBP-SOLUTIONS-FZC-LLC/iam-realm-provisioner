@@ -170,6 +170,44 @@ func TestConfigureIdp_InvalidRequest(t *testing.T) {
 	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
 }
 
+// CRITICAL (security): a path-traversal idp_alias must be rejected end to
+// end through the real router before any OpenBao/Keycloak call — idp_alias
+// flows into openbao.Client.idpPath's plain string interpolation with no
+// sanitization at that layer.
+func TestConfigureIdp_PathTraversalAlias_Rejected(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
+	d.openbao.WriteIdpSecretFn = func(ctx context.Context, tid uuid.UUID, alias string, secret map[string]any) error {
+		t.Fatal("must not write to OpenBao for a path-traversal idp_alias")
+		return nil
+	}
+	d.keycloak.CreateOrUpdateIdpFn = func(ctx context.Context, realmName string, idp port.IdpKeycloakConfig) error {
+		t.Fatal("must not call Keycloak for a path-traversal idp_alias")
+		return nil
+	}
+	headers := withHeader(sysHeaders(), "Idempotency-Key", "idp-traversal")
+	body := `{"idp_alias":"../other-tenant/evil","protocol":"saml","display_name":"Evil"}`
+	rec := doRequest(d.engine(), http.MethodPut, idpPath(tenantID), headers, body)
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+}
+
+func TestRemoveIdp_PathTraversalAlias_Rejected(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
+	d.openbao.DeleteIdpSecretFn = func(ctx context.Context, tid uuid.UUID, alias string) error {
+		t.Fatal("must not call OpenBao for a path-traversal idp_alias")
+		return nil
+	}
+	d.keycloak.DeleteIdpFn = func(ctx context.Context, realmName, alias string) error {
+		t.Fatal("must not call Keycloak for a path-traversal idp_alias")
+		return nil
+	}
+	rec := doRequest(d.engine(), http.MethodDelete, idpAliasPath(tenantID, "..evil"), sysHeaders(), "")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+}
+
 func TestConfigureIdp_KeycloakUnavailable(t *testing.T) {
 	d := newServiceDeps()
 	tenantID := uuid.New()

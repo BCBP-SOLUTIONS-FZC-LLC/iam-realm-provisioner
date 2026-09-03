@@ -16,10 +16,13 @@ export GONOSUMDB  ?= github.com/BCBP-SOLUTIONS-FZC-LLC/*
 
 export APP_NAME APP_ENV BUILD_VERSION
 
+# Black-box service/domain suite (package unit_test) — see CONTRIBUTING
+# "Test layout" for what belongs here vs. TEST_INTERNAL_PKGS below.
 TEST_UNIT_PKGS     := ./test/unit/...
 TEST_POSTGRES_PKGS := ./test/postgres/...
 TEST_INT_PKGS      := ./test/integration/...
 TEST_E2E_PKGS      := ./test/e2e/...
+TEST_LOAD_PKGS     := ./test/load/...
 
 # Every test/postgres/*.go test func calls t.Parallel() and spins its own
 # testcontainers Postgres — capped, not GOMAXPROCS-wide, so a dev machine
@@ -33,8 +36,12 @@ TEST_POSTGRES_PARALLEL ?= 4
 # on a bigger box.
 TEST_INTEGRATION_PARALLEL ?= 2
 
-# White-box (package-internal) tests included in unit runs.
-TEST_INTERNAL_PKGS := ./internal/adapter/inbound/http/... \
+# White-box (package-internal) tests included in unit runs, alongside the
+# black-box suite in TEST_UNIT_PKGS. ./cmd/... is listed so composition-root
+# helpers (the gauge exporters, reconciler jobs) are testable in this target
+# and counted in COVER_PKG_LIST below, not just under a bare `go test ./...`.
+TEST_INTERNAL_PKGS := ./cmd/... \
+                      ./internal/adapter/inbound/http/... \
                       ./internal/adapter/inbound/consumer/... \
                       ./internal/adapter/outbound/eventbus/... \
                       ./internal/adapter/outbound/postgres/... \
@@ -49,23 +56,29 @@ TEST_INTERNAL_PKGS := ./internal/adapter/inbound/http/... \
                       ./internal/eventschema/... \
                       ./pkg/...
 
-COVER_PKG_LIST := $(shell $(GO) list ./internal/... ./pkg/... 2>/dev/null | tr '\n' ',' | sed 's/,$$//')
+COVER_PKG_LIST := $(shell $(GO) list ./cmd/... ./internal/... ./pkg/... 2>/dev/null | tr '\n' ',' | sed 's/,$$//')
 
 # -----------------------------
 # SETUP
 # -----------------------------
 
 .PHONY: setup
-setup:
+setup: install-hooks
 	@test -f .env || cp .env-example .env
-	@mkdir -p .git/hooks
-	@test -f .githooks/pre-commit && cp .githooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit || true
 	@echo "Environment ready (.env)"
+
+.PHONY: install-hooks
+install-hooks:
+	@mkdir -p .git/hooks
+	@cp .githooks/pre-commit .git/hooks/pre-commit
+	@chmod +x .git/hooks/pre-commit
+	@echo "Installed git hooks"
 
 .PHONY: help
 help:
 	@echo "Available commands:"
-	@echo "  make setup            - copy .env-example to .env if missing"
+	@echo "  make setup            - copy .env-example to .env if missing; install .githooks/pre-commit"
+	@echo "  make install-hooks    - install local git hooks (.githooks -> .git/hooks); also run by make setup"
 	@echo "  make tidy             - go mod tidy"
 	@echo "  make fmt              - go fmt ./..."
 	@echo "  make fmt-check        - verify gofmt formatting (mirrors CI)"
@@ -78,6 +91,7 @@ help:
 	@echo "  make test-postgres    - Postgres + RLS integration tests (requires Docker)"
 	@echo "  make test-integration - cross-layer integration tests (SNS/SQS/Keycloak via testcontainers)"
 	@echo "  make test-e2e         - end-to-end tests (requires Docker)"
+	@echo "  make test-load        - RP-3 migration load test (fake Keycloak, no Docker); LOAD_TEST_FULL=1 for N=500"
 	@echo "  make race             - all tests with -race flag"
 	@echo "  make run              - run the server locally (go run)"
 	@echo "  make run-reconciler   - run one reconciler job locally, e.g. make run-reconciler JOB=trial-expiry"
@@ -93,6 +107,15 @@ help:
 	@echo "  make mod-verify       - go mod verify"
 	@echo "  make vuln-check       - govulncheck on internal + pkg"
 	@echo "  make clean            - remove build artefacts"
+	@echo ""
+	@echo "Schema governance (platform-schemagov 0.4, shared iam-tenant-events registry):"
+	@echo "  make schema-pull      - pull the platform-schemagov Docker image"
+	@echo "  make extract-schemas  - derive internal/eventschema/*.json from api/asyncapi.yaml"
+	@echo "  make schema-validate  - validate AsyncAPI + event schemas — 8 passes (no AWS required)"
+	@echo "  make schema-diff      - diff two schema files: CURRENT=<path> PROPOSED=<path>"
+	@echo "  make schema-register  - register this service's 9 event schemas to Glue (requires AWS/LocalStack)"
+	@echo "  make schema-verify    - pre-deploy check: fail if any of RP's 9 schemas is missing (requires AWS)"
+	@echo "  make schema-prune     - dry-run: list orphaned Glue schemas (requires AWS; excludes O&M's TenantCreated/TrialStarted)"
 
 # -----------------------------
 # GO BASICS
@@ -206,6 +229,14 @@ test-integration:
 test-e2e:
 	$(GO) test $(TEST_E2E_PKGS) -tags=e2e -count=1 -timeout 600s -v
 
+# RP-3 migration load test (LLD §14.6) — a fast default (N=80/N=320)
+# validating the Keycloak Admin API rate limiter + linear scaling; not part
+# of `make test`/`make test-ci` (expensive, deliberately separate, like
+# test-e2e). Set LOAD_TEST_FULL=1 to also run the LLD's literal N=500 case.
+.PHONY: test-load
+test-load:
+	$(GO) test $(TEST_LOAD_PKGS) -tags=load -count=1 -timeout 600s -v
+
 .PHONY: race
 race:
 	$(MAKE) -j3 _test-unit _test-postgres _test-integration
@@ -276,6 +307,138 @@ docker-up:
 docker-down:
 	@echo "Stopping local containers..."
 	docker compose down
+
+# -----------------------------
+# SCHEMA GOVERNANCE
+# -----------------------------
+# api/asyncapi.yaml is the single source of truth for this service's 9
+# produced event schemas. The `iam-tenant-events` Glue registry is SHARED
+# with iam-org-membership (O&M), which registers two more schema names there
+# (TenantCreated, TrialStarted) that this service does not own and must
+# never register, diff, verify, or prune (§7.3.1, RP-D5).
+SCHEMA_GOV_IMAGE ?= ghcr.io/bcbp-solutions-fzc-llc/platform-schemagov:0.4
+
+# schema-pull: pull the platform-schemagov Docker image.
+.PHONY: schema-pull
+schema-pull:
+	docker pull "$(SCHEMA_GOV_IMAGE)"
+
+# extract-schemas: derive internal/eventschema/*.json from api/asyncapi.yaml.
+# api/asyncapi.yaml is the single source of truth for event payload schemas.
+# Re-run whenever asyncapi.yaml changes; commit the updated JSON files alongside.
+# The JSON files are read by schema-gov validate --schema-dir internal/eventschema.
+.PHONY: extract-schemas
+extract-schemas:
+	@echo "Extracting event schemas from api/asyncapi.yaml..."
+	docker run --rm \
+	  -v "$(CURDIR)":/workspace \
+	  "$(SCHEMA_GOV_IMAGE)" extract \
+	  --asyncapi   api/asyncapi.yaml \
+	  --schema-dir internal/eventschema
+	@echo "Done. Run 'git add internal/eventschema/' to stage the changes."
+
+# schema-validate: validate AsyncAPI spec + event schemas — 8 passes:
+# (1) structure, (2) draft-07, (3) enum drift, (4) lifecycle annotations,
+# (5) open-schema guard, (6) consumer strict-mode, (7) coverage, (8) AsyncAPI structure.
+# No AWS credentials needed. Pass 4 only warns (does not fail) on schemas with
+# no x-lifecycle annotation — this service's 9 events are frozen (LLD §25)
+# and deliberately carry none yet (see ARCHITECTURE.md).
+.PHONY: schema-validate
+schema-validate: extract-schemas
+	docker run --rm \
+	  -v "$(CURDIR)":/workspace \
+	  "$(SCHEMA_GOV_IMAGE)" validate \
+	  --asyncapi   api/asyncapi.yaml \
+	  --schema-dir internal/eventschema
+
+# schema-diff: show compatibility diff between two schema files.
+# Usage: make schema-diff CURRENT=<path-to-current.json> PROPOSED=<path-to-proposed.json>
+#        Optionally: SCHEMA_NAME=<name> (defaults to the PROPOSED filename stem)
+.PHONY: schema-diff
+schema-diff:
+	@test -n "$(CURRENT)" && test -n "$(PROPOSED)" || { \
+	  echo "Usage: make schema-diff CURRENT=<current.json> PROPOSED=<proposed.json> [SCHEMA_NAME=<name>]"; \
+	  exit 1; \
+	}
+	docker run --rm \
+	  -v "$(CURDIR)":/workspace \
+	  "$(SCHEMA_GOV_IMAGE)" diff \
+	  --current     "$(CURRENT)" \
+	  --proposed    "$(PROPOSED)" \
+	  --schema-name "$(or $(SCHEMA_NAME),$(notdir $(basename $(PROPOSED))))"
+
+# schema-register: register this service's 9 event schemas to Glue (requires
+# AWS credentials or LocalStack). Only ever registers the files present under
+# internal/eventschema/ — never touches O&M's TenantCreated/TrialStarted,
+# which have no file here and are therefore never submitted.
+# Set AWS_ENDPOINT_URL=http://localhost:4566 in .env for LocalStack.
+.PHONY: schema-register
+schema-register:
+	@test -n "$(GLUE_REGISTRY_TENANT_NAME)" || { \
+	  echo "GLUE_REGISTRY_TENANT_NAME is not set — add it to .env or pass on the command line"; \
+	  exit 1; \
+	}
+	docker run --rm \
+	  -v "$(CURDIR)":/workspace \
+	  -e AWS_ACCESS_KEY_ID \
+	  -e AWS_SECRET_ACCESS_KEY \
+	  -e AWS_SESSION_TOKEN \
+	  -e AWS_REGION="$(AWS_REGION)" \
+	  -e AWS_ENDPOINT_URL="$(AWS_ENDPOINT_URL)" \
+	  "$(SCHEMA_GOV_IMAGE)" register \
+	  --registry   "$(GLUE_REGISTRY_TENANT_NAME)" \
+	  --schema-dir internal/eventschema
+
+# schema-verify: fail if any of this service's 9 frozen PascalCase schema
+# names (internal/eventschema.ByEventType, LLD §7.3.1) is missing from the
+# Glue registry. Deliberately does NOT check for TenantCreated/TrialStarted —
+# those are O&M's schemas on the shared registry, not this service's to
+# verify. Requires GLUE_REGISTRY_TENANT_NAME and AWS credentials.
+.PHONY: schema-verify
+schema-verify:
+	@test -n "$(GLUE_REGISTRY_TENANT_NAME)" || { \
+	  echo "GLUE_REGISTRY_TENANT_NAME is not set — add it to .env or pass on the command line"; \
+	  exit 1; \
+	}
+	@missing=""; \
+	for name in TrialTenantProvisioned TenantRealmReady TenantConverted DirectPaidSignup TrialExpired TrialReactivated TenantSuspended TenantOffboarded TenantReactivated; do \
+	  if ! aws glue get-schema \
+	      --schema-id "RegistryName=$(GLUE_REGISTRY_TENANT_NAME),SchemaName=$$name" \
+	      --region "$(AWS_REGION)" >/dev/null 2>&1; then \
+	    missing="$$missing $$name"; \
+	  fi; \
+	done; \
+	if [ -n "$$missing" ]; then \
+	  echo "FAIL: missing Glue schemas in registry '$(GLUE_REGISTRY_TENANT_NAME)':$$missing"; \
+	  echo "     run 'make schema-register' to create them"; \
+	  exit 1; \
+	fi; \
+	echo "OK: all 9 iam-realm-provisioner schemas present in registry '$(GLUE_REGISTRY_TENANT_NAME)'"
+
+# schema-prune: dry-run scan for orphaned Glue schemas (exist in Glue, not in
+# this repo). WARNING: the shared iam-tenant-events registry will always
+# list O&M's TenantCreated/TrialStarted as "orphaned" by this definition —
+# they are not; ignore those two names in the output. Pass EXECUTE=true to
+# archive and delete, but see docs/runbook-schema-registry.md first — CI
+# (schema-prune.yml) hard-blocks --execute while either of those two names
+# is present in the registry, since the underlying platform-schemagov CLI
+# has no --exclude flag and prune --execute deletes every candidate it finds.
+# Requires GLUE_REGISTRY_TENANT_NAME and AWS credentials.
+.PHONY: schema-prune
+schema-prune:
+	@test -n "$(GLUE_REGISTRY_TENANT_NAME)" || { \
+	  echo "GLUE_REGISTRY_TENANT_NAME is not set — add it to .env or pass on the command line"; \
+	  exit 1; \
+	}
+	docker run --rm \
+	  -v "$(CURDIR)":/workspace \
+	  -e AWS_ACCESS_KEY_ID \
+	  -e AWS_SECRET_ACCESS_KEY \
+	  -e AWS_SESSION_TOKEN \
+	  -e AWS_REGION="$(AWS_REGION)" \
+	  "$(SCHEMA_GOV_IMAGE)" prune \
+	  --registry   "$(GLUE_REGISTRY_TENANT_NAME)" \
+	  $(if $(filter true,$(EXECUTE)),--execute,)
 
 # -----------------------------
 # CI

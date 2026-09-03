@@ -1,0 +1,67 @@
+graph TD
+    subgraph cmd["Composition Roots  —  cmd/"]
+        main["server/main.go\nwire pool + sysPool (GUCProvider = GUCSetFromContext, RLS-6)\nmigrations · outbox runner · 3 SQS consumers\ngraceful shutdown: SIGTERM → gincommon.Shutdown, terminationGracePeriodSeconds=30"]
+        reconciler["reconciler/main.go\nsingle binary, --job=<name> dispatch\n6 CronJobs: trial-expiry · trial-hard-delete\nsubscription-lapse · realm-config-reconcile\noutbox-prune · processed-events-prune"]
+    end
+
+    subgraph adapters_in["Inbound Adapters  —  internal/adapter/inbound/"]
+        http_h["http/\nInternalHandler · router.go · middleware.go\nRP-1..RP-16 on /api/v1/internal"]
+        consumer["consumer/\nMembershipConsumer ← membership-realm-q\nTenantConsumer     ← tenant-realm-q\nBillingConsumer    ← billing-realm-q"]
+    end
+
+    subgraph adapters_out["Outbound Adapters  —  internal/adapter/outbound/"]
+        postgres["postgres/\n6 repositories · TxRunner\nsingle consolidated 000000_initial_schema"]
+        keycloak["keycloak/\nKeycloakAdmin — RP-INV-1's SOLE seam\nNerzal/gocloak · admin-token cache · rate limiter"]
+        openbao["openbao/\nKV v2 + Kubernetes-auth client\nIdP secrets at frozen path — never Postgres"]
+        orgmembership["orgmembership/\nHTTPClient — I-8 residual-MFA check + I-16 subscription-lapse poll"]
+        s3["s3/\nObjectStore — realm export (RP-EVT-4)"]
+        eventbus["eventbus/\nValidatingCodec (enqueue) · GlueCodec (SNS)\nOutbox Runner · single topic iam.tenant.events"]
+        metrics["metrics/\niam_realm_provisioner_* business instruments"]
+    end
+
+    subgraph eventschema_grp["Embedded Schemas  —  internal/eventschema/"]
+        eventschema["*.json\nJSON Schema Draft-07 for the 9 published events\nasyncapi_drift_test.go vs api/asyncapi.yaml"]
+    end
+
+    subgraph core["Core  —  internal/core/"]
+        service["service/\nProvisioningService · LifecycleService\nIdpService · RealmConfigService · MfaService"]
+        port["port/\nKeycloakAdmin · TenantRealmRepository · IdpConfigRepository\nIdpValidationRepository · ReconciliationRepository\nIdempotencyStore · ProcessedEventsStore · EventPublisher · TxRunner\nOpenBaoClient · OrgMembershipClient · ObjectStore\nSubscriptionLapseReader (RP-C3)"]
+        domain["domain/\nTenantRealm · IdpConfig · IdpConfigValidation\nProvisioningOperation · RealmConfigReconciliation\nErrorCode catalogue · 9 event payload types"]
+    end
+
+    subgraph pkg["Shared Packages  —  pkg/"]
+        requestctx["requestctx/\nRequestContext{UserID, TenantID, Roles}\nWithContext · FromContext"]
+    end
+
+    main        --> http_h
+    main        --> consumer
+    main        --> postgres
+    main        --> keycloak
+    main        --> openbao
+    main        --> orgmembership
+    main        --> s3
+    main        --> eventbus
+    main        --> metrics
+    reconciler  --> postgres
+    reconciler  --> keycloak
+    reconciler  --> s3
+    reconciler  --> eventbus
+    reconciler  --> metrics
+    http_h      --> service
+    http_h      --> port
+    http_h      --> requestctx
+    http_h      --> metrics
+    consumer    --> service
+    consumer    --> port
+    service     --> port
+    service     --> domain
+    service     --> requestctx
+    service     --> metrics
+    postgres    --> port
+    keycloak    --> port
+    openbao     --> port
+    orgmembership --> port
+    s3          --> port
+    eventbus    --> port
+    eventbus    --> eventschema
+    port        --> domain

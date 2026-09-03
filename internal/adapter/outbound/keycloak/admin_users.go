@@ -8,6 +8,7 @@ import (
 	"github.com/Nerzal/gocloak/v13"
 	"github.com/google/uuid"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 )
 
@@ -47,7 +48,10 @@ func splitName(full string) (first, last string) {
 }
 
 // CreateTrialUser creates a user in the shared trial realm (RP-1, RP-INV-2).
-func (a *Admin) CreateTrialUser(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) {
+func (a *Admin) CreateTrialUser(ctx context.Context, req port.CreateUserRequest) (userID uuid.UUID, err error) {
+	ctx, done := a.begin(ctx, "create_trial_user")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return uuid.Nil, wrapErr("create_trial_user: token", err)
@@ -67,7 +71,10 @@ func (a *Admin) CreateTrialUser(ctx context.Context, req port.CreateUserRequest)
 
 // CreateInvitedUser creates a user in realmName with requiredActions
 // applied verbatim (RP-5, F5).
-func (a *Admin) CreateInvitedUser(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
+func (a *Admin) CreateInvitedUser(ctx context.Context, realmName string, req port.CreateUserRequest) (userID uuid.UUID, err error) {
+	ctx, done := a.begin(ctx, "create_invited_user")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return uuid.Nil, wrapErr("create_invited_user: token", err)
@@ -82,7 +89,10 @@ func (a *Admin) CreateInvitedUser(ctx context.Context, realmName string, req por
 // MigrateUser recreates a trial user in the dedicated realm, preserving
 // sub, copying TOTP, and flagging WEBAUTHN_REGISTER when the source held a
 // WebAuthn credential (WebAuthn cannot migrate across realms, §8.3).
-func (a *Admin) MigrateUser(ctx context.Context, sourceRealm, targetRealm string, keycloakUserID uuid.UUID) (bool, error) {
+func (a *Admin) MigrateUser(ctx context.Context, sourceRealm, targetRealm string, keycloakUserID uuid.UUID) (webauthnReenrollRequired bool, err error) {
+	ctx, done := a.begin(ctx, "migrate_user")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return false, wrapErr("migrate_user: token", err)
@@ -144,7 +154,20 @@ func (a *Admin) MigrateUser(ctx context.Context, sourceRealm, targetRealm string
 	// documents as import/restore tooling and DOES accept an explicit id.
 	// gocloak v13 has no wrapper for it, so this uses its resty escape
 	// hatch directly.
-	if err := a.client.DeleteUser(ctx, tok, sourceRealm, keycloakUserID.String()); err != nil {
+	//
+	// isNotFound-tolerant like every sibling delete in this file
+	// (DeleteUser, HardDeleteUsersInRealm, RevokeUserSessions,
+	// ForceLogoutRealm) — required here specifically because
+	// retryTransport can transparently retry this exact DELETE: if the
+	// first attempt actually succeeded at Keycloak but its response was
+	// lost (timeout/5xx), the retry lands on an already-deleted user and
+	// gets a 404. Treating that as fatal would abort MigrateUser after
+	// the source user is already gone and never created in the target —
+	// silent, permanent data loss. A genuine 404 (the user never existed)
+	// is equally safe to tolerate: it only means the user is already
+	// absent from the source, which is exactly the state this delete is
+	// trying to reach before creating them in the target.
+	if err := a.client.DeleteUser(ctx, tok, sourceRealm, keycloakUserID.String()); err != nil && !isNotFound(err) {
 		return false, wrapErr("migrate_user: delete_source", err)
 	}
 	if err := a.partialImportUser(ctx, tok, targetRealm, target); err != nil {
@@ -200,13 +223,28 @@ func (a *Admin) usersByTenantAttribute(ctx context.Context, tok, realmName strin
 
 // ListUsersByTenant returns the Keycloak user IDs carrying tenant_id
 // (§8.3 — enumerates trial users to migrate at conversion).
-func (a *Admin) ListUsersByTenant(ctx context.Context, realmName string, tenantID uuid.UUID) ([]uuid.UUID, error) {
+func (a *Admin) ListUsersByTenant(ctx context.Context, realmName string, tenantID uuid.UUID) (userIDs []uuid.UUID, err error) {
+	ctx, done := a.begin(ctx, "list_users_by_tenant")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return nil, wrapErr("list_users_by_tenant: token", err)
 	}
 	users, err := a.usersByTenantAttribute(ctx, tok, realmName, tenantID)
 	if err != nil {
+		// A 404 on this endpoint specifically means the realm itself is
+		// absent — a realm that exists but matches zero users returns 200
+		// with an empty list, never a 404 — so this is a reliable signal,
+		// not ambiguous with "no matching users". Surfaced as a
+		// distinguishable domain code (rather than the generic
+		// ErrKeycloakUnavailable every other wrapErr call produces here)
+		// so a caller like RevertConversion can tell "the realm is
+		// genuinely gone — I must be resuming a retry whose earlier
+		// attempt already deleted it" apart from a real outage.
+		if isNotFound(err) {
+			return nil, domain.NewError(domain.ErrTenantRealmNotFound, "keycloak realm not found").WithDetails(map[string]any{"realm": realmName})
+		}
 		return nil, wrapErr("list_users_by_tenant", err)
 	}
 	ids := make([]uuid.UUID, 0, len(users))
@@ -226,7 +264,10 @@ func (a *Admin) ListUsersByTenant(ctx context.Context, realmName string, tenantI
 // DisableUsersInRealm disables every user tagged with tenantID's
 // tenant_id attribute in realmName (used for a trial tenant's suspend,
 // since the shared realm itself is never disabled).
-func (a *Admin) DisableUsersInRealm(ctx context.Context, realmName string, tenantID uuid.UUID) error {
+func (a *Admin) DisableUsersInRealm(ctx context.Context, realmName string, tenantID uuid.UUID) (err error) {
+	ctx, done := a.begin(ctx, "disable_users")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return wrapErr("disable_users: token", err)
@@ -246,7 +287,10 @@ func (a *Admin) DisableUsersInRealm(ctx context.Context, realmName string, tenan
 
 // EnableUsersInRealm re-enables every user tagged with tenantID's
 // tenant_id attribute in realmName.
-func (a *Admin) EnableUsersInRealm(ctx context.Context, realmName string, tenantID uuid.UUID) error {
+func (a *Admin) EnableUsersInRealm(ctx context.Context, realmName string, tenantID uuid.UUID) (err error) {
+	ctx, done := a.begin(ctx, "enable_users")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return wrapErr("enable_users: token", err)
@@ -266,7 +310,10 @@ func (a *Admin) EnableUsersInRealm(ctx context.Context, realmName string, tenant
 
 // HardDeleteUsersInRealm hard-deletes every user carrying tenant_id
 // (RP-C2 PII scrub, §15.2).
-func (a *Admin) HardDeleteUsersInRealm(ctx context.Context, realmName string, tenantID uuid.UUID) error {
+func (a *Admin) HardDeleteUsersInRealm(ctx context.Context, realmName string, tenantID uuid.UUID) (err error) {
+	ctx, done := a.begin(ctx, "hard_delete_users")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return wrapErr("hard_delete_users: token", err)
@@ -287,7 +334,10 @@ func (a *Admin) HardDeleteUsersInRealm(ctx context.Context, realmName string, te
 }
 
 // DeleteUser is idempotent — deleting an absent user succeeds (RP-15).
-func (a *Admin) DeleteUser(ctx context.Context, realmName string, keycloakUserID uuid.UUID) error {
+func (a *Admin) DeleteUser(ctx context.Context, realmName string, keycloakUserID uuid.UUID) (err error) {
+	ctx, done := a.begin(ctx, "delete_user")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return wrapErr("delete_user: token", err)
@@ -300,7 +350,10 @@ func (a *Admin) DeleteUser(ctx context.Context, realmName string, keycloakUserID
 
 // RevokeUserSessions logs out and invalidates every session/token for
 // keycloakUserID (RP-16). Idempotent — no active sessions is a no-op.
-func (a *Admin) RevokeUserSessions(ctx context.Context, realmName string, keycloakUserID uuid.UUID) error {
+func (a *Admin) RevokeUserSessions(ctx context.Context, realmName string, keycloakUserID uuid.UUID) (err error) {
+	ctx, done := a.begin(ctx, "revoke_sessions")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return wrapErr("revoke_sessions: token", err)
@@ -313,7 +366,10 @@ func (a *Admin) RevokeUserSessions(ctx context.Context, realmName string, keyclo
 
 // ForceLogoutRealm terminates every active session in realmName (§8.3
 // conversion — force-logout shared-realm sessions).
-func (a *Admin) ForceLogoutRealm(ctx context.Context, realmName string) error {
+func (a *Admin) ForceLogoutRealm(ctx context.Context, realmName string) (err error) {
+	ctx, done := a.begin(ctx, "force_logout_realm")
+	defer func() { done(err) }()
+
 	tok, err := a.token(ctx)
 	if err != nil {
 		return wrapErr("force_logout_realm: token", err)

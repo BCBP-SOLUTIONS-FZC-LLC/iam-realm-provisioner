@@ -65,6 +65,15 @@ func TestProvisionTrial_InvalidRequest(t *testing.T) {
 	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
 }
 
+func TestProvisionTrial_UnsafeTenantSlug_Rejected(t *testing.T) {
+	d := newServiceDeps() // keycloak.CreateTrialUserFn left nil — a bypass would panic
+	tenantID := uuid.New()
+	headers := withHeader(sysHeaders(), "Idempotency-Key", "trial-slug-1")
+	body := `{"tenant_id":"` + tenantID.String() + `","tenant_name":"Acme","tenant_slug":"acme/evil","admin_email":"a@example.com","admin_name":"Admin","plan":"starter"}`
+	rec := doRequest(d.engine(), http.MethodPost, provisionTrialPath, headers, body)
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+}
+
 func TestProvisionTrial_KeycloakUnavailable(t *testing.T) {
 	d := newServiceDeps()
 	d.keycloak.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) {
@@ -174,6 +183,15 @@ func TestProvisionDirect_InvalidRequest(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "direct-5")
 	rec := doRequest(d.engine(), http.MethodPost, provisionDirectPath, headers, `{"tenant_id":"not-a-uuid"}`)
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+}
+
+func TestProvisionDirect_UnsafeTenantSlug_Rejected(t *testing.T) {
+	d := newServiceDeps() // keycloak.CreateRealmFromTemplateFn left nil — a bypass would panic
+	tenantID := uuid.New()
+	headers := withHeader(sysHeaders(), "Idempotency-Key", "direct-slug-1")
+	body := `{"tenant_id":"` + tenantID.String() + `","tenant_name":"Acme","tenant_slug":"acme evil","admin_email":"a@example.com","admin_name":"Admin","plan":"pro"}`
+	rec := doRequest(d.engine(), http.MethodPost, provisionDirectPath, headers, body)
 	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
 }
 
@@ -332,10 +350,27 @@ func TestConvert_MigrateUserFails_ConversionFailed(t *testing.T) {
 func TestConvert_OperationInProgress(t *testing.T) {
 	d := newServiceDeps()
 	tenantID := uuid.New()
-	d.idempotency.rows["convert-9"] = &domain.ProvisioningOperation{IdempotencyKey: "convert-9", TenantID: tenantID, Status: domain.OpStatusFailed}
+	d.idempotency.rows["convert-9"] = &domain.ProvisioningOperation{IdempotencyKey: "convert-9", TenantID: tenantID, Status: domain.OpStatusInProgress}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "convert-9")
 	rec := doRequest(d.engine(), http.MethodPost, convertPath(tenantID), headers, `{"plan":"pro"}`)
 	assertStatusAndCode(t, rec, http.StatusConflict, "operation_in_progress")
+}
+
+// TestConvert_FailedIdempotencyKey_IsRetried pins the fix for a real bug: a
+// `failed` row must never permanently 409 every future retry of the same
+// key (idempotency_key is the table's PRIMARY KEY and nothing ever prunes
+// provisioning_operations) — Begin reclaims it and the request proceeds
+// into real business logic instead of short-circuiting to a replay/conflict.
+// The 404 here (no such tenant_realm in the fake repo) is the proof: had the
+// old found=true-for-any-existing-row behavior still been in effect, this
+// would have 409'd before ever reaching the repository lookup.
+func TestConvert_FailedIdempotencyKey_IsRetried(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	d.idempotency.rows["convert-9"] = &domain.ProvisioningOperation{IdempotencyKey: "convert-9", TenantID: tenantID, Status: domain.OpStatusFailed}
+	headers := withHeader(sysHeaders(), "Idempotency-Key", "convert-9")
+	rec := doRequest(d.engine(), http.MethodPost, convertPath(tenantID), headers, `{"plan":"pro"}`)
+	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
 }
 
 func TestConvert_MissingIdempotencyKey(t *testing.T) {

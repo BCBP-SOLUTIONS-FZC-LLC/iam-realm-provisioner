@@ -2,11 +2,13 @@ package keycloak
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
@@ -329,6 +331,40 @@ func TestResetMFA_RequiresMFA_AddsConfigureTotp(t *testing.T) {
 	require.NoError(t, a.ResetMFA(context.Background(), "acme", userID, true))
 	require.Contains(t, string(putUserBody), "CONFIGURE_TOTP")
 	require.Contains(t, string(putUserBody), "VERIFY_EMAIL")
+}
+
+// A repeated ResetMFA for the same user (no idempotency ledger backs
+// RP-9 — fail-closed, no reconciler) must not accumulate duplicate
+// CONFIGURE_TOTP entries in requiredActions.
+func TestResetMFA_RequiresMFA_AlreadyPresent_NotDuplicated(t *testing.T) {
+	userID := uuid.New()
+	var putUserBody []byte
+	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
+		mux.HandleFunc("GET "+realmPath("acme", "users", userID.String(), "credentials"), func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, `[]`)
+		})
+		mux.HandleFunc("GET "+realmPath("acme", "users", userID.String()), func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, `{"id":"`+userID.String()+`","requiredActions":["VERIFY_EMAIL","CONFIGURE_TOTP"]}`)
+		})
+		mux.HandleFunc("PUT "+realmPath("acme", "users", userID.String()), func(w http.ResponseWriter, r *http.Request) {
+			buf, _ := io.ReadAll(r.Body)
+			putUserBody = buf
+			writeJSON(w, http.StatusOK, `{}`)
+		})
+	})
+	require.NoError(t, a.ResetMFA(context.Background(), "acme", userID, true))
+	var body struct {
+		RequiredActions []string `json:"requiredActions"`
+	}
+	require.NoError(t, json.Unmarshal(putUserBody, &body))
+	count := 0
+	for _, a := range body.RequiredActions {
+		if a == "CONFIGURE_TOTP" {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "CONFIGURE_TOTP must appear exactly once, not accumulate across repeated resets")
+	assert.Contains(t, body.RequiredActions, "VERIFY_EMAIL")
 }
 
 func TestResetMFA_RequiresMFA_GetUserError(t *testing.T) {

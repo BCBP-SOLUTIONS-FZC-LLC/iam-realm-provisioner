@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/httpx"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 )
@@ -54,7 +55,7 @@ func New(cfg Config, log port.Logger) *Client {
 		cfg.KubernetesTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	}
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = &http.Client{Timeout: 8 * time.Second}
+		cfg.HTTPClient = httpx.NewClient(8 * time.Second)
 	}
 	return &Client{cfg: cfg, http: cfg.HTTPClient, log: log}
 }

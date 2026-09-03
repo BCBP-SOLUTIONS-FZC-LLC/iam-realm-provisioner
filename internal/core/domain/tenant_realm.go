@@ -19,6 +19,7 @@ type TenantRealm struct {
 	TrialEndsAt          *time.Time
 	ConvertedAt          *time.Time
 	DisabledAt           *time.Time
+	SuspensionSource     *SuspensionSource
 	ExportedAt           *time.Time
 	ExportS3Key          *string
 	RecordVersion        int64

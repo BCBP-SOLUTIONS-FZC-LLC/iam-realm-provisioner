@@ -65,6 +65,13 @@ linters:
       enable-all: true
     misspell:
       locale: US
+      ignore-rules:
+        # O&M's actual subscription_status enum spelling and the frozen §25
+        # TenantSuspended.cancelled_at field name — every occurrence across
+        # this codebase intentionally mirrors that contract term verbatim
+        # rather than "correcting" it to AmE, which would misdocument the
+        # real wire value.
+        - cancelled
     nolintlint:
       require-explanation: true
       require-specific: true
@@ -125,7 +132,7 @@ linters:
         path: cmd/
         text: package-comments
       # "cancelled" (BrE) is O&M's actual subscription_status enum spelling
-      # and the frozen §23 TenantSuspended.cancelled_at field name — these
+      # and the frozen §25 TenantSuspended.cancelled_at field name — these
       # doc comments intentionally mirror that contract term verbatim
       # rather than "correcting" it to AmE, which would misdocument the
       # real wire value.

@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace"
 
+	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 )
 
@@ -57,7 +58,7 @@ func TestPublisher_Enqueue_HappyPath_InsertsIntoOutbox(t *testing.T) {
 		},
 	}
 
-	err := p.Enqueue(context.Background(), tx, event)
+	err := p.Enqueue(pgadapter.WithTx(context.Background(), tx), event)
 	require.NoError(t, err)
 	require.Len(t, tx.execCalls, 1, "exactly one INSERT into outbox_events")
 
@@ -65,6 +66,24 @@ func TestPublisher_Enqueue_HappyPath_InsertsIntoOutbox(t *testing.T) {
 	sql, ok := call[0].(string)
 	require.True(t, ok)
 	assert.Contains(t, sql, "INSERT INTO outbox_events")
+}
+
+func TestPublisher_Enqueue_RequiresOpenTx(t *testing.T) {
+	p := New(domain.Source, NoopCodec{})
+	tenantID := uuid.New()
+	err := p.Enqueue(context.Background(), &domain.Event{
+		Type:     domain.EventTrialTenantProvisioned,
+		TenantID: tenantID,
+		Subject:  tenantID.String(),
+		Actor:    domain.SystemActorID,
+		Data: domain.TrialTenantProvisionedPayload{
+			TenantID:       tenantID,
+			Realm:          "trial",
+			KeycloakUserID: uuid.New(),
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "RunInTx")
 }
 
 // TestPublisher_Enqueue_CodecRejectionNeverTouchesOutbox confirms a
@@ -84,7 +103,7 @@ func TestPublisher_Enqueue_CodecRejectionNeverTouchesOutbox(t *testing.T) {
 		Data:     domain.TrialTenantProvisionedPayload{TenantID: tenantID},
 	}
 
-	err := p.Enqueue(context.Background(), tx, event)
+	err := p.Enqueue(pgadapter.WithTx(context.Background(), tx), event)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, wantErr)
 	assert.Empty(t, tx.execCalls, "a codec-rejected payload must never reach the outbox insert")
@@ -104,7 +123,7 @@ func TestPublisher_Enqueue_ExecFailurePropagates(t *testing.T) {
 		Data:     domain.TrialExpiredPayload{TenantID: tenantID},
 	}
 
-	err := p.Enqueue(context.Background(), tx, event)
+	err := p.Enqueue(pgadapter.WithTx(context.Background(), tx), event)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, execErr)
 }
@@ -134,7 +153,7 @@ func TestPublisher_WithLogger_RoutesExecFailureLogThroughAttachedLogger(t *testi
 		Data:     domain.TrialExpiredPayload{TenantID: tenantID},
 	}
 
-	require.Error(t, p.Enqueue(context.Background(), tx, event))
+	require.Error(t, p.Enqueue(pgadapter.WithTx(context.Background(), tx), event))
 	require.Equal(t, 1, fl.errorCount(), "the attached logger, not the slog default, must receive the enqueue failure")
 }
 
@@ -152,7 +171,7 @@ func TestPublisher_Enqueue_MarshalErrorPropagates(t *testing.T) {
 		Data:     make(chan int),
 	}
 
-	err := p.Enqueue(context.Background(), tx, event)
+	err := p.Enqueue(pgadapter.WithTx(context.Background(), tx), event)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "marshal event payload")
 	assert.Empty(t, tx.execCalls)
@@ -173,7 +192,7 @@ func TestPublisher_Enqueue_IPAddressAndUserAgentPropagateIntoEnvelope(t *testing
 		Data:      domain.TrialExpiredPayload{TenantID: tenantID},
 	}
 
-	require.NoError(t, p.Enqueue(context.Background(), tx, event))
+	require.NoError(t, p.Enqueue(pgadapter.WithTx(context.Background(), tx), event))
 	require.Len(t, tx.execCalls, 1)
 
 	var envelope struct {
@@ -212,7 +231,7 @@ func TestPublisher_Enqueue_ValidSpanContextPropagatesTraceAndCorrelationID(t *te
 		Data:     domain.TrialExpiredPayload{TenantID: tenantID},
 	}
 
-	require.NoError(t, p.Enqueue(ctx, tx, event))
+	require.NoError(t, p.Enqueue(pgadapter.WithTx(ctx, tx), event))
 	require.Len(t, tx.execCalls, 1)
 
 	var envelope struct {
@@ -244,7 +263,7 @@ func TestPublisher_Enqueue_MarshalsDataAsPayloadJSON(t *testing.T) {
 			OIDCClients:   []string{"web", "mobile"},
 		},
 	}
-	require.NoError(t, p.Enqueue(context.Background(), tx, event))
+	require.NoError(t, p.Enqueue(pgadapter.WithTx(context.Background(), tx), event))
 	require.Len(t, tx.execCalls, 1)
 
 	// The payload argument is the 3rd positional arg after sql ($1=id,

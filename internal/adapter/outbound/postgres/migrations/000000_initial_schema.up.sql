@@ -1,6 +1,6 @@
 -- ─────────────────────────────────────────────────────────────────────────
 -- Realm Provisioner — initial schema (LLD §4, §19). All names below are
--- frozen by LLD §23 and must match character-for-character.
+-- frozen by LLD §25 and must match character-for-character.
 --
 -- outbox_events is created by platform-events' outbox.ApplySchema, which
 -- cmd/server/main.go runs BEFORE this migration (§19 ordering invariant) —
@@ -127,6 +127,7 @@ CREATE TABLE public.tenant_realms (
   trial_ends_at          timestamptz,
   converted_at           timestamptz,
   disabled_at            timestamptz,
+  suspension_source      text,
   exported_at            timestamptz,
   export_s3_key          text,
   record_version         bigint NOT NULL DEFAULT 1 CHECK (record_version > 0),
@@ -134,13 +135,30 @@ CREATE TABLE public.tenant_realms (
   updated_at             timestamptz NOT NULL DEFAULT now(),
   deleted_at             timestamptz,
   CONSTRAINT chk_shard_dedicated CHECK (strategy = 'shared' OR keycloak_shard IS NOT NULL),
-  CONSTRAINT chk_shared_is_trial CHECK (strategy = 'dedicated' OR realm_name = 'trial')
+  CONSTRAINT chk_shared_is_trial CHECK (strategy = 'dedicated' OR realm_name = 'trial'),
+  -- suspension_source (§25 frozen values, matching TenantSuspended.source):
+  -- durably records WHICH of the two suspend paths (RP-C3 billing-lapse
+  -- sweep vs. RP-14 operator suspend) disabled this realm, since that
+  -- distinction must survive to the RP-C3 offboard decision (§8.8 excludes
+  -- operator suspensions from auto-offboard) — it is never re-derivable
+  -- from Org & Membership, which does not track it. NULL when not
+  -- currently suspended (RP-10 reactivate clears it); non-NULL only makes
+  -- sense while status = 'suspended', but that invariant is enforced by
+  -- the writers (RP-14 Suspend / RP-C3 suspendLapsedTenant / RP-10
+  -- Reactivate), not a CHECK, to avoid coupling this constraint to every
+  -- future status transition.
+  CONSTRAINT chk_suspension_source CHECK (suspension_source IS NULL OR suspension_source IN ('billing_lapse', 'operator'))
 );
 
 CREATE INDEX idx_tenant_realms_status    ON public.tenant_realms (status)        WHERE deleted_at IS NULL;
 CREATE INDEX idx_tenant_realms_trial_exp ON public.tenant_realms (trial_ends_at) WHERE strategy = 'shared' AND status = 'active';
 CREATE INDEX idx_tenant_realms_strategy  ON public.tenant_realms (strategy)      WHERE deleted_at IS NULL;
 CREATE UNIQUE INDEX uq_tenant_realms_dedicated_name ON public.tenant_realms (realm_name) WHERE strategy = 'dedicated' AND deleted_at IS NULL;
+-- RP-C3's offboard-candidate query (billing-lapse suspensions past
+-- RETENTION_DAYS) — partial index keeps it cheap despite the table also
+-- holding operator-suspended and non-suspended rows.
+CREATE INDEX idx_tenant_realms_lapse_offboard ON public.tenant_realms (disabled_at)
+  WHERE status = 'suspended' AND suspension_source = 'billing_lapse';
 
 CREATE TRIGGER trg_touch_tenant_realms
     BEFORE UPDATE ON public.tenant_realms
@@ -260,6 +278,27 @@ CREATE TABLE public.processed_events (
 CREATE INDEX idx_processed_events_processed_at ON public.processed_events (processed_at);
 
 -- ═════════════════════════════════════════════════════════════════════════
+-- exporter_watermarks — one row per cmd/server metric exporter that scrapes
+-- an append-only table on a high-water-mark basis instead of a fixed
+-- trailing window (currently just rls_violations_total). Persisting the
+-- mark in Postgres, shared by every server replica and surviving pod
+-- restarts, is what makes the exporter correct under both: without it, a
+-- restart mid-window re-counts violations the dying pod already tallied,
+-- and with more than one HPA replica (minReplicas: 2) every replica
+-- independently re-counts the same rows all the time, not just around a
+-- restart. RLSViolationCounts (internal/adapter/outbound/postgres) takes
+-- SELECT ... FOR UPDATE on this table's row, so concurrent replicas
+-- serialize on it — a second replica's tick blocks until the first
+-- commits its advanced mark, then sees an already-drained window.
+-- Operational and RLS-exempt (not a tenant-query surface), like
+-- processed_events above.
+-- ═════════════════════════════════════════════════════════════════════════
+CREATE TABLE public.exporter_watermarks (
+  exporter_name     text        PRIMARY KEY,
+  last_processed_at timestamptz NOT NULL
+);
+
+-- ═════════════════════════════════════════════════════════════════════════
 -- Roles & grants. Three DB roles in play (§4.5, §10.1):
 --   • realm_provisioner_app       — runtime app. Does NOT hold BYPASSRLS.
 --   • realm_provisioner_migrator  — migrations + reconciler. Holds BYPASSRLS.
@@ -357,6 +396,18 @@ END$$;
 -- BEFORE this migration runs; pgx encodes []byte as bytea hex in PgBouncer
 -- SimpleProtocol mode, which is invalid for jsonb — text accepts the raw
 -- bytes as-is, and the outbox runner JSON-unmarshals it back either way.
+--
+-- FOOTGUN if this "runs once, against an empty DB, before any traffic"
+-- invariant is ever violated (§19 — this is the only consolidated
+-- migration this service has ever shipped): a USING-clause ALTER COLUMN
+-- TYPE takes an ACCESS EXCLUSIVE lock and rewrites the entire table. On
+-- the intended path that's instant (the table is empty). Do not reuse this
+-- file as a template for re-running against a populated outbox_events
+-- (e.g. a partial DR restore, or forcing a re-run by deleting a
+-- schema_migrations row) — that would lock out every in-flight outbox
+-- write for as long as the rewrite takes. The four non-CONCURRENTLY
+-- CREATE INDEX statements on tenant_realms below carry the same caveat at
+-- lower severity (a write-blocking SHARE lock, not a full rewrite).
 -- ═════════════════════════════════════════════════════════════════════════
 ALTER TABLE outbox_events ALTER COLUMN payload TYPE text USING payload::text;
 

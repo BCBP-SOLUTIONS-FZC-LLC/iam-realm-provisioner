@@ -15,7 +15,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,10 +23,7 @@ type fakeEventPublisher struct {
 	events []*domain.Event
 }
 
-func (f *fakeEventPublisher) Enqueue(_ context.Context, tx pgx.Tx, event *domain.Event) error {
-	if tx == nil {
-		return errors.New("fakeEventPublisher: Enqueue called without an active tx")
-	}
+func (f *fakeEventPublisher) Enqueue(_ context.Context, event *domain.Event) error {
 	f.events = append(f.events, event)
 	return nil
 }
@@ -54,8 +50,8 @@ func TestTxRunner(t *testing.T) {
 			}
 
 			ctxPub, ok := port.EventPublisherFromContext(txCtx)
-			require.True(t, ok, "RunInTx must inject a ContextEventPublisher when TxRunner was constructed with one")
-			return ctxPub.EnqueueCtx(txCtx, &domain.Event{Type: domain.EventTrialTenantProvisioned, TenantID: tenantID})
+			require.True(t, ok, "RunInTx must inject an EventPublisher when TxRunner was constructed with one")
+			return ctxPub.Enqueue(txCtx, &domain.Event{Type: domain.EventTrialTenantProvisioned, TenantID: tenantID})
 		})
 		require.NoError(t, err)
 

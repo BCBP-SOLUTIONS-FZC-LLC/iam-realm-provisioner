@@ -1,6 +1,6 @@
 # Prometheus Adapter ConfigMap — maps Prometheus metrics to the Custom Metrics API
 # so the HPA can scale on http_requests_per_second (see values.yaml's
-# autoscaling.customMetric, disabled by default — this service's write
+# autoscaling.targetRPSPerReplica, unset/0 by default — this service's write
 # volume is driven by tenant lifecycle events (signup/conversion/trial
 # expiry), not sustained high RPS, so CPU/memory scaling is the default;
 # enable this only if RP-1/RP-4 traffic justifies RPS-based scaling in a

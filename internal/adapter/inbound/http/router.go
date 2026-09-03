@@ -8,6 +8,7 @@ package http
 
 import (
 	"context"
+	"crypto/subtle"
 	"net/http"
 	"time"
 
@@ -104,27 +105,51 @@ func (h *healthHandlers) healthz(c *gin.Context) {
 }
 
 // readyz checks Postgres, the outbox runner, and the Keycloak admin-token
-// bootstrap (§3.1). SysPostgres is optional (skipped when unset).
+// bootstrap (§3.1). SysPostgres is optional (skipped when unset). The checks
+// run concurrently — sequentially, a single slow-but-healthy dependency
+// could consume the whole readinessProbe timeout budget before a later
+// check (e.g. Keycloak) even started, flapping readiness for reasons
+// unrelated to that later dependency's own health.
 func (h *healthHandlers) readyz(c *gin.Context) {
 	ctx := c.Request.Context()
+
+	pingers := []struct {
+		name string
+		p    Pinger
+	}{
+		{"database", h.postgres},
+		{"sys_database", h.sysPostgres},
+		{"outbox", h.outbox},
+		{"keycloak", h.keycloak},
+	}
+
+	type result struct {
+		name string
+		ok   bool
+	}
+	results := make(chan result, len(pingers))
+	pending := 0
+	for _, pc := range pingers {
+		if pc.p == nil {
+			continue
+		}
+		pending++
+		go func(name string, p Pinger) {
+			results <- result{name: name, ok: p.Health(ctx) == nil}
+		}(pc.name, pc.p)
+	}
+
 	healthy := true
 	checks := gin.H{}
-
-	check := func(name string, p Pinger) {
-		if p == nil {
-			return
-		}
-		if err := p.Health(ctx); err != nil {
-			checks[name] = "down"
+	for i := 0; i < pending; i++ {
+		r := <-results
+		if r.ok {
+			checks[r.name] = "ok"
+		} else {
+			checks[r.name] = "down"
 			healthy = false
-			return
 		}
-		checks[name] = "ok"
 	}
-	check("database", h.postgres)
-	check("sys_database", h.sysPostgres)
-	check("outbox", h.outbox)
-	check("keycloak", h.keycloak)
 
 	status := http.StatusOK
 	overall := "ready"
@@ -151,8 +176,14 @@ func registerDocsRoutes(r *gin.Engine, cfg RouterConfig) {
 	var authMiddleware gin.HandlerFunc = func(c *gin.Context) { c.Next() }
 	if cfg.Docs.Environment == "production" && cfg.Docs.AuthToken != "" {
 		token := cfg.Docs.AuthToken
+		expected := []byte("Bearer " + token)
 		authMiddleware = func(c *gin.Context) {
-			if c.GetHeader("Authorization") != "Bearer "+token {
+			// Constant-time compare — a plain != leaks how many leading
+			// bytes of a guessed token are correct via response latency.
+			// ConstantTimeCompare itself returns 0 (no panic) on a length
+			// mismatch, so no separate length check is needed first.
+			got := []byte(c.GetHeader("Authorization"))
+			if subtle.ConstantTimeCompare(got, expected) != 1 {
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 				return
 			}
@@ -189,7 +220,7 @@ func registerInternalRoutes(r *gin.Engine, cfg RouterConfig) {
 	internal.PUT("/tenants/:id/idp", idem, h.ConfigureIdp)                    // RP-6
 	internal.DELETE("/tenants/:id/idp/:alias", h.RemoveIdp)                   // RP-7
 	internal.PATCH("/tenants/:id/realm-config", h.ApplyRealmConfig)           // RP-8
-	// RP-9's frozen §23 path spells the segment ":uid"; Gin requires one
+	// RP-9's frozen §25 path spells the segment ":uid"; Gin requires one
 	// wildcard name per path position across sibling routes sharing this
 	// prefix (RP-15/16 use :keycloak_user_id here) — the capture name is
 	// an internal routing detail, not part of the wire contract (callers

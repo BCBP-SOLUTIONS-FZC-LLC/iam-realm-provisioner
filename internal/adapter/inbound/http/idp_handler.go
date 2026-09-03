@@ -41,7 +41,7 @@ func (h *InternalHandler) ConfigureIdp(c *gin.Context) {
 		HandleError(c, domain.NewError(domain.ErrInvalidIdpProtocol, "protocol must be saml or oidc"))
 		return
 	}
-	result, err := h.Idp.ConfigureIdp(c.Request.Context(), tenantID, service.ConfigureIdpRequest{
+	result, err := h.Idp.ConfigureIdp(c.Request.Context(), idempotencyKey(c), tenantID, service.ConfigureIdpRequest{
 		IdpAlias: req.IdpAlias, Protocol: protocol, DisplayName: req.DisplayName,
 		Config: req.Config, Secret: req.Secret, Acknowledgements: req.Acknowledgements,
 	})

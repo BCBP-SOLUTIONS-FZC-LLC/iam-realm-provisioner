@@ -9,7 +9,9 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/puddle/v2"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func clearPgEnv(t *testing.T) {
@@ -17,6 +19,7 @@ func clearPgEnv(t *testing.T) {
 	for _, k := range []string{
 		"DATABASE_URL", "PG_HOST", "PG_PORT", "PG_USER", "PG_PASSWORD", "PG_DBNAME", "PG_SSLMODE",
 		"PG_STATEMENT_TIMEOUT", "SYSTEM_DATABASE_URL", "MIGRATION_DATABASE_URL",
+		"PG_BOUNCER_MODE", "PG_MAX_CONNS", "PG_SLOW_QUERY_THRESHOLD",
 	} {
 		t.Setenv(k, "")
 	}
@@ -107,11 +110,47 @@ func TestMigrationDSNFromEnv_PrefersMigrationDatabaseURL(t *testing.T) {
 	assert.Equal(t, "postgres://migrator@host/db", MigrationDSNFromEnv())
 }
 
+func TestMigrationDSNFromEnv_AppliesStatementTimeout(t *testing.T) {
+	clearPgEnv(t)
+	t.Setenv("MIGRATION_DATABASE_URL", "postgres://m:x@migrations.example:5432/db?sslmode=disable")
+	t.Setenv("PG_STATEMENT_TIMEOUT", "5s")
+	assert.Contains(t, MigrationDSNFromEnv(), "statement_timeout%3D5000")
+}
+
 func TestMigrationDSNFromEnv_FallsBackToDSNFromEnv(t *testing.T) {
 	clearPgEnv(t)
 	t.Setenv("DATABASE_URL", "postgres://app@host/db")
 
 	assert.Equal(t, "postgres://app@host/db", MigrationDSNFromEnv())
+}
+
+func TestApplyStatementTimeout_Idempotent(t *testing.T) {
+	clearPgEnv(t)
+	t.Setenv("PG_STATEMENT_TIMEOUT", "5s")
+	once := ApplyStatementTimeout("postgres://u@h/db?sslmode=disable")
+	assert.Equal(t, once, ApplyStatementTimeout(once))
+}
+
+func TestSystemPoolConfig_ForcesPGBouncerMode(t *testing.T) {
+	clearPgEnv(t)
+	t.Setenv("PG_BOUNCER_MODE", "false")
+	t.Setenv("PG_MAX_CONNS", "20")
+	t.Setenv("PG_SLOW_QUERY_THRESHOLD", "200ms")
+
+	cfg := SystemPoolConfig("postgres://sys@host/db", nil)
+	assert.Equal(t, "postgres://sys@host/db", cfg.DSN)
+	assert.True(t, cfg.PGBouncerMode, "sysPool must force PGBouncerMode:true — zero-value false breaks PgBouncer txn pooling")
+	assert.Nil(t, cfg.GUCProvider, "sysPool must not inject tenant GUCs")
+	assert.Nil(t, cfg.Tracer, "Tracer is wired by the call site, not SystemPoolConfig")
+	assert.Nil(t, cfg.Logger, "nil log must leave Logger unset")
+	assert.Equal(t, int32(20), cfg.MaxConns, "sysPool inherits pool sizing from ConfigFromEnv")
+}
+
+func TestSystemPoolConfig_AppliesStatementTimeout(t *testing.T) {
+	clearPgEnv(t)
+	t.Setenv("PG_STATEMENT_TIMEOUT", "5s")
+	cfg := SystemPoolConfig("postgres://sys@host/db?sslmode=disable", nil)
+	assert.Contains(t, cfg.DSN, "statement_timeout%3D5000")
 }
 
 // wrapConnErr is a pure function of its input error, so every branch can be
@@ -137,7 +176,19 @@ func TestWrapConnErr_PgConnErrorPassesThroughUnchanged(t *testing.T) {
 
 	got := wrapConnErr(pgErr)
 
-	assert.Same(t, pgErr, got, "a *pgconn.PgError must be returned completely unwrapped so callers can inspect .Code/.ConstraintName")
+	assert.Same(t, pgErr, got, "a non-availability *pgconn.PgError must pass through so callers can inspect .Code/.ConstraintName")
+}
+
+func TestWrapConnErr_AvailabilitySQLStateMapsToDBUnavailable(t *testing.T) {
+	for _, code := range []string{"08006", "53300", "57P01", "58030"} {
+		t.Run(code, func(t *testing.T) {
+			pgErr := &pgconn.PgError{Code: code}
+			got := wrapConnErr(pgErr)
+			var de *domain.Error
+			assert.True(t, errors.As(got, &de))
+			assert.Equal(t, domain.ErrDBUnavailable, de.Code)
+		})
+	}
 }
 
 func TestWrapConnErr_ErrNoRowsPassesThroughUnchanged(t *testing.T) {
@@ -161,15 +212,34 @@ func TestWrapConnErr_DeadlineExceededPassesThroughUnchanged(t *testing.T) {
 	assert.True(t, errors.Is(got, context.DeadlineExceeded))
 }
 
-func TestWrapConnErr_GenericErrorIsWrappedAsDatabaseUnavailable(t *testing.T) {
-	boom := errors.New("connection refused")
+// CRITICAL: an unrecognized plain Go error — the shape a caller's own
+// RunInTx/withPool callback returns for its own business reasons — must
+// pass through completely unchanged, not get silently reclassified as
+// ErrDBUnavailable. wrapConnErr has no way to distinguish "the pool itself
+// failed" from "fn's own business logic failed" for anything it can't
+// positively identify as a connectivity/resource failure, so defaulting an
+// unrecognized error to ErrDBUnavailable would discard the caller's real
+// error under a misleading 503 — exactly the bug this test guards against.
+func TestWrapConnErr_UnrecognizedGenericErrorPassesThroughUnchanged(t *testing.T) {
+	businessErr := errors.New("boom: simulated business-rule failure")
 
-	got := wrapConnErr(boom)
+	got := wrapConnErr(businessErr)
 
-	assert.Error(t, got)
-	assert.NotSame(t, boom, got)
-	assert.Contains(t, got.Error(), "postgres: database unavailable")
-	assert.True(t, errors.Is(got, boom), "the original error must remain unwrappable via errors.Is")
+	assert.Same(t, businessErr, got)
+	assert.True(t, errors.Is(got, businessErr))
+}
+
+// puddle.ErrClosedPool (surfaced by pgxpool.Pool.BeginTx/Acquire on a
+// closed pool) is the one non-PgError shape wrapConnErr does positively
+// recognize as a genuine connectivity failure — a closed pool is never a
+// SQL-protocol response, but is unambiguously "the database is
+// unavailable", not a caller's business error.
+func TestWrapConnErr_ClosedPoolMapsToDBUnavailable(t *testing.T) {
+	got := wrapConnErr(puddle.ErrClosedPool)
+
+	var de *domain.Error
+	require.True(t, errors.As(got, &de))
+	assert.Equal(t, domain.ErrDBUnavailable, de.Code)
 }
 
 // withPool's "join an already-active transaction" branch (TxFromContext

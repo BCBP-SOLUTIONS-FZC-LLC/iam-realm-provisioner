@@ -11,6 +11,7 @@ REVOKE ALL ON public.keycloak_idp_configs FROM realm_provisioner_app;
 REVOKE ALL ON public.tenant_realms FROM realm_provisioner_app;
 
 DROP TABLE IF EXISTS public.processed_events;
+DROP TABLE IF EXISTS public.exporter_watermarks;
 
 DROP TABLE IF EXISTS public.provisioning_operations;
 DROP TABLE IF EXISTS public.realm_config_reconciliations;
