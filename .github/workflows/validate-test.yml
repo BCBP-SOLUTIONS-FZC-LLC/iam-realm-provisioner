@@ -106,7 +106,7 @@ jobs:
       # only from cmd/server and cmd/reconciler. Also enforces RP-INV-1
       # (single Keycloak writer) and RLS-6 (no session-scoped tenant GUC).
       - name: Cache go-arch-lint binary
-        uses: actions/cache@v6.0.0
+        uses: actions/cache@v6.1.0
         with:
           path: ~/go/bin
           key: go-arch-lint-${{ runner.os }}-v1.15.0

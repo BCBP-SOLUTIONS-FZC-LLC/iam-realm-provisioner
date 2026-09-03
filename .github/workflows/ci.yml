@@ -120,7 +120,7 @@ jobs:
             go_private_token=${{ secrets.GO_PRIVATE_TOKEN }}
 
       - name: Cache Trivy DB
-        uses: actions/cache@v6.0.0
+        uses: actions/cache@v6.1.0
         with:
           path: /tmp/trivy-cache
           key: trivy-db-${{ runner.os }}
