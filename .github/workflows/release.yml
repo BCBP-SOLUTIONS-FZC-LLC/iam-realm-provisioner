@@ -144,7 +144,7 @@ jobs:
         run: bash .github/scripts/set-source-date-epoch.sh
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4.4.0
+        uses: docker/login-action@v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
