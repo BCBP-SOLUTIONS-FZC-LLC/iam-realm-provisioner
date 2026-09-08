@@ -38,7 +38,7 @@ var mfaRequiringLevels = map[string]bool{"reviewer": true, "approver": true}
 type membershipProjection struct {
 	Roles       []string `json:"roles"`
 	Departments []struct {
-		Level string `json:"level"`
+		Level string `json:"role_level"`
 	} `json:"departments"`
 }
 

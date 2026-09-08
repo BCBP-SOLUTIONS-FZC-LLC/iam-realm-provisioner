@@ -70,7 +70,7 @@ func TestHasResidualMFARequirement_TrueOnMFARequiringDepartmentLevel(t *testing.
 		t.Run(level, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
-				_, _ = fmt.Fprintf(w, `{"roles":[],"departments":[{"level":"%s"}]}`, level)
+				_, _ = fmt.Fprintf(w, `{"roles":[],"departments":[{"role_level":"%s"}]}`, level)
 			}))
 			defer srv.Close()
 
@@ -85,7 +85,7 @@ func TestHasResidualMFARequirement_TrueOnMFARequiringDepartmentLevel(t *testing.
 func TestHasResidualMFARequirement_FalseWhenNoMFARequiringGrant(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"roles":["member"],"departments":[{"level":"contributor"}]}`))
+		_, _ = w.Write([]byte(`{"roles":["member"],"departments":[{"role_level":"contributor"}]}`))
 	}))
 	defer srv.Close()
 
@@ -93,6 +93,26 @@ func TestHasResidualMFARequirement_FalseWhenNoMFARequiringGrant(t *testing.T) {
 	got, err := c.HasResidualMFARequirement(context.Background(), uuid.New(), uuid.New())
 	require.NoError(t, err)
 	assert.False(t, got)
+}
+
+// TestHasResidualMFARequirement_WrongDepartmentFieldNameNeverMatches guards
+// against regressing to the pre-fix field-name mismatch: O&M's I-8 response
+// serializes DeptMembershipView.RoleLevel as `role_level`
+// (iam-org-membership's domain/membership.go), not `level`. A payload using
+// the old, wrong key must decode to an empty Level and therefore never
+// report a residual MFA requirement — proving the struct tag really reads
+// `role_level`, not silently tolerating either name.
+func TestHasResidualMFARequirement_WrongDepartmentFieldNameNeverMatches(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"roles":[],"departments":[{"level":"approver"}]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, noopLogger{})
+	got, err := c.HasResidualMFARequirement(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err)
+	assert.False(t, got, "a department entry keyed \"level\" (not O&M's actual \"role_level\") must not be read as a residual MFA requirement")
 }
 
 func TestHasResidualMFARequirement_404MeansNoActiveMembership(t *testing.T) {
