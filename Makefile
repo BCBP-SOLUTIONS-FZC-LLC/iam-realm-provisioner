@@ -413,6 +413,8 @@ schema-register:
 	  echo "GLUE_REGISTRY_TENANT_NAME is not set — add it to .env or pass on the command line"; \
 	  exit 1; \
 	}
+	@rm -rf .tmp/glue-schemas
+	@bash .github/scripts/stage-produced-event-schemas.sh .tmp/glue-schemas
 	docker run --rm \
 	  -v "$(CURDIR)":/workspace \
 	  -e AWS_ACCESS_KEY_ID \
@@ -422,7 +424,7 @@ schema-register:
 	  -e AWS_ENDPOINT_URL="$(AWS_ENDPOINT_URL)" \
 	  "$(SCHEMA_GOV_IMAGE)" register \
 	  --registry   "$(GLUE_REGISTRY_TENANT_NAME)" \
-	  --schema-dir internal/eventschema
+	  --schema-dir .tmp/glue-schemas
 
 # schema-verify: fail if any of this service's 9 frozen PascalCase schema
 # names (internal/eventschema.ByEventType, LLD §7.3.1) is missing from the

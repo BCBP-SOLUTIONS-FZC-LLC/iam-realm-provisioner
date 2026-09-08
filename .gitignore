@@ -31,6 +31,9 @@ go.work.sum
 bin/
 .coverage/
 
+# schema-registry.yml's staged Glue schemas (make schema-register/schema-diff)
+.tmp/
+
 # Editor/IDE
 # .idea/
 # .vscode/

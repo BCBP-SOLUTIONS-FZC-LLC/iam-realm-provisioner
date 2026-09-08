@@ -29,17 +29,22 @@
 #   6. Enforce usage→lifecycle — Rule 1: NEVER_SEEN+active→deprecated; Rule 2: NEVER_SEEN+deprecated→retired
 #      (dormant while PROMETHEUS_URL is unset — see .env-example; this service's 9 events
 #      are frozen at LLD v1.0 and pre-production, and must never be auto-deprecated)
-#   7. Diff vs. registry       — fail on breaking changes before any upload
-#   8. Register schemas        — idempotent create/update (registry ensured inside this step);
-#                                only ever submits the 9 files under internal/eventschema/
-#   9. Update schema changelog — prepend dated entry; commit + push
-#  10. Emit metrics            — CloudWatch + Prometheus + logs (always runs)
+#   7. Stage produced schemas  — copy the 9 internal/eventschema/*.json files into .tmp/glue-schemas,
+#                                renamed to their PascalCase Glue name (schema-gov diff/register need
+#                                that name, not the snake_case filename — matches iam-org-membership's
+#                                identically-named script)
+#   8. Diff vs. registry       — fail on breaking changes before any upload
+#   9. Register schemas        — idempotent create/update (registry ensured inside this step);
+#                                only ever submits the 9 staged schemas
+#  10. Update schema changelog — prepend dated entry; commit + push
+#  11. Emit metrics            — CloudWatch + Prometheus + logs (always runs)
 #
 # Step order — pr-check job (read-only):
 #   1. Validate schemas
 #   2. Configure credentials   — read-only access to staging registry
-#   3. Diff vs. staging registry
-#   4. Emit metrics
+#   3. Stage produced schemas  — see step 7 above
+#   4. Diff vs. staging registry
+#   5. Emit metrics
 #
 # Required GitHub environment secrets (per environment: staging / production):
 #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
@@ -219,11 +224,21 @@ jobs:
             --usage-file /tmp/schema-usage-metrics.json \
             --asyncapi   api/asyncapi.yaml
 
+      # Stages this service's 9 produced schemas under their PascalCase Glue
+      # name (internal/eventschema/*.json is snake_case) — schema-gov diff/
+      # register need the name every other reference to these events uses
+      # (eventschema.ByEventType, LLD §25, api/asyncapi.yaml), matching
+      # iam-org-membership's identically-named script/step.
+      - name: Stage produced Glue schemas
+        run: |
+          rm -rf .tmp/glue-schemas
+          bash .github/scripts/stage-produced-event-schemas.sh .tmp/glue-schemas
+
       # Fetches current Glue definition per-schema (aws CLI) then diffs via the
       # container. Runs MAX_PARALLEL diffs concurrently; output is buffered and
       # printed in deterministic order. Fails on any breaking change. Only
-      # diffs the 9 files under internal/eventschema/ — O&M's two schemas are
-      # never in this loop because it iterates the local file list, not Glue's.
+      # diffs the 9 staged files — O&M's two schemas are never in this loop
+      # because it iterates the local file list, not Glue's.
       - name: Diff schemas against registry
         env:
           REGISTRY_NAME: ${{ vars.GLUE_REGISTRY_TENANT_NAME }}
@@ -264,7 +279,7 @@ jobs:
                 -e GITHUB_ACTIONS \
                 "${{ env.SCHEMA_GOV_IMAGE }}" diff \
                 --current    "/diff/${SCHEMA_NAME}.current.json" \
-                --proposed   "internal/eventschema/${SCHEMA_NAME}.json" \
+                --proposed   ".tmp/glue-schemas/${SCHEMA_NAME}.json" \
                 --schema-name "${SCHEMA_NAME}" \
               && echo "ok" > "$STATUS" || echo "breaking" > "$STATUS"
             ) > "$OUT" 2>&1
@@ -272,7 +287,7 @@ jobs:
 
           MAX_PARALLEL="${MAX_PARALLEL:-5}"
           PIDS=(); NAMES=(); _active=0
-          for FILE in internal/eventschema/*.json; do
+          for FILE in .tmp/glue-schemas/*.json; do
             [ -f "$FILE" ] || continue
             SCHEMA_NAME=$(basename "$FILE" .json)
             NAMES+=("$SCHEMA_NAME")
@@ -302,7 +317,7 @@ jobs:
           fi
 
       # Registry creation is handled inside the register command (GlueAdapter.ensure_registry).
-      # Only registers the 9 files under internal/eventschema/ — never O&M's
+      # Only registers the 9 staged schemas — never O&M's
       # TenantCreated/TrialStarted, which this service has no file for.
       - name: Register schemas
         env:
@@ -321,7 +336,7 @@ jobs:
             -e GITHUB_ACTIONS \
             "${{ env.SCHEMA_GOV_IMAGE }}" register \
             --registry    "${{ vars.GLUE_REGISTRY_TENANT_NAME }}" \
-            --schema-dir  internal/eventschema \
+            --schema-dir  .tmp/glue-schemas \
             --output      /tmp/schema-versions.json \
             $FORCE_FLAG
 
@@ -487,6 +502,11 @@ jobs:
             --usage-file /tmp/schema-usage-metrics.json \
             --asyncapi   api/asyncapi.yaml
 
+      - name: Stage produced Glue schemas
+        run: |
+          rm -rf .tmp/glue-schemas
+          bash .github/scripts/stage-produced-event-schemas.sh .tmp/glue-schemas
+
       - name: Diff schemas against registry
         env:
           REGISTRY_NAME: ${{ vars.GLUE_REGISTRY_TENANT_NAME }}
@@ -527,7 +547,7 @@ jobs:
                 -e GITHUB_ACTIONS \
                 "${{ env.SCHEMA_GOV_IMAGE }}" diff \
                 --current    "/diff/${SCHEMA_NAME}.current.json" \
-                --proposed   "internal/eventschema/${SCHEMA_NAME}.json" \
+                --proposed   ".tmp/glue-schemas/${SCHEMA_NAME}.json" \
                 --schema-name "${SCHEMA_NAME}" \
               && echo "ok" > "$STATUS" || echo "breaking" > "$STATUS"
             ) > "$OUT" 2>&1
@@ -535,7 +555,7 @@ jobs:
 
           MAX_PARALLEL="${MAX_PARALLEL:-5}"
           PIDS=(); NAMES=(); _active=0
-          for FILE in internal/eventschema/*.json; do
+          for FILE in .tmp/glue-schemas/*.json; do
             [ -f "$FILE" ] || continue
             SCHEMA_NAME=$(basename "$FILE" .json)
             NAMES+=("$SCHEMA_NAME")
@@ -581,7 +601,7 @@ jobs:
             -e GITHUB_ACTIONS \
             "${{ env.SCHEMA_GOV_IMAGE }}" register \
             --registry    "${{ vars.GLUE_REGISTRY_TENANT_NAME }}" \
-            --schema-dir  internal/eventschema \
+            --schema-dir  .tmp/glue-schemas \
             --output      /tmp/schema-versions.json \
             $FORCE_FLAG
 
@@ -703,6 +723,11 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION }}
 
+      - name: Stage produced Glue schemas
+        run: |
+          rm -rf .tmp/glue-schemas
+          bash .github/scripts/stage-produced-event-schemas.sh .tmp/glue-schemas
+
       - name: Diff schemas against staging registry
         if: steps.aws_check.outputs.configured == 'true'
         env:
@@ -744,7 +769,7 @@ jobs:
                 -e GITHUB_ACTIONS \
                 "${{ env.SCHEMA_GOV_IMAGE }}" diff \
                 --current    "/diff/${SCHEMA_NAME}.current.json" \
-                --proposed   "internal/eventschema/${SCHEMA_NAME}.json" \
+                --proposed   ".tmp/glue-schemas/${SCHEMA_NAME}.json" \
                 --schema-name "${SCHEMA_NAME}" \
               && echo "ok" > "$STATUS" || echo "breaking" > "$STATUS"
             ) > "$OUT" 2>&1
@@ -752,7 +777,7 @@ jobs:
 
           MAX_PARALLEL="${MAX_PARALLEL:-5}"
           PIDS=(); NAMES=(); _active=0
-          for FILE in internal/eventschema/*.json; do
+          for FILE in .tmp/glue-schemas/*.json; do
             [ -f "$FILE" ] || continue
             SCHEMA_NAME=$(basename "$FILE" .json)
             NAMES+=("$SCHEMA_NAME")
