@@ -96,7 +96,7 @@ Unlike a collect-all-errors service, this service is **fail-fast, single-error**
 
 `internal/adapter/inbound/http/errors.go`'s `HandleError` does the mapping; anything not a `*domain.Error` falls back to `500 internal_error` and is logged so no error path is silent.
 
-### Field rules
+### Notable validation rules
 
 | Field | Rule (as implemented) | Error / code |
 |---|---|---|
@@ -553,7 +553,7 @@ docker compose exec postgres psql -U postgres -d provisioner -c \
 - **`internal/eventschema/asyncapi_drift_test.go`** — asserts `api/asyncapi.yaml`'s `iamTenantEvents` channel message list and `eventschema.ByEventType`'s map keys name exactly the same 9 events. This repo's CI-enforceable substitute for a live AWS Glue Schema Registry comparison.
 - **RP-INV-1 / RLS-6 greps** — `.github/scripts/arch-lint.sh`: no `Nerzal/gocloak` import outside `internal/adapter/outbound/keycloak/`; no non-`SET LOCAL` write to `app.tenant_id`.
 
-### Coverage targets
+### Coverage
 
 `.github/scripts/coverage-gate.sh` reads `go tool cover -func=coverage.out`'s total and fails if it's below `${COVERAGE_THRESHOLD:-90}` — its own default and stated ratchet target is **90%**. The currently checked-in `validate-test.yml` explicitly pins `COVERAGE_THRESHOLD: '80'` for the reusable workflow, so **80% is the threshold actually enforced by CI today**; the gate script's comment documents the intent to ratchet to 90% once every package is as thoroughly covered as the two below. Measured coverage: core service `internal/core/service/...` and HTTP handlers `internal/adapter/inbound/http/...` both at **~100%**, the Keycloak adapter at **~99.6%**, `cmd/reconciler/jobs` (once 0%) now at **~90.9%**, merged total coverage **~84.8%** — comfortably above the enforced floor, with real headroom still open before the 90% aspiration.
 
