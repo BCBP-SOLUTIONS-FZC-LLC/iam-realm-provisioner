@@ -35,6 +35,15 @@ info:
     envelope JSON as `dataschema`. In dev/test (NoopCodec) there is no Glue
     header and `dataschema` is absent.
 
+  license:
+    name: Proprietary
+
+defaultContentType: application/json
+
+tags:
+  - $ref: '#/components/tags/published'
+  - $ref: '#/components/tags/consumed'
+
 servers:
   snsTenantEvents:
     host: "sns.ap-south-1.amazonaws.com"
@@ -43,6 +52,8 @@ servers:
       The `iam-tenant-events` SNS topic (shared with Org & Membership,
       two-producer topic per HLD §9.1.1). This service publishes 9 of the
       11 schemas registered in the `iam-tenant-events` Glue registry.
+    security:
+      - $ref: '#/components/securitySchemes/iamRole'
 
   sqsMembershipRealm:
     host: "sqs.ap-south-1.amazonaws.com"
@@ -238,86 +249,185 @@ operations:
       - $ref: '#/channels/billingRealmQueue/messages/BillingTenantReactivated'
 
 components:
+  securitySchemes:
+    iamRole:
+      type: httpApiKey
+      name: Authorization
+      in: header
+      description: AWS IAM role attached to the pod via IRSA (IAM Roles for Service Accounts).
+
+  tags:
+    published:
+      name: published
+      description: |
+        This service is the producer. Emitted onto the shared iam-tenant-events
+        SNS topic (co-produced alongside Org & Membership, HLD §9.1.1) via the
+        transactional outbox. All 9 of this service's own event types —
+        TrialTenantProvisioned, TenantRealmReady, TenantConverted,
+        DirectPaidSignup, TrialExpired, TrialReactivated, TenantSuspended,
+        TenantOffboarded, TenantReactivated(source=operator) — carry this tag.
+    consumed:
+      name: consumed
+      description: |
+        This service is the consumer, not the producer. Per §7.1, this
+        service subscribes to three inbound queues: membership-realm-q
+        (O&M's department/tenant-role events, MFA sync), tenant-realm-q
+        (O&M's TrialStarted, trial timer record), and billing-realm-q
+        (Billing's TenantReactivated, reactivation) — RP-D13 notes this
+        service's own produced TenantReactivated rides a different topic, so
+        there is no self-consumption. Canonical schema ownership for
+        anything tagged consumed sits with the producing service's own
+        AsyncAPI spec, not this file — treat these definitions as this
+        service's consumer-side documentation, kept in sync with upstream,
+        not as the source of truth.
+
+  messageTraits:
+    glueWireFormat:
+      description: |
+        Message body is prefixed with the 18-byte Glue Schema Registry wire-format header:
+        [0x03][0x00][16-byte schema version UUID (big-endian)] followed by the JSON payload.
+        Consumers must strip this header before parsing the EventEnvelope JSON.
+
   messages:
     TrialTenantProvisioned:
       title: TrialTenantProvisioned
+      tags:
+        - $ref: '#/components/tags/published'
+      traits:
+        - $ref: '#/components/messageTraits/glueWireFormat'
       payload:
         $ref: '#/components/schemas/TrialTenantProvisionedPayload'
 
     TenantRealmReady:
       title: TenantRealmReady
+      tags:
+        - $ref: '#/components/tags/published'
+      traits:
+        - $ref: '#/components/messageTraits/glueWireFormat'
       payload:
         $ref: '#/components/schemas/TenantRealmReadyPayload'
 
     TenantConverted:
       title: TenantConverted
+      tags:
+        - $ref: '#/components/tags/published'
+      traits:
+        - $ref: '#/components/messageTraits/glueWireFormat'
       payload:
         $ref: '#/components/schemas/TenantConvertedPayload'
 
     DirectPaidSignup:
       title: DirectPaidSignup
+      tags:
+        - $ref: '#/components/tags/published'
+      traits:
+        - $ref: '#/components/messageTraits/glueWireFormat'
       payload:
         $ref: '#/components/schemas/DirectPaidSignupPayload'
 
     TrialExpired:
       title: TrialExpired
+      tags:
+        - $ref: '#/components/tags/published'
+      traits:
+        - $ref: '#/components/messageTraits/glueWireFormat'
       payload:
         $ref: '#/components/schemas/TrialExpiredPayload'
 
     TrialReactivated:
       title: TrialReactivated
+      tags:
+        - $ref: '#/components/tags/published'
+      traits:
+        - $ref: '#/components/messageTraits/glueWireFormat'
       payload:
         $ref: '#/components/schemas/TrialReactivatedPayload'
 
     TenantSuspended:
       title: TenantSuspended
+      tags:
+        - $ref: '#/components/tags/published'
+      traits:
+        - $ref: '#/components/messageTraits/glueWireFormat'
       payload:
         $ref: '#/components/schemas/TenantSuspendedPayload'
 
     TenantOffboarded:
       title: TenantOffboarded
+      tags:
+        - $ref: '#/components/tags/published'
+      traits:
+        - $ref: '#/components/messageTraits/glueWireFormat'
       payload:
         $ref: '#/components/schemas/TenantOffboardedPayload'
 
     TenantReactivated:
       title: TenantReactivated
       description: Produced by this service (source=operator). See BillingTenantReactivated for the consumed counterpart (RP-D13).
+      tags:
+        - $ref: '#/components/tags/published'
+      traits:
+        - $ref: '#/components/messageTraits/glueWireFormat'
       payload:
         $ref: '#/components/schemas/TenantReactivatedPayload'
 
     DepartmentMembershipGranted:
       title: DepartmentMembershipGranted
       description: Consumed only — canonical schema owned by iam-org-membership's own AsyncAPI spec. additionalProperties left open.
+      tags:
+        - $ref: '#/components/tags/consumed'
+      traits:
+        - $ref: '#/components/messageTraits/glueWireFormat'
       payload:
         $ref: '#/components/schemas/DepartmentMembershipGrantedPayload'
 
     DepartmentMembershipLevelChanged:
       title: DepartmentMembershipLevelChanged
       description: Consumed only — canonical schema owned by iam-org-membership.
+      tags:
+        - $ref: '#/components/tags/consumed'
+      traits:
+        - $ref: '#/components/messageTraits/glueWireFormat'
       payload:
         $ref: '#/components/schemas/DepartmentMembershipLevelChangedPayload'
 
     TenantRoleGranted:
       title: TenantRoleGranted
       description: Consumed only — canonical schema owned by iam-org-membership.
+      tags:
+        - $ref: '#/components/tags/consumed'
+      traits:
+        - $ref: '#/components/messageTraits/glueWireFormat'
       payload:
         $ref: '#/components/schemas/TenantRoleGrantedPayload'
 
     TenantRoleRevoked:
       title: TenantRoleRevoked
       description: Consumed only — canonical schema owned by iam-org-membership.
+      tags:
+        - $ref: '#/components/tags/consumed'
+      traits:
+        - $ref: '#/components/messageTraits/glueWireFormat'
       payload:
         $ref: '#/components/schemas/TenantRoleRevokedPayload'
 
     TrialStarted:
       title: TrialStarted
       description: Consumed only — canonical schema owned by iam-org-membership.
+      tags:
+        - $ref: '#/components/tags/consumed'
+      traits:
+        - $ref: '#/components/messageTraits/glueWireFormat'
       payload:
         $ref: '#/components/schemas/TrialStartedPayload'
 
     BillingTenantReactivated:
       title: TenantReactivated (billing.events)
       description: Consumed only — Billing's own TenantReactivated (source=billing), distinct topic from this service's produced TenantReactivated (RP-D13).
+      tags:
+        - $ref: '#/components/tags/consumed'
+      traits:
+        - $ref: '#/components/messageTraits/glueWireFormat'
       payload:
         $ref: '#/components/schemas/BillingTenantReactivatedPayload'
 

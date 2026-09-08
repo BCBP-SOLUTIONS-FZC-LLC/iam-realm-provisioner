@@ -44,12 +44,14 @@ Every mutating endpoint above marked "required" enforces `RequireIdempotencyKey`
 | `idp_warnings_unacknowledged` | 422 | RP-6 — one or more §11.6 WARN checks lack a recorded acknowledgement |
 | `tenant_realm_not_found` | 404 | |
 | `idp_config_not_found` | 404 | |
+| `keycloak_user_not_found` | 404 | Additive — internal-only signal from `FindUserByEmail`, absorbed before reaching a caller (§9.2) |
 | `idp_requires_dedicated_realm` | 409 | RP-6 against a `shared`-strategy tenant |
 | `realm_already_dedicated` | 409 | RP-3 Convert on an already-dedicated tenant |
 | `revert_window_expired` | 409 | RP-4 past the reversal window |
 | `tenant_offboarded` | 409 | Any mutation against a terminal (offboarded) tenant |
 | `operation_in_progress` | 409 | Idempotency-Key replay against a non-`succeeded` row |
 | `optimistic_lock_conflict` | 409 | |
+| `user_email_conflict` | 409 | Additive — RP-1/RP-2/RP-5 create-user 409 that `resolveUserCreateConflict` could not resolve as the caller's own lost-response retry (§9.2) |
 | `keycloak_unavailable` | 502 | |
 | `conversion_failed` | 502 | RP-3/RP-4 Keycloak sequence failure (with `WithDetails` context) |
 | `org_membership_unavailable` | 503 | O&M I-8 residual-MFA check unreachable (membership-realm-q consumer) |

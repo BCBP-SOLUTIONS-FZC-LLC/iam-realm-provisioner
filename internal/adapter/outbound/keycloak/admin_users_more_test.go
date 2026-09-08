@@ -35,11 +35,32 @@ func TestCreateTrialUser_Success(t *testing.T) {
 func TestCreateTrialUser_CreateError(t *testing.T) {
 	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
 		mux.HandleFunc("POST "+realmPath("trial", "users"), func(w http.ResponseWriter, _ *http.Request) {
-			writeJSON(w, http.StatusConflict, `{"errorMessage":"user exists"}`)
+			writeJSON(w, http.StatusInternalServerError, `{}`)
 		})
 	})
 	_, err := a.CreateTrialUser(context.Background(), port.CreateUserRequest{Email: "a@example.com", FullName: "A", TenantID: uuid.New()})
 	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrKeycloakUnavailable, de.Code, "a non-409 failure keeps wrapErr's generic semantics")
+}
+
+// A 409 specifically must surface as the distinguishable ErrUserEmailConflict
+// (§9.2) — not the generic ErrKeycloakUnavailable every other CreateUser
+// failure produces — so provisioning_service.go can tell "email already
+// exists" apart from "keycloak is down" and attempt lost-response-retry
+// resolution via FindUserByEmail.
+func TestCreateTrialUser_ConflictReturnsDistinguishableCode(t *testing.T) {
+	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
+		mux.HandleFunc("POST "+realmPath("trial", "users"), func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusConflict, `{"errorMessage":"User exists with same email"}`)
+		})
+	})
+	_, err := a.CreateTrialUser(context.Background(), port.CreateUserRequest{Email: "a@example.com", FullName: "A", TenantID: uuid.New()})
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrUserEmailConflict, de.Code)
 }
 
 func TestCreateTrialUser_SendVerifyEmailFailureIsWarnedNotFatal(t *testing.T) {
@@ -83,6 +104,79 @@ func TestCreateInvitedUser_Error(t *testing.T) {
 	})
 	_, err := a.CreateInvitedUser(context.Background(), "acme", port.CreateUserRequest{Email: "a@example.com", FullName: "A", TenantID: uuid.New()})
 	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrKeycloakUnavailable, de.Code, "a non-409 failure keeps wrapErr's generic semantics")
+}
+
+func TestCreateInvitedUser_ConflictReturnsDistinguishableCode(t *testing.T) {
+	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
+		mux.HandleFunc("POST "+realmPath("acme", "users"), func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusConflict, `{"errorMessage":"User exists with same email"}`)
+		})
+	})
+	_, err := a.CreateInvitedUser(context.Background(), "acme", port.CreateUserRequest{Email: "a@example.com", FullName: "A", TenantID: uuid.New()})
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrUserEmailConflict, de.Code)
+}
+
+// --- FindUserByEmail ---
+
+func TestFindUserByEmail_Found_ParsesTenantIDAttribute(t *testing.T) {
+	userID := uuid.New()
+	tenantID := uuid.New()
+	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
+		mux.HandleFunc("GET "+realmPath("acme", "users"), func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, "a@example.com", r.URL.Query().Get("email"))
+			assert.Equal(t, "true", r.URL.Query().Get("exact"))
+			writeJSON(w, http.StatusOK, `[{"id":"`+userID.String()+`","attributes":{"tenant_id":["`+tenantID.String()+`"]}}]`)
+		})
+	})
+	existing, err := a.FindUserByEmail(context.Background(), "acme", "a@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, userID, existing.ID)
+	assert.Equal(t, tenantID, existing.TenantID)
+}
+
+func TestFindUserByEmail_Found_NoAttributes_TenantIDStaysNil(t *testing.T) {
+	userID := uuid.New()
+	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
+		mux.HandleFunc("GET "+realmPath("acme", "users"), func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, `[{"id":"`+userID.String()+`"}]`)
+		})
+	})
+	existing, err := a.FindUserByEmail(context.Background(), "acme", "a@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, userID, existing.ID)
+	assert.Equal(t, uuid.Nil, existing.TenantID, "a legacy/attribute-less user must never appear to match a real tenant id")
+}
+
+func TestFindUserByEmail_NotFound_ReturnsDistinguishableCode(t *testing.T) {
+	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
+		mux.HandleFunc("GET "+realmPath("acme", "users"), func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, `[]`)
+		})
+	})
+	_, err := a.FindUserByEmail(context.Background(), "acme", "nobody@example.com")
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrKeycloakUserNotFound, de.Code)
+}
+
+func TestFindUserByEmail_ListError(t *testing.T) {
+	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
+		mux.HandleFunc("GET "+realmPath("acme", "users"), func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusInternalServerError, `{}`)
+		})
+	})
+	_, err := a.FindUserByEmail(context.Background(), "acme", "a@example.com")
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrKeycloakUnavailable, de.Code)
 }
 
 // --- MigrateUser / partialImportUser ---

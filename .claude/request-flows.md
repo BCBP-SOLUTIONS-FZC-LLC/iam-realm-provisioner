@@ -29,7 +29,12 @@ POST /tenants/provision-trial {tenant_id, tenant_name, tenant_slug, admin_email,
     found + succeeded -> replay
     found + other     -> 409 operation_in_progress
   Keycloak.CreateTrialUser(email, full_name, tenant_id, seed, email_verified=false)
-    -> stamps tenant_id attribute on the user, triggers VERIFY_EMAIL (fail -> failIdempotency, return err)
+    -> stamps tenant_id attribute on the user, triggers VERIFY_EMAIL
+    -> 409 user_email_conflict (§9.2, lost-response retry of THIS request, or a genuine conflict):
+         resolveUserCreateConflict: Keycloak.FindUserByEmail(realm, email)
+           existing.tenant_id == tenant_id -> resume with existing.id (idempotent success, no failure)
+           else / lookup fails             -> failIdempotency, return the ORIGINAL 409 unchanged
+    -> any other failure -> failIdempotency, return err
   RunInTx:
     tenant_realms.Upsert{tenant_id, realm_name:"trial", strategy:"shared", status:"active"}
     outbox.Enqueue(TrialTenantProvisioned{tenant_id, realm:"trial", keycloak_user_id})
@@ -46,7 +51,11 @@ POST /tenants/provision-direct {..., billing_subscription_id}
                              deterministic behavior under concurrent placements
   Keycloak.CreateRealmFromTemplate(realmName, "v1")           -- fail -> failIdempotency, return err (no teardown needed, nothing created yet)
   Keycloak.RegisterOIDCClients(realmName, tenant_slug)        -- fail -> bestEffortDeleteRealm(realmName), failIdempotency, return err
-  Keycloak.CreateInvitedUser(realmName, {..., RequiredActions:["VERIFY_EMAIL"]}) -- fail -> bestEffortDeleteRealm, failIdempotency, return err
+  Keycloak.CreateInvitedUser(realmName, {..., RequiredActions:["VERIFY_EMAIL"]})
+    -- 409 user_email_conflict (§9.2) -> resolveUserCreateConflict(realmName, email, tenant_id) BEFORE any teardown:
+         existing.tenant_id == tenant_id -> resume in place (realm/OIDC clients from this same attempt kept, no teardown)
+         else / lookup fails             -> bestEffortDeleteRealm, failIdempotency, return the ORIGINAL 409 unchanged
+    -- any other failure -> bestEffortDeleteRealm, failIdempotency, return err
   RunInTx:
     tenant_realms.Upsert{tenant_id, realm_name:realmName, strategy:"dedicated", keycloak_shard:shard, status:"active", converted_at:now()}
     outbox.Enqueue(TenantRealmReady{tenant_id, realm, keycloak_shard, oidc_clients})

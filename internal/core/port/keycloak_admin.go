@@ -46,6 +46,14 @@ type KeycloakAdmin interface {
 	// CreateInvitedUser creates a user in realmName with requiredActions
 	// applied verbatim (RP-5, F5 — this service never re-derives them).
 	CreateInvitedUser(ctx context.Context, realmName string, req CreateUserRequest) (uuid.UUID, error)
+	// FindUserByEmail looks up a user by exact email match within
+	// realmName — used by callers of CreateTrialUser/CreateInvitedUser to
+	// disambiguate a lost-response retry of their OWN request (the
+	// original create succeeded but its response never reached the
+	// caller) from a genuine email conflict on the retry's 409 (§9.2).
+	// Returns a distinguishable ErrKeycloakUserNotFound, never a bare nil
+	// result, when no user with that email exists in realmName.
+	FindUserByEmail(ctx context.Context, realmName, email string) (*ExistingUser, error)
 	// MigrateUser recreates a trial user in a dedicated realm, preserving
 	// sub, copying the TOTP credential, and flagging WEBAUTHN_REGISTER when
 	// the source user held a WebAuthn credential (WebAuthn cannot migrate
@@ -106,6 +114,18 @@ type CreateUserRequest struct {
 	HashedPasswordSeed string   // optional — trial/direct-paid admin only
 	RequiredActions    []string // applied verbatim (F5)
 	EmailVerified      bool
+}
+
+// ExistingUser is FindUserByEmail's result — the minimal shape a caller
+// needs to decide whether a create-user 409 is its own lost-response retry
+// (TenantID matches the retried request) or a genuine conflict (§9.2).
+// TenantID is the Go zero-value (uuid.Nil) if the Keycloak user carries no
+// tenant_id attribute at all (a legacy/manually-created user) — that never
+// matches a real request's TenantID, so it's correctly treated as a
+// genuine conflict rather than a false idempotent-success.
+type ExistingUser struct {
+	ID       uuid.UUID
+	TenantID uuid.UUID
 }
 
 // IdpKeycloakConfig is the Keycloak-facing shape for creating/updating an

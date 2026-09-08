@@ -146,6 +146,77 @@ func TestProvisionDirect_CreateInvitedUserFails_TeardownCalled(t *testing.T) {
 	assert.Equal(t, "tenant-acme", deletedRealm)
 }
 
+// §9.2 lost-response-retry resolution: CreateInvitedUser 409s on a retry of
+// this same request (the realm + OIDC clients already exist from the
+// earlier attempt, and its user-create response was lost). FindUserByEmail
+// reports the existing user under the SAME tenant_id — the resolved
+// conflict must resume WITHOUT calling the compensating teardown, since
+// destroying and recreating a perfectly good realm just to dodge this
+// tenant's own already-created user would be pure waste (DeleteRealmIfExistsFn
+// is left nil; a call would panic the test, proving teardown never ran).
+func TestProvisionDirect_CreateInvitedUserConflict_SameTenant_ResolvesWithoutTeardown(t *testing.T) {
+	svc, kc, realms, idem, pub := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	existingID := uuid.New()
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
+	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) {
+		return []string{"tender-web"}, nil
+	}
+	kc.CreateInvitedUserFn = func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
+		return uuid.Nil, domain.NewError(domain.ErrUserEmailConflict, "email already exists in realm")
+	}
+	kc.FindUserByEmailFn = func(ctx context.Context, realmName, email string) (*port.ExistingUser, error) {
+		assert.Equal(t, "tenant-acme", realmName)
+		return &port.ExistingUser{ID: existingID, TenantID: tenantID}, nil
+	}
+
+	result, err := svc.ProvisionDirect(context.Background(), "pd-conflict-1", service.ProvisionDirectRequest{
+		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-acme", result.Realm)
+
+	row, err := realms.FindByTenantID(context.Background(), tenantID)
+	require.NoError(t, err, "local commit must still land on a resolved conflict")
+	assert.Equal(t, domain.RealmStrategyDedicated, row.Strategy)
+	assert.NotEmpty(t, pub.events)
+	assert.Equal(t, domain.OpStatusSucceeded, idem.rows["pd-conflict-1"].Status)
+}
+
+// Same 409, but FindUserByEmail reports a DIFFERENT tenant_id — a genuine
+// conflict. The original ErrUserEmailConflict propagates unchanged AND the
+// compensating teardown still runs (this attempt's realm+clients must not
+// be left behind holding no valid user).
+func TestProvisionDirect_CreateInvitedUserConflict_DifferentTenant_TeardownCalled(t *testing.T) {
+	svc, kc, _, idem, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	var deletedRealm string
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
+	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) {
+		return []string{"tender-web"}, nil
+	}
+	kc.CreateInvitedUserFn = func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
+		return uuid.Nil, domain.NewError(domain.ErrUserEmailConflict, "email already exists in realm")
+	}
+	kc.FindUserByEmailFn = func(ctx context.Context, realmName, email string) (*port.ExistingUser, error) {
+		return &port.ExistingUser{ID: uuid.New(), TenantID: uuid.New()}, nil
+	}
+	kc.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error {
+		deletedRealm = realmName
+		return nil
+	}
+
+	_, err := svc.ProvisionDirect(context.Background(), "pd-conflict-2", service.ProvisionDirectRequest{
+		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
+	})
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrUserEmailConflict, de.Code)
+	assert.Equal(t, "tenant-acme", deletedRealm)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["pd-conflict-2"].Status)
+}
+
 // Teardown failures are logged, not escalated — the caller still sees the
 // ORIGINAL error, not the teardown error.
 func TestProvisionDirect_TeardownFailure_LoggedNotEscalated(t *testing.T) {
@@ -390,6 +461,46 @@ func TestCreateInvitedUser_KeycloakFailure(t *testing.T) {
 	_, err := svc.CreateInvitedUser(context.Background(), "ciu-3", tenantID, service.CreateInvitedUserRequest{Email: "x@example.com"})
 	require.Error(t, err)
 	assert.Equal(t, domain.OpStatusFailed, idem.rows["ciu-3"].Status)
+}
+
+// §9.2 lost-response-retry resolution: same shape as ProvisionTrial's, for
+// RP-5's standalone CreateInvitedUser endpoint.
+func TestCreateInvitedUser_EmailConflict_SameTenant_ResolvesAsIdempotentSuccess(t *testing.T) {
+	svc, kc, realms, idem, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	existingID := uuid.New()
+	realms.rows[tenantID] = &domain.TenantRealm{TenantID: tenantID, RealmName: "tenant-acme", Strategy: domain.RealmStrategyDedicated}
+	kc.CreateInvitedUserFn = func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
+		return uuid.Nil, domain.NewError(domain.ErrUserEmailConflict, "email already exists in realm")
+	}
+	kc.FindUserByEmailFn = func(ctx context.Context, realmName, email string) (*port.ExistingUser, error) {
+		assert.Equal(t, "tenant-acme", realmName)
+		return &port.ExistingUser{ID: existingID, TenantID: tenantID}, nil
+	}
+
+	result, err := svc.CreateInvitedUser(context.Background(), "ciu-conflict-1", tenantID, service.CreateInvitedUserRequest{Email: "x@example.com"})
+	require.NoError(t, err)
+	assert.Equal(t, existingID, result.KeycloakUserID)
+	assert.Equal(t, domain.OpStatusSucceeded, idem.rows["ciu-conflict-1"].Status)
+}
+
+func TestCreateInvitedUser_EmailConflict_DifferentTenant_ReturnsConflict(t *testing.T) {
+	svc, kc, realms, idem, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	realms.rows[tenantID] = &domain.TenantRealm{TenantID: tenantID, RealmName: "tenant-acme", Strategy: domain.RealmStrategyDedicated}
+	kc.CreateInvitedUserFn = func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
+		return uuid.Nil, domain.NewError(domain.ErrUserEmailConflict, "email already exists in realm")
+	}
+	kc.FindUserByEmailFn = func(ctx context.Context, realmName, email string) (*port.ExistingUser, error) {
+		return &port.ExistingUser{ID: uuid.New(), TenantID: uuid.New()}, nil
+	}
+
+	_, err := svc.CreateInvitedUser(context.Background(), "ciu-conflict-2", tenantID, service.CreateInvitedUserRequest{Email: "x@example.com"})
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrUserEmailConflict, de.Code)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["ciu-conflict-2"].Status)
 }
 
 func TestCreateInvitedUser_IdempotentReplay(t *testing.T) {

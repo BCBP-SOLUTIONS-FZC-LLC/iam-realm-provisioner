@@ -24,6 +24,7 @@ type mockKeycloakAdmin struct {
 	DeleteRealmIfExistsFn     func(ctx context.Context, realmName string) error
 	CreateTrialUserFn         func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error)
 	CreateInvitedUserFn       func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error)
+	FindUserByEmailFn         func(ctx context.Context, realmName, email string) (*port.ExistingUser, error)
 	MigrateUserFn             func(ctx context.Context, sourceRealm, targetRealm string, keycloakUserID uuid.UUID) (bool, error)
 	ListUsersByTenantFn       func(ctx context.Context, realmName string, tenantID uuid.UUID) ([]uuid.UUID, error)
 	DisableUsersInRealmFn     func(ctx context.Context, realmName string, tenantID uuid.UUID) error
@@ -70,6 +71,9 @@ func (m *mockKeycloakAdmin) CreateTrialUser(ctx context.Context, req port.Create
 }
 func (m *mockKeycloakAdmin) CreateInvitedUser(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
 	return m.CreateInvitedUserFn(ctx, realmName, req)
+}
+func (m *mockKeycloakAdmin) FindUserByEmail(ctx context.Context, realmName, email string) (*port.ExistingUser, error) {
+	return m.FindUserByEmailFn(ctx, realmName, email)
 }
 func (m *mockKeycloakAdmin) MigrateUser(ctx context.Context, sourceRealm, targetRealm string, keycloakUserID uuid.UUID) (bool, error) {
 	return m.MigrateUserFn(ctx, sourceRealm, targetRealm, keycloakUserID)

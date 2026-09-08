@@ -86,6 +86,115 @@ func TestProvisionTrial_KeycloakFailure_NoLocalCommit(t *testing.T) {
 	assert.Equal(t, domain.OpStatusFailed, row.Status)
 }
 
+// §9.2 lost-response-retry resolution: CreateTrialUser 409s (the original
+// create actually succeeded but its response never reached the caller, and
+// a retry of the same request hits Keycloak's email-uniqueness
+// constraint). FindUserByEmail reports the existing user under the SAME
+// tenant_id this request carries — safe to resume as if CreateTrialUser had
+// returned that id directly, no failure at all.
+func TestProvisionTrial_EmailConflict_SameTenant_ResolvesAsIdempotentSuccess(t *testing.T) {
+	svc, kc, realms, idem, pub := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	existingID := uuid.New()
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) {
+		return uuid.Nil, domain.NewError(domain.ErrUserEmailConflict, "email already exists in realm")
+	}
+	kc.FindUserByEmailFn = func(ctx context.Context, realmName, email string) (*port.ExistingUser, error) {
+		assert.Equal(t, "trial", realmName)
+		assert.Equal(t, "owner@acme.example", email)
+		return &port.ExistingUser{ID: existingID, TenantID: tenantID}, nil
+	}
+
+	result, err := svc.ProvisionTrial(context.Background(), "key-conflict-1", service.ProvisionTrialRequest{
+		TenantID: tenantID, AdminEmail: "owner@acme.example", AdminName: "Dana Owner",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, existingID, result.KeycloakUserID)
+
+	row, err := realms.FindByTenantID(context.Background(), tenantID)
+	require.NoError(t, err, "local commit must still land on a resolved conflict")
+	assert.Equal(t, domain.RealmStatusActive, row.Status)
+	require.Len(t, pub.events, 1)
+	assert.Equal(t, domain.OpStatusSucceeded, idem.rows["key-conflict-1"].Status, "a resolved conflict must complete as a success, not a failed operation")
+}
+
+// Same 409, but FindUserByEmail reports a DIFFERENT tenant_id — a genuine
+// conflict, not this caller's own retry. The original ErrUserEmailConflict
+// must propagate unchanged (a real 409, not a masked/wrong error) and the
+// idempotency key must be marked failed so a legitimate retry can still
+// re-attempt with a different email.
+func TestProvisionTrial_EmailConflict_DifferentTenant_ReturnsConflict(t *testing.T) {
+	svc, kc, realms, idem, pub := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) {
+		return uuid.Nil, domain.NewError(domain.ErrUserEmailConflict, "email already exists in realm")
+	}
+	kc.FindUserByEmailFn = func(ctx context.Context, realmName, email string) (*port.ExistingUser, error) {
+		return &port.ExistingUser{ID: uuid.New(), TenantID: uuid.New()}, nil
+	}
+
+	_, err := svc.ProvisionTrial(context.Background(), "key-conflict-2", service.ProvisionTrialRequest{
+		TenantID: tenantID, AdminEmail: "owner@acme.example", AdminName: "Dana Owner",
+	})
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrUserEmailConflict, de.Code)
+
+	_, findErr := realms.FindByTenantID(context.Background(), tenantID)
+	assert.Error(t, findErr, "no local row on a genuine conflict")
+	assert.Empty(t, pub.events)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["key-conflict-2"].Status)
+}
+
+// A caller reaching the conflict resolver with an unset TenantID (uuid.Nil
+// — should never happen given real request binding, but the resolver must
+// not silently trust it) must never match an attribute-less legacy user
+// FindUserByEmail happens to return (also uuid.Nil, since it carries no
+// tenant_id attribute) — that would hand back an unrelated stranger's
+// Keycloak id as if it were this "tenant"'s own. FindUserByEmailFn is left
+// unset here deliberately: if the nil-guard were ever removed, the mock
+// would panic on the call this test proves never happens.
+func TestProvisionTrial_EmailConflict_NilTenantID_NeverLooksUpOrMatches(t *testing.T) {
+	svc, kc, _, idem, _ := newProvisioningTestService(t)
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) {
+		return uuid.Nil, domain.NewError(domain.ErrUserEmailConflict, "email already exists in realm")
+	}
+
+	_, err := svc.ProvisionTrial(context.Background(), "key-conflict-nil", service.ProvisionTrialRequest{
+		TenantID: uuid.Nil, AdminEmail: "owner@acme.example", AdminName: "Dana Owner",
+	})
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrUserEmailConflict, de.Code)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["key-conflict-nil"].Status)
+}
+
+// If FindUserByEmail itself fails (Keycloak flaky right when we're trying
+// to disambiguate), the caller must still see the ORIGINAL conflict error —
+// not the unrelated lookup failure, which would be a confusing regression
+// from today's (masked) behavior.
+func TestProvisionTrial_EmailConflict_LookupFails_ReturnsOriginalConflict(t *testing.T) {
+	svc, kc, _, idem, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) {
+		return uuid.Nil, domain.NewError(domain.ErrUserEmailConflict, "email already exists in realm")
+	}
+	kc.FindUserByEmailFn = func(ctx context.Context, realmName, email string) (*port.ExistingUser, error) {
+		return nil, domain.NewError(domain.ErrKeycloakUnavailable, "flaky")
+	}
+
+	_, err := svc.ProvisionTrial(context.Background(), "key-conflict-3", service.ProvisionTrialRequest{
+		TenantID: tenantID, AdminEmail: "owner@acme.example", AdminName: "Dana Owner",
+	})
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrUserEmailConflict, de.Code, "the original conflict must surface, not the lookup failure")
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["key-conflict-3"].Status)
+}
+
 // Idempotent replay (§9.2): a second call with the same key must return the
 // exact stored result without calling Keycloak again.
 func TestProvisionTrial_IdempotentReplay(t *testing.T) {
