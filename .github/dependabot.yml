@@ -16,6 +16,11 @@ registries:
     username: x-access-token
     password: ${{ secrets.GO_PRIVATE_TOKEN }}
 
+# Dependabot version updates are temporarily paused (open-pull-requests-limit:
+# 0 on every ecosystem below) at the repo owner's request. This stops new
+# update PRs from being opened without losing the registries/schedule/label
+# config. To re-enable, restore each limit to its prior value (gomod: 5,
+# docker: 3, github-actions: 5) and remove this comment.
 updates:
   - package-ecosystem: gomod
     directory: /
@@ -23,19 +28,19 @@ updates:
       - github-bcbp
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     labels: [dependencies, go]
 
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 0
     labels: [dependencies, docker]
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     labels: [dependencies, github-actions]
