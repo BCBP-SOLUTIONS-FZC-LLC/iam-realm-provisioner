@@ -153,7 +153,15 @@ func (a *Admin) CreateRealmFromTemplate(ctx context.Context, realmName, _ string
 	}
 	rep.Realm = gocloak.StringP(realmName)
 	rep.Enabled = gocloak.BoolP(true)
-	rep.ID = gocloak.StringP(realmName)
+	// Deliberately NOT setting rep.ID: Keycloak's REALM.ID column is a
+	// VARCHAR(36) sized for a bare UUID, but realmName (the logical/URL
+	// realm name, used only for rep.Realm) can run longer — RP-3's
+	// "tenant-"+<36-char tenant UUID> is 43 characters and would overflow
+	// it, and Keycloak wraps the resulting SQLException as a generic 409
+	// "Conflict detected" rather than a clear error, so the conflict
+	// branch below would silently treat a never-created realm as an
+	// existing one. Leaving ID unset lets Keycloak assign its own
+	// UUID primary key, independent of realmName's length.
 	if _, err := a.client.CreateRealm(ctx, tok, rep); err != nil {
 		if isConflict(err) {
 			return domain.NewError(domain.ErrRealmAlreadyDedicated, "realm already exists").WithDetails(map[string]any{"realm": realmName})

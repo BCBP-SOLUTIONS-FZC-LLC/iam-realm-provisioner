@@ -216,6 +216,15 @@ func runE2ESuite(m *testing.M) (int, error) {
 		ClientID: kcClientID, ClientSecret: kcClientSecret,
 		RateLimitRPS: 50, Timeout: 15 * time.Second,
 	}, noopLogger{})
+
+	// kcAdmin.Ready below already exercises the token cache, which
+	// increments business counters (§11.6) — mirrors cmd/server/main.go's
+	// ordering (ObservabilityMiddlewares then metrics.Register, both before
+	// any Keycloak call), so those counters are non-nil at first use rather
+	// than only once NewRouter primes them further down.
+	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{ServiceName: "iam-realm-provisioner-e2e", Logger: noopLogger{}})
+	metrics.Register()
+
 	if err := kcAdmin.Ready(ctx); err != nil {
 		return 0, fmt.Errorf("keycloak admin not ready: %w", err)
 	}
@@ -266,10 +275,6 @@ func runE2ESuite(m *testing.M) (int, error) {
 
 	testServer = httptest.NewServer(router.Handler())
 	defer testServer.Close()
-
-	// NewRouter already primed ObservabilityMiddlewares; Register business
-	// collectors so ProvisionTrial/etc. can increment them.
-	metrics.Register()
 
 	return m.Run(), nil
 }

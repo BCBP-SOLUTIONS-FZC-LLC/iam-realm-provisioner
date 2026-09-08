@@ -44,7 +44,7 @@ func provisionDedicatedTenant(t *testing.T) (tenantID uuid.UUID, realmName strin
 	var result service.ProvisionDirectResult
 	resp := doJSON(t, http.MethodPost, "/api/v1/internal/tenants/provision-direct",
 		withHeader(sysHeaders(tenantID), "Idempotency-Key", newIdempotencyKey()), req, &result)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	return tenantID, result.Realm
 }
 
@@ -95,6 +95,7 @@ func TestConfigureIdp_RegionNeutralURL_Succeeds(t *testing.T) {
 			"redirect_uri": "https://auth.bcbpsolutions.com/callback",
 			"audience":     "acme-clients",
 			"pkce_method":  "S256",
+			"client_id":    "acme-client",
 		},
 	}
 	var result service.ConfigureIdpResult
