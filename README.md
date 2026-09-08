@@ -323,7 +323,7 @@ The only rate limiter in this codebase is **outbound**, client-side, against Key
 
 ### 11. Background reconcilers you may observe
 
-Six CronJobs, one Helm manifest (`deploy/helm/iam-realm-provisioner/templates/cronjobs.yaml`), each `cmd/reconciler --job=<name>` against the same image:
+Six CronJobs, one Helm manifest (`deploy/helm/templates/cronjobs.yaml`), each `cmd/reconciler --job=<name>` against the same image:
 
 | CronJob (`--job=`) | Schedule | Purpose |
 |---|---|---|
@@ -665,7 +665,7 @@ Two-stage `Dockerfile`: `golang:1.26.6-bookworm` builder, runtime is `gcr.io/dis
 
 ### Helm chart
 
-`deploy/helm/iam-realm-provisioner/` renders one `Deployment` (server) plus the 6 `CronJob`s above, all from the same image reference. HPA: `minReplicas: 2` / `maxReplicas: 4`, CPU 70% / memory 80%. PDB `minAvailable: 1`. Resources: CPU `250m`/`1`, Memory `256Mi`/`512Mi`. Pod AWS access (SNS/SQS/Glue/S3/KMS) is IRSA; secret access is OpenBao Kubernetes auth on the same ServiceAccount token.
+`deploy/helm/` renders one `Deployment` (server) plus the 6 `CronJob`s above, all from the same image reference. HPA: `minReplicas: 2` / `maxReplicas: 4`, CPU 70% / memory 80%. PDB `minAvailable: 1`. Resources: CPU `250m`/`1`, Memory `256Mi`/`512Mi`. Pod AWS access (SNS/SQS/Glue/S3/KMS) is IRSA; secret access is OpenBao Kubernetes auth on the same ServiceAccount token.
 
 ### Migration safety
 
@@ -782,7 +782,7 @@ services:
         condition: service_healthy
 ```
 
-The chart-level source for the image path is `deploy/helm/iam-realm-provisioner/values.yaml`'s `image.repository` (`ghcr.io/bcbp-solutions-fzc-llc/iam-realm-provisioner`); `VERSIONING.md` covers tag pinning (no `v*` release tags exist yet — pin `main`-branch images by digest, not `latest`, and verify the Cosign signature before deploying).
+The chart-level source for the image path is `deploy/helm/values.yaml`'s `image.repository` (`ghcr.io/bcbp-solutions-fzc-llc/iam-realm-provisioner`); `VERSIONING.md` covers tag pinning (no `v*` release tags exist yet — pin `main`-branch images by digest, not `latest`, and verify the Cosign signature before deploying).
 
 ### Minimum required environment variables
 

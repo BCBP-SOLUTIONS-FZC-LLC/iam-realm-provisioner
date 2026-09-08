@@ -26,7 +26,7 @@ spec:
               {{- toYaml . | nindent 14 }}
           {{- end }}
       ports:
-        - port: {{ .Values.service.httpPort }}
+        - port: {{ .Values.service.port }}
           protocol: TCP
 
     # Allow same-namespace, mesh-internal traffic on the "http" port (e.g.
@@ -35,7 +35,7 @@ spec:
     - from:
         - podSelector: {}
       ports:
-        - port: {{ .Values.service.httpPort }}
+        - port: {{ .Values.service.port }}
           protocol: TCP
 
     # Allow Prometheus to scrape :9090/metrics — restricted to the

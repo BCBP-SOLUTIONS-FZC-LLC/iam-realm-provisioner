@@ -1,6 +1,6 @@
 {{- if and .Values.ingress.enabled (eq (.Values.ingress.type | default "Ingress") "Ingress") }}
 # NOTE: /metrics is served on its own dedicated port (service.metricsPort,
-# not service.httpPort) and is never routed through this Ingress — it's not
+# not service.port) and is never routed through this Ingress — it's not
 # reachable here regardless of path rules below. See networkpolicy.yaml
 # for the NetworkPolicy rule restricting it to the monitoring namespace.
 apiVersion: networking.k8s.io/v1

@@ -8,14 +8,14 @@ the iam.tenant.events topic's 9 published events.
 ━━ REQUIRED ACTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 {{ if not .Values.existingSecret -}}
-!  Credentials are stored in Helm release history (base64, not encrypted).
+⚠  Credentials are stored in Helm release history (base64, not encrypted).
    Migrate to External Secrets Operator or AWS Secrets Manager CSI:
      existingSecret: "iam-realm-provisioner-secrets"
    Then remove secretValues from your values file.
 
 {{ end -}}
 {{ if not .Values.networkPolicy.enabled -}}
-!  networkPolicy.enabled is false. :9090/metrics is unauthenticated and
+⚠  networkPolicy.enabled is false. :9090/metrics is unauthenticated and
    reachable by any pod in the cluster. Enable in production:
      networkPolicy.enabled: true
    Ensure the ingress controller namespace label matches:
@@ -23,12 +23,12 @@ the iam.tenant.events topic's 9 published events.
 
 {{ end -}}
 {{ if .Values.ingress.enabled -}}
-!  Ingress is enabled. Only /api/v1 (RP-1..RP-16) is routed. :9090/metrics
+⚠  Ingress is enabled. Only /api/v1 (RP-1..RP-16) is routed. :9090/metrics
    is not referenced by this Ingress, but remains reachable cluster-wide
    unless networkPolicy.enabled=true.
 
 {{ end -}}
-!  This service authenticates to OpenBao (per-tenant IdP secrets +
+⚠  This service authenticates to OpenBao (per-tenant IdP secrets +
    Keycloak admin credential, §12) via this pod's ServiceAccount JWT
    against OpenBao's Kubernetes auth method — confirm an OpenBao role
    named .Values.env.BAO_AUTH_ROLE ({{ .Values.env.BAO_AUTH_ROLE }}) is
@@ -37,23 +37,23 @@ the iam.tenant.events topic's 9 published events.
 
 ━━ CRONJOBS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-{{ if .Values.cronJobs.trialExpiry.enabled -}}
-  {{ .Values.cronJobs.trialExpiry.jobName }}            {{ .Values.cronJobs.trialExpiry.schedule }}    (RP-C1, §8.7)
+{{ if .Values.cronjobs.trialExpiry.enabled -}}
+  {{ .Values.cronjobs.trialExpiry.jobName }}            {{ .Values.cronjobs.trialExpiry.schedule }}    (RP-C1, §8.7)
 {{ end -}}
-{{ if .Values.cronJobs.trialHardDelete.enabled -}}
-  {{ .Values.cronJobs.trialHardDelete.jobName }}       {{ .Values.cronJobs.trialHardDelete.schedule }}    (RP-C2, §8.7)
+{{ if .Values.cronjobs.trialHardDelete.enabled -}}
+  {{ .Values.cronjobs.trialHardDelete.jobName }}       {{ .Values.cronjobs.trialHardDelete.schedule }}    (RP-C2, §8.7)
 {{ end -}}
-{{ if .Values.cronJobs.subscriptionLapse.enabled -}}
-  {{ .Values.cronJobs.subscriptionLapse.jobName }}      {{ .Values.cronJobs.subscriptionLapse.schedule }}    (RP-C3, §8.8/§8.9 — no-ops until SubscriptionStatusReader is wired)
+{{ if .Values.cronjobs.subscriptionLapse.enabled -}}
+  {{ .Values.cronjobs.subscriptionLapse.jobName }}      {{ .Values.cronjobs.subscriptionLapse.schedule }}    (RP-C3, §8.8/§8.9 — no-ops until SubscriptionStatusReader is wired)
 {{ end -}}
-{{ if .Values.cronJobs.realmConfigReconcile.enabled -}}
-  {{ .Values.cronJobs.realmConfigReconcile.jobName }} {{ .Values.cronJobs.realmConfigReconcile.schedule }}   (RP-C4, §8.10)
+{{ if .Values.cronjobs.realmConfigReconcile.enabled -}}
+  {{ .Values.cronjobs.realmConfigReconcile.jobName }} {{ .Values.cronjobs.realmConfigReconcile.schedule }}   (RP-C4, §8.10)
 {{ end -}}
-{{ if .Values.cronJobs.outboxPrune.enabled -}}
-  {{ .Values.cronJobs.outboxPrune.jobName }}              {{ .Values.cronJobs.outboxPrune.schedule }}    (maintenance, not LLD-pinned)
+{{ if .Values.cronjobs.outboxPrune.enabled -}}
+  {{ .Values.cronjobs.outboxPrune.jobName }}              {{ .Values.cronjobs.outboxPrune.schedule }}    (maintenance, not LLD-pinned)
 {{ end -}}
-{{ if .Values.cronJobs.processedEventsPrune.enabled -}}
-  {{ .Values.cronJobs.processedEventsPrune.jobName }}   {{ .Values.cronJobs.processedEventsPrune.schedule }}   (maintenance, not LLD-pinned)
+{{ if .Values.cronjobs.processedEventsPrune.enabled -}}
+  {{ .Values.cronjobs.processedEventsPrune.jobName }}   {{ .Values.cronjobs.processedEventsPrune.schedule }}   (maintenance, not LLD-pinned)
 {{ end -}}
 
 Check CronJob status:

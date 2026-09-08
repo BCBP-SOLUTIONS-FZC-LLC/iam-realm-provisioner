@@ -885,7 +885,7 @@ Two-stage Dockerfile: a Go builder stage compiles both binaries, the runtime sta
 
 ### Helm chart
 
-`deploy/helm/iam-realm-provisioner/` renders a single `Deployment` for the server plus 6 `CronJob` resources, all sharing the same image with a `command: ["/iam-realm-provisioner-reconciler", "--job=<name>"]` override. Schedules are taken from `values.yaml`'s `cronJobs:` map, matched 1:1 to `cmd/reconciler/jobs/*.go`:
+`deploy/helm/` renders a single `Deployment` for the server plus 6 `CronJob` resources, all sharing the same image with a `command: ["/iam-realm-provisioner-reconciler", "--job=<name>"]` override. Schedules are taken from `values.yaml`'s `cronjobs:` map, matched 1:1 to `cmd/reconciler/jobs/*.go`:
 
 | CronJob | Schedule | Purpose |
 |---|---|---|

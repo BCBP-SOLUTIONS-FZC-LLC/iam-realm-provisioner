@@ -10,7 +10,7 @@ Every CronJob runs the SAME image as the server Deployment, with `command`
 overridden to the reconciler binary and `--job=<jobName>` selecting the
 handler.
 */ -}}
-{{- range $key, $job := .Values.cronJobs }}
+{{- range $key, $job := .Values.cronjobs }}
 {{- if $job.enabled }}
 apiVersion: batch/v1
 kind: CronJob

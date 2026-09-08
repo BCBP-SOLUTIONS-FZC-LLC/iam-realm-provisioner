@@ -146,7 +146,7 @@ Grafana "IAM — Realm Provisioner": provision throughput/success by kind, conve
 
 ### 13.1 CronJobs
 
-All six defined in one Helm manifest (`deploy/helm/iam-realm-provisioner/templates/cronjobs.yaml`), dispatched via `cmd/reconciler/main.go`'s `registry` map (exact `--job=` values below):
+All six defined in one Helm manifest (`deploy/helm/templates/cronjobs.yaml`), dispatched via `cmd/reconciler/main.go`'s `registry` map (exact `--job=` values below):
 
 | CronJob (`--job=`) | LLD ref | Schedule | Purpose |
 |---|---|---|---|
@@ -159,7 +159,7 @@ All six defined in one Helm manifest (`deploy/helm/iam-realm-provisioner/templat
 
 Every job is idempotent per tenant (safe to re-run) and batched (`RECONCILER_BATCH_LIMIT`, default 100). **Instrumentation requirement:** every deferring job must *increment* its `*_deferred_total` counter on every defer, not merely register it at startup — otherwise a "deferred > 0 sustained" alert can never fire even when the job is genuinely stuck.
 
-**Helm chart** (`deploy/helm/iam-realm-provisioner/`) mirrors sibling charts: `deployment.yaml`, `cronjobs.yaml` (all 6 jobs from one templated range), `hpa.yaml`, `pdb.yaml`, `service.yaml` (+ metrics port), `serviceaccount.yaml` (IRSA annotation), `servicemonitor.yaml`, `prometheusrule.yaml`, `networkpolicy.yaml` (monitoring-namespace scrape + mesh egress to Keycloak/O&M/OpenBao/AWS), `securitypolicy.yaml` (Envoy internal-route auth), `secret.yaml` (ESO `ExternalSecret` refs against an OpenBao `ClusterSecretStore`), `httproute.yaml`.
+**Helm chart** (`deploy/helm/`) mirrors sibling charts: `deployment.yaml`, `cronjobs.yaml` (all 6 jobs from one templated range), `hpa.yaml`, `pdb.yaml`, `service.yaml` (+ metrics port), `serviceaccount.yaml` (IRSA annotation), `servicemonitor.yaml`, `prometheusrule.yaml`, `networkpolicy.yaml` (monitoring-namespace scrape + mesh egress to Keycloak/O&M/OpenBao/AWS), `securitypolicy.yaml` (Envoy internal-route auth), `secret.yaml` (ESO `ExternalSecret` refs against an OpenBao `ClusterSecretStore`), `httproute.yaml`.
 
 `deploy/iam/` — pod IAM policy for **AWS resources only** (`sns:Publish` to `iam-tenant-events`; `sqs:*` on the 3 queues + DLQs; `glue:GetSchemaVersion`; `s3:PutObject`/`GetObject` on the export bucket; `kms:*` on the export key). **Secret access is not in this IAM policy** — it is governed entirely by OpenBao.
 

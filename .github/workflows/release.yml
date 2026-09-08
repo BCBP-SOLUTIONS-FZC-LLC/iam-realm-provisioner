@@ -33,7 +33,7 @@
 # Prometheus check if unset), and a pre-provisioned Kubernetes Secret named
 # iam-realm-provisioner-secrets in the target namespace (this chart's
 # secret.yaml template hard-fails `helm upgrade` via existingSecret
-# otherwise — see deploy/helm/iam-realm-provisioner/values.yaml).
+# otherwise — see deploy/helm/values.yaml).
 name: Release
 
 "on":
@@ -327,10 +327,10 @@ jobs:
       # existingSecret assumes a Kubernetes Secret named
       # iam-realm-provisioner-secrets already exists in the target
       # namespace — this chart's secret.yaml template hard-fails the render
-      # otherwise (see deploy/helm/iam-realm-provisioner/values.yaml).
+      # otherwise (see deploy/helm/values.yaml).
       - name: Deploy with Helm
         run: |
-          helm upgrade iam-realm-provisioner ./deploy/helm/iam-realm-provisioner \
+          helm upgrade iam-realm-provisioner ./deploy/helm \
             --install \
             --wait \
             --timeout=5m \

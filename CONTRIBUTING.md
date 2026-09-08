@@ -248,7 +248,7 @@ Releases are handled via the CI/CD pipeline (`.github/workflows/ci.yml`). SemVer
 1. `validate-test` (race detector + coverage gate + arch-lint + e2e), `validate-quality` (fmt/tidy/vet/lint/vuln/mod-verify/Dockerfile checks), and `build-image` (Hadolint + cache-only Docker build, `linux/amd64`, distroless static-debian12:nonroot, carrying both `iam-realm-provisioner-server` and `iam-realm-provisioner-reconciler`) all run in parallel with no dependency on each other.
 2. `build-image`'s cache then feeds `trivy` (CVE scan) and `smoke` (smoke tests against both binaries), which run in parallel with each other.
 3. On push to `main`, `push` builds+pushes the image to GHCR and signs it with Cosign keyless signing (Sigstore OIDC).
-4. The Helm chart in `deploy/helm/iam-realm-provisioner/` is applied by the platform CD pipeline — one Deployment (the server) plus 6 CronJobs (the reconciler jobs), all dispatched from the same image with a `command` override.
+4. The Helm chart in `deploy/helm/` is applied by the platform CD pipeline — one Deployment (the server) plus 6 CronJobs (the reconciler jobs), all dispatched from the same image with a `command` override.
 5. Separately, schema changes (`internal/eventschema/*.json`, `api/asyncapi.yaml`) trigger `schema-registry.yml`, which registers this service's 9 event schemas to the shared `iam-tenant-events` Glue registry (staging on push to `main`, production on release) — see `docs/runbook-schema-registry.md`.
 
 Notify the platform team on Slack if a migration or breaking env-var change requires coordinated rollout — especially anything touching the OpenBao path convention or the Keycloak admin credential.

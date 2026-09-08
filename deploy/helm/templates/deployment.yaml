@@ -68,7 +68,7 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
             - name: http
-              containerPort: {{ .Values.service.httpPort }}
+              containerPort: {{ .Values.service.port }}
               protocol: TCP
             - name: metrics
               containerPort: {{ .Values.service.metricsPort }}

@@ -4,6 +4,7 @@ description: Realm Provisioner Service for the IAM stack — the single writer t
 type: application
 version: 0.1.0
 appVersion: "1.0.0"
+kubeVersion: ">=1.28.0"
 keywords:
   - iam
   - realm-provisioner
@@ -14,3 +15,4 @@ sources:
   - https://github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner
 maintainers:
   - name: BCBP Solutions IAM Team
+    email: platform@bcbpsolutions.com

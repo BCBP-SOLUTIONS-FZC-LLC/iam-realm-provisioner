@@ -33,7 +33,7 @@ spec:
             value: {{ .path | quote }}
       backendRefs:
         - name: {{ include "iam-realm-provisioner.fullname" $ }}
-          port: {{ $.Values.service.httpPort }}
+          port: {{ $.Values.service.port }}
     {{- end }}
     {{- end }}
   {{- end }}

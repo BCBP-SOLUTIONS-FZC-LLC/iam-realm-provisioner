@@ -2,7 +2,7 @@
 # (.github/workflows/schema-registry.yml) governing this service's 9 event
 # schemas on the shared `iam-tenant-events` Glue registry (LLD §7.3.1).
 #
-# Metrics are emitted by `schema-gov metrics` (platform-schemagov v0.3.0+) on every
+# Metrics are emitted by `schema-gov metrics` (platform-schemagov v0.4+) on every
 # workflow run. For continuous time-series, configure a Prometheus Pushgateway and set
 # the PUSHGATEWAY_URL secret in your GitHub environment.
 #

@@ -230,7 +230,7 @@ access to the registry.
 
 ## Required env vars
 
-Set in `deploy/helm/iam-realm-provisioner/values.yaml` (per environment) or
+Set in `deploy/helm/values.yaml` (per environment) or
 `.env-example` (dev):
 
 | Variable | Purpose | Notes |

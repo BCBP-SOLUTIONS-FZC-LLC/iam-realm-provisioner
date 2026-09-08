@@ -1,6 +1,6 @@
 # Versioning and releases
 
-This repository is a **deployed Go microservice**, not a library other services `go get` — `pkg/requestctx` is an internal helper for this process, and the `go.mod` module path exists so this repo's own code compiles, not for import by sibling repos (contrast [`platform-events`](https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events)'s `VERSIONING.md`, which this document is modeled on but differs from for that reason). What gets versioned here is the **container image** (`ghcr.io/bcbp-solutions-fzc-llc/iam-realm-provisioner`) and the **Helm chart** (`deploy/helm/iam-realm-provisioner/`) that deploys it, plus the runtime contract Signup, Billing, Org & Membership, AuthZ Enrichment, and operators depend on. Versions are published with **Git tags** and described in [CHANGELOG.md](./CHANGELOG.md).
+This repository is a **deployed Go microservice**, not a library other services `go get` — `pkg/requestctx` is an internal helper for this process, and the `go.mod` module path exists so this repo's own code compiles, not for import by sibling repos (contrast [`platform-events`](https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events)'s `VERSIONING.md`, which this document is modeled on but differs from for that reason). What gets versioned here is the **container image** (`ghcr.io/bcbp-solutions-fzc-llc/iam-realm-provisioner`) and the **Helm chart** (`deploy/helm/`) that deploys it, plus the runtime contract Signup, Billing, Org & Membership, AuthZ Enrichment, and operators depend on. Versions are published with **Git tags** and described in [CHANGELOG.md](./CHANGELOG.md).
 
 This document follows the same SemVer / image-tag / maintainer-process layout as [`iam-authz-enrichment/VERSIONING.md`](https://github.com/BCBP-SOLUTIONS-FZC-LLC/iam-authz-enrichment/blob/main/VERSIONING.md).
 
@@ -25,7 +25,7 @@ This service has no Go package for another service to import — its "public API
 | `processed_events.consumer` ∈ `{membership, tenant, billing}` and `TenantSuspended.source` / `TenantReactivated.source` enums | Additive `provisioning_operations.operation` discriminator values (new endpoint names) |
 | Domain error **codes** in LLD §17 (`keycloak_unavailable`, `operation_in_progress`, `idp_region_portability_failed`, …) and their HTTP statuses | Exact `ErrorResponse.message` wording |
 | Required env var **names and semantics** (LLD §12, `.env-example`) | Env var **defaults** — tunable without a MAJOR bump unless the new default itself breaks a documented invariant (`cmd/server` fail-fast, CONFIG-1..6) |
-| `deploy/helm/iam-realm-provisioner/values.yaml` top-level key names and shapes consumers actually set (`image.*`, `env`, `envFromSecret`, `cronJobs`, `autoscaling`, `service.*`, replica/HPA fields) | Chart internals (`_helpers.tpl`, template structure) not exposed as a `values.yaml` key |
+| `deploy/helm/values.yaml` top-level key names and shapes consumers actually set (`image.*`, `env`, `envFromSecret`, `cronjobs`, `autoscaling`, `service.*`, replica/HPA fields) | Chart internals (`_helpers.tpl`, template structure) not exposed as a `values.yaml` key |
 | Prometheus metric **names** listed in LLD §11.2 / `internal/adapter/outbound/metrics/metrics.go` (`iam_realm_provisioner_provision_total`, `users_migrated_total`, `realm_active_gauge`, `keycloak_call_duration_seconds`, `keycloak_call_failures_total`, `admin_token_refresh_total`, `idp_validation_total`, `mfa_role_sync_total`, `realm_config_pending_gauge`, `trial_expiry_processed_total`, `trial_expiry_deferred_total`, `lapse_processed_total`, `realm_export_total`, `user_delete_total`, `session_revoke_total`, `mfa_reset_total`, `template_drift`, `rls_violations_total`, `unknown_event_acknowledged_total`, `processed_events_duplicates_total`) — dashboards and alert rules key off these exact names | Metric **label cardinality** beyond what's documented, histogram bucket boundaries; passthrough `http_*` / `events_*` / `sqs_*` names owned by `platform-gincommon` / `platform-events` |
 | OpenBao KV path `secret/data/iam/realm-provisioner/idp/<tenant_id>/<idp_alias>` and the `Idempotency-Key` header on the mutating routes that require it | In-process vs Valkey admin-token cache implementation (LLD §6.2 fallback is not a caller-visible contract) |
 | `GET /healthz` / `/readyz` (HTTP) — existence and meaning (`/readyz` checks Postgres, sys-Postgres, outbox, Keycloak token bootstrap) | `GET /asyncapi` / `/asyncapi.yaml` content shape — documentation, not a contract a caller must hold stable. Dedicated `/metrics` port number is a Helm `service.metricsPort` default, not a SemVer surface |
@@ -50,7 +50,7 @@ This service has no formal support-window policy yet, since nothing is running i
 
 ## Consume a release
 
-This service is **not** consumed via `go get` — do not add this module as a dependency of another Go service. It is consumed as a **container image** on the mesh (`/api/v1/internal`), via the **Helm chart** in `deploy/helm/iam-realm-provisioner/`. Sibling services call it over HTTP (`RealmProvisionerClient` in Org & Membership; Signup / Billing for RP-1..RP-4).
+This service is **not** consumed via `go get` — do not add this module as a dependency of another Go service. It is consumed as a **container image** on the mesh (`/api/v1/internal`), via the **Helm chart** in `deploy/helm/`. Sibling services call it over HTTP (`RealmProvisionerClient` in Org & Membership; Signup / Billing for RP-1..RP-4).
 
 ### Pull and verify the image
 
@@ -105,13 +105,13 @@ Separately, `ci.yml` pushes the image on every merge to `main` with git SHA / br
 ### Deploy via Helm
 
 ```bash
-helm upgrade iam-realm-provisioner ./deploy/helm/iam-realm-provisioner \
+helm upgrade iam-realm-provisioner ./deploy/helm \
   --install \
   --namespace iam \
   --set image.tag=v0.1.0
 ```
 
-`image.tag` (`deploy/helm/iam-realm-provisioner/values.yaml`) defaults to the chart's own `appVersion` (`Chart.yaml`) when unset. Chart `version`/`appVersion` are bumped manually alongside the Git tag (see the maintainer process below); they are **not** derived automatically from the tag by any workflow today.
+`image.tag` (`deploy/helm/values.yaml`) defaults to the chart's own `appVersion` (`Chart.yaml`) when unset. Chart `version`/`appVersion` are bumped manually alongside the Git tag (see the maintainer process below); they are **not** derived automatically from the tag by any workflow today.
 
 The chart deploys **one** `Deployment` (`/iam-realm-provisioner-server` — HTTP API + three SQS consumers + outbox runner) plus **six** `CronJob`s (`/iam-realm-provisioner-reconciler --job=<name>`), all from the same image.
 
@@ -125,7 +125,7 @@ When cutting a tagged release:
 
 2. **Update `CHANGELOG.md`:** move `[Unreleased]` entries into a new `## [X.Y.Z] - YYYY-MM-DD` section. `release.yml`'s `build` job runs `.github/scripts/verify-changelog-entry.sh`, which fails the release if this section is missing — cut it *before* tagging.
 
-3. **Bump `deploy/helm/iam-realm-provisioner/Chart.yaml`'s `version`/`appVersion`** to match `X.Y.Z`. Nothing does this automatically — a consumer who deploys the chart without setting `image.tag` explicitly gets whatever `appVersion` was last committed, so a forgotten bump here silently ships a stale image.
+3. **Bump `deploy/helm/Chart.yaml`'s `version`/`appVersion`** to match `X.Y.Z`. Nothing does this automatically — a consumer who deploys the chart without setting `image.tag` explicitly gets whatever `appVersion` was last committed, so a forgotten bump here silently ships a stale image.
 
 4. **Run `make ci` locally** to confirm everything is green before tagging:
    ```bash
@@ -178,5 +178,5 @@ Keycloak server version in production (`auth.bcbpsolutions.com`) is owned by Key
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | Layer model, ports, degradation matrix, key invariants |
 | [.github/workflows/ci.yml](./.github/workflows/ci.yml) | Current image build / Trivy / Cosign-on-`main` pipeline |
 | [.github/workflows/release.yml](./.github/workflows/release.yml) | Tag-triggered release pipeline (validate → build → docker → deploy-gate → publish) |
-| [deploy/helm/iam-realm-provisioner/Chart.yaml](./deploy/helm/iam-realm-provisioner/Chart.yaml) | Helm chart version / app version |
+| [deploy/helm/Chart.yaml](./deploy/helm/Chart.yaml) | Helm chart version / app version |
 | [go.mod](./go.mod) | Module path and minimum Go version — not a consumable package |
