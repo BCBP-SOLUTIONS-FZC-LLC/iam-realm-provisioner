@@ -109,8 +109,8 @@ func TestProvisionDirect_Happy(t *testing.T) {
 	}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "direct-1")
 	rec := doRequest(d.engine(), http.MethodPost, provisionDirectPath, headers, directBody(uuid.New()))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 	var body struct {
 		Strategy      string   `json:"strategy"`

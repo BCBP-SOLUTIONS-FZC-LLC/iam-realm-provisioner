@@ -29,6 +29,7 @@ func passingOIDCConfig() map[string]any {
 		"redirect_uri": "https://auth.bcbpsolutions.com/callback",
 		"audience":     "acme-clients",
 		"pkce_method":  "S256",
+		"client_id":    "acme-client",
 	}
 }
 
@@ -131,7 +132,7 @@ func TestConfigureIdp_WarningsUnacknowledged(t *testing.T) {
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
 	cfg := map[string]any{
 		"issuer": "https://auth.bcbpsolutions.com/realms/acme", "redirect_uri": "https://auth.bcbpsolutions.com/callback",
-		"audience": "acme", // pkce_method omitted -> WARN, unacknowledged
+		"audience": "acme", "client_id": "acme-client", // pkce_method omitted -> WARN, unacknowledged
 	}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "idp-5")
 	rec := doRequestJSON(t, d.engine(), http.MethodPut, idpPath(tenantID), headers, configureIdpBody("oidc", cfg, nil))
@@ -145,7 +146,7 @@ func TestConfigureIdp_WarningsAcknowledgedPasses(t *testing.T) {
 	d.keycloak.CreateOrUpdateIdpFn = func(ctx context.Context, realmName string, idp port.IdpKeycloakConfig) error { return nil }
 	cfg := map[string]any{
 		"issuer": "https://auth.bcbpsolutions.com/realms/acme", "redirect_uri": "https://auth.bcbpsolutions.com/callback",
-		"audience": "acme",
+		"audience": "acme", "client_id": "acme-client",
 	}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "idp-6")
 	rec := doRequestJSON(t, d.engine(), http.MethodPut, idpPath(tenantID), headers, configureIdpBody("oidc", cfg, []string{domain.CheckOIDCPKCE}))
@@ -241,6 +242,7 @@ func TestRemoveIdp_Happy(t *testing.T) {
 	d := newServiceDeps()
 	tenantID := uuid.New()
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
+	d.idpConfigs.rows[idpConfigKey{tenantID, "corp-sso"}] = &domain.IdpConfig{TenantID: tenantID, IdpAlias: "corp-sso", Protocol: domain.IdpProtocolOIDC, Config: passingOIDCConfig()}
 	d.keycloak.DeleteIdpFn = func(ctx context.Context, realmName, alias string) error { return nil }
 	rec := doRequest(d.engine(), http.MethodDelete, idpAliasPath(tenantID, "corp-sso"), sysHeaders(), "")
 	if rec.Code != http.StatusNoContent {
@@ -258,6 +260,7 @@ func TestRemoveIdp_KeycloakUnavailable(t *testing.T) {
 	d := newServiceDeps()
 	tenantID := uuid.New()
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
+	d.idpConfigs.rows[idpConfigKey{tenantID, "corp-sso"}] = &domain.IdpConfig{TenantID: tenantID, IdpAlias: "corp-sso", Protocol: domain.IdpProtocolOIDC, Config: passingOIDCConfig()}
 	d.keycloak.DeleteIdpFn = func(ctx context.Context, realmName, alias string) error {
 		return domain.NewError(domain.ErrKeycloakUnavailable, "down")
 	}
@@ -265,16 +268,23 @@ func TestRemoveIdp_KeycloakUnavailable(t *testing.T) {
 	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
 }
 
-func TestRemoveIdp_OpenBaoDeleteFails(t *testing.T) {
+// An OpenBao secret-delete failure is best-effort (logged, not returned) —
+// the Keycloak IdP and the local row are already gone by that point, so
+// blocking the whole removal on OpenBao's availability would leave the
+// caller unable to complete an otherwise-successful delete.
+func TestRemoveIdp_OpenBaoDeleteFailureIsBestEffort(t *testing.T) {
 	d := newServiceDeps()
 	tenantID := uuid.New()
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
+	d.idpConfigs.rows[idpConfigKey{tenantID, "corp-sso"}] = &domain.IdpConfig{TenantID: tenantID, IdpAlias: "corp-sso", Protocol: domain.IdpProtocolOIDC, Config: passingOIDCConfig()}
 	d.keycloak.DeleteIdpFn = func(ctx context.Context, realmName, alias string) error { return nil }
 	d.openbao.DeleteIdpSecretFn = func(ctx context.Context, tid uuid.UUID, alias string) error {
 		return domain.NewError(domain.ErrObjectStoreUnavailable, "down")
 	}
 	rec := doRequest(d.engine(), http.MethodDelete, idpAliasPath(tenantID, "corp-sso"), sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusServiceUnavailable, "object_store_unavailable")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 (OpenBao failure must not block removal), got %d: %s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestRemoveIdp_InvalidTenantIDInPath(t *testing.T) {
@@ -299,7 +309,7 @@ func TestPortabilityAudit_Happy(t *testing.T) {
 	tenantPass, tenantWarn, tenantFail := uuid.New(), uuid.New(), uuid.New()
 	d.idpConfigs.rows[idpConfigKey{tenantPass, "a"}] = &domain.IdpConfig{TenantID: tenantPass, IdpAlias: "a", Protocol: domain.IdpProtocolOIDC, Config: passingOIDCConfig()}
 	d.idpConfigs.rows[idpConfigKey{tenantWarn, "b"}] = &domain.IdpConfig{TenantID: tenantWarn, IdpAlias: "b", Protocol: domain.IdpProtocolOIDC, Config: map[string]any{
-		"issuer": "https://auth.bcbpsolutions.com/realms/x", "redirect_uri": "https://auth.bcbpsolutions.com/callback", "audience": "x",
+		"issuer": "https://auth.bcbpsolutions.com/realms/x", "redirect_uri": "https://auth.bcbpsolutions.com/callback", "audience": "x", "client_id": "x-client",
 	}}
 	d.idpConfigs.rows[idpConfigKey{tenantFail, "c"}] = &domain.IdpConfig{TenantID: tenantFail, IdpAlias: "c", Protocol: domain.IdpProtocolOIDC, Config: map[string]any{
 		"issuer": "https://us-east-1.auth.bcbpsolutions.com/realms/x",

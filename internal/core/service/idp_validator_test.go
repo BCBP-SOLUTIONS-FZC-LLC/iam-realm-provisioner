@@ -67,6 +67,7 @@ func TestValidateIdpConfig_OIDC_MissingPKCE_Warns(t *testing.T) {
 		"issuer":       "https://login.example.com/oauth2",
 		"redirect_uri": "https://auth.bcbpsolutions.com/realms/acme/broker/idp/endpoint",
 		"audience":     "acme-client",
+		"client_id":    "acme-client-id",
 	}, nil)
 	assert.Equal(t, domain.ValidationOutcomeWarningsOnly, result.Outcome)
 	assert.Contains(t, result.Warned, domain.CheckOIDCPKCE)
@@ -93,6 +94,7 @@ func validBaselineOIDCConfig() map[string]any {
 		"redirect_uri": "https://auth.bcbpsolutions.com/realms/acme/broker/idp/endpoint",
 		"audience":     "acme-client",
 		"pkce_method":  "S256",
+		"client_id":    "acme-client-id",
 	}
 }
 

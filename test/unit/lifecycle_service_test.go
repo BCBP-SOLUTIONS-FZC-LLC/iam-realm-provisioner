@@ -274,18 +274,24 @@ func TestReactivate_SharedStrategy_EmitsTrialReactivated(t *testing.T) {
 	assert.Equal(t, newEnds.Format(time.RFC3339), payload.NewTrialEndsAt)
 }
 
-// Shared-strategy reactivation with no newTrialEndsAt supplied still emits
-// TrialReactivated, with an empty NewTrialEndsAt field.
+// Shared-strategy reactivation with no newTrialEndsAt supplied defaults it
+// to +30 days from now rather than leaving it empty — an empty
+// NewTrialEndsAt previously failed TrialReactivated's event-schema
+// validation (§9.2).
 func TestReactivate_SharedStrategy_NoNewTrialEndsAt(t *testing.T) {
 	svc, kc, realms, _, pub := newLifecycleTestServiceWithIdem()
 	tenantID := uuid.New()
 	realms.rows[tenantID] = &domain.TenantRealm{TenantID: tenantID, RealmName: "trial", Strategy: domain.RealmStrategyShared, Status: domain.RealmStatusSuspended}
 	kc.EnableUsersInRealmFn = func(ctx context.Context, realmName string, tid uuid.UUID) error { return nil }
 
+	before := time.Now().UTC()
 	_, err := svc.Reactivate(context.Background(), "react-5", tenantID, domain.ReactivationSourceBilling, "", nil)
 	require.NoError(t, err)
 	payload := pub.events[0].Data.(domain.TrialReactivatedPayload)
-	assert.Equal(t, "", payload.NewTrialEndsAt)
+	require.NotEmpty(t, payload.NewTrialEndsAt)
+	got, err := time.Parse(time.RFC3339, payload.NewTrialEndsAt)
+	require.NoError(t, err, "must be a well-formed RFC3339 timestamp")
+	assert.WithinDuration(t, before.AddDate(0, 0, 30), got, 5*time.Second)
 }
 
 // Keycloak-effect-first: a Keycloak failure on reactivate leaves the local
@@ -332,7 +338,8 @@ func TestExpireTrial_TenantNotFound(t *testing.T) {
 	assert.Equal(t, domain.OpStatusFailed, idem.rows["exp-nf"].Status)
 }
 
-// ExpireTrial only applies to shared-strategy tenants.
+// ExpireTrial only applies to shared-strategy tenants — a dedicated
+// (already-converted) tenant has nothing to expire.
 func TestExpireTrial_RejectsNonSharedStrategy(t *testing.T) {
 	svc, _, realms, idem, _ := newLifecycleTestServiceWithIdem()
 	tenantID := uuid.New()
@@ -342,7 +349,7 @@ func TestExpireTrial_RejectsNonSharedStrategy(t *testing.T) {
 	require.Error(t, err)
 	de, ok := err.(*domain.Error)
 	require.True(t, ok)
-	assert.Equal(t, domain.ErrInvalidRequest, de.Code)
+	assert.Equal(t, domain.ErrRealmAlreadyDedicated, de.Code)
 	assert.Equal(t, domain.OpStatusFailed, idem.rows["exp-2"].Status)
 }
 

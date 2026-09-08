@@ -43,6 +43,13 @@ components:
   apispec:
     in: api
 
+  # Generated Swagger/OpenAPI spec (`make swag`, docs/swagger/{docs.go,
+  # swagger.json,swagger.yaml}) — blank-imported by cmd/server/main.go to
+  # self-register the spec at init, served at GET /swagger/*any. Same shape
+  # as apispec above: a self-contained generated asset, no internal deps.
+  swaggerdocs:
+    in: docs/swagger
+
   # Cross-cutting Prometheus counters/histograms (iam_realm_provisioner_*,
   # §11.2). Imported by both inbound handlers and outbound adapters.
   observability:
@@ -125,6 +132,9 @@ deps:
   apispec:
     anyVendorDeps: true
 
+  swaggerdocs:
+    anyVendorDeps: true
+
   observability:
     anyVendorDeps: true
 
@@ -176,6 +186,7 @@ deps:
       - requestctx
       - eventschema
       - apispec
+      - swaggerdocs
       - observability
       - keycloak
       - postgres

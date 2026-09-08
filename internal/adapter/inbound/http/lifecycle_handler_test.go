@@ -202,13 +202,13 @@ func TestExpireTrial_Happy(t *testing.T) {
 	}
 }
 
-func TestExpireTrial_DedicatedStrategy_InvalidRequest(t *testing.T) {
+func TestExpireTrial_DedicatedStrategy_RealmAlreadyDedicated(t *testing.T) {
 	d := newServiceDeps()
 	tenantID := uuid.New()
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "expire-2")
 	rec := doRequest(d.engine(), http.MethodPost, expireTrialPath(tenantID), headers, "")
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusConflict, "realm_already_dedicated")
 }
 
 func TestExpireTrial_TenantRealmNotFound(t *testing.T) {

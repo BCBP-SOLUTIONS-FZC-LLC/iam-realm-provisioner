@@ -6,7 +6,7 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 )
 
-// The §11.6 checklist has 13 checks total; domain.CriticalChecks and domain.WarnChecks must
+// The §11.6 checklist has 16 checks total; domain.CriticalChecks and domain.WarnChecks must
 // partition the checks that actually gate a request (check_3 is informational
 // only and appears in neither list), and must never overlap.
 func TestCriticalAndWarnChecks_NoOverlap(t *testing.T) {
@@ -24,9 +24,11 @@ func TestCriticalAndWarnChecks_NoOverlap(t *testing.T) {
 
 func TestCriticalChecks_ContainsExpectedIDs(t *testing.T) {
 	want := []string{
+		domain.CheckConfigSafe,
 		domain.CheckSSOURLRegion, domain.CheckSLOURLRegion, domain.CheckCustomerSigningCert,
 		domain.CheckACSURLRegion, domain.CheckSLOResponseRegion, domain.CheckEntityIDRegion,
 		domain.CheckOIDCIssuerRegion, domain.CheckOIDCRedirectRegion, domain.CheckOIDCAudienceRegion,
+		domain.CheckOIDCClientID, domain.CheckOIDCIssuerHTTPS,
 	}
 	if len(domain.CriticalChecks) != len(want) {
 		t.Fatalf("len(domain.CriticalChecks) = %d, want %d", len(domain.CriticalChecks), len(want))
@@ -54,11 +56,12 @@ func TestWarnChecks_ContainsExpectedIDs(t *testing.T) {
 
 func TestCheckIDConstants_AreDistinct(t *testing.T) {
 	ids := []string{
+		domain.CheckConfigSafe,
 		domain.CheckSSOURLRegion, domain.CheckSLOURLRegion, domain.CheckCustomerSigningCert,
 		domain.CheckACSURLRegion, domain.CheckSLOResponseRegion, domain.CheckEntityIDRegion,
 		domain.CheckNameIDFormat, domain.CheckAttributeMapperURN, domain.CheckSignatureAlgorithm,
 		domain.CheckOIDCIssuerRegion, domain.CheckOIDCRedirectRegion, domain.CheckOIDCAudienceRegion,
-		domain.CheckOIDCPKCE,
+		domain.CheckOIDCPKCE, domain.CheckOIDCClientID, domain.CheckOIDCIssuerHTTPS,
 	}
 	seen := make(map[string]bool, len(ids))
 	for _, id := range ids {
@@ -67,7 +70,7 @@ func TestCheckIDConstants_AreDistinct(t *testing.T) {
 		}
 		seen[id] = true
 	}
-	if len(seen) != 13 {
-		t.Errorf("got %d distinct check IDs, want 13 (§11.6 checklist size)", len(seen))
+	if len(seen) != 16 {
+		t.Errorf("got %d distinct check IDs, want 16 (§11.6 checklist size)", len(seen))
 	}
 }

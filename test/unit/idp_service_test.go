@@ -398,6 +398,9 @@ func TestRemoveIdp_Success(t *testing.T) {
 	svc, kc, realms, idpConfigs, _, openbao, _ := newIdpTestService()
 	tenantID := uuid.New()
 	seedDedicatedRealm(realms, tenantID, nil)
+	idpConfigs.FindByAliasFn = func(ctx context.Context, tid uuid.UUID, alias string) (*domain.IdpConfig, error) {
+		return &domain.IdpConfig{TenantID: tid, IdpAlias: alias}, nil
+	}
 	var order []string
 	kc.DeleteIdpFn = func(ctx context.Context, realmName, alias string) error {
 		order = append(order, "keycloak")
@@ -476,7 +479,7 @@ func TestPortabilityAudit_CountsAndFailingTenants(t *testing.T) {
 			}},
 			{TenantID: warnTenant, Protocol: domain.IdpProtocolOIDC, Config: map[string]any{
 				"issuer": "https://login.example.com/oauth2", "redirect_uri": "https://auth.bcbpsolutions.com/realms/acme/broker/idp/endpoint",
-				"audience": "acme-client",
+				"audience": "acme-client", "client_id": "acme-client-id",
 			}},
 			{TenantID: failTenant, Protocol: domain.IdpProtocolOIDC, Config: map[string]any{
 				"issuer": "https://login.example.com/us-east-1/oauth2", "redirect_uri": "https://auth.bcbpsolutions.com/realms/acme/broker/idp/endpoint",
