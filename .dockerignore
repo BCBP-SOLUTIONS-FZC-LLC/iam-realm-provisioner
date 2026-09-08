@@ -8,4 +8,5 @@ coverage.*
 .env-example
 test
 docs
+!docs/swagger/
 *.md
