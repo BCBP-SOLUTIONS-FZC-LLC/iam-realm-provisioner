@@ -1,0 +1,1509 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "description": "Realm Provisioner microservice — sole writer to the Keycloak Admin API and system of record for tenant identity lifecycle (trial → active → suspended → offboarded).\n\n**Tenant isolation:** All resource access is strictly scoped by x-tenant-id. Cross-tenant access is never permitted.\n**Idempotency:** Every mutating endpoint requires an `Idempotency-Key` header. Resubmitting a completed key replays the stored result without re-executing.",
+        "title": "IAM Realm Provisioner API",
+        "contact": {
+            "name": "BCBP Solutions",
+            "email": "sharmila.dayalan@bcbpsolutions.com"
+        },
+        "license": {
+            "name": "Proprietary"
+        },
+        "version": "1.0"
+    },
+    "host": "localhost:8080",
+    "basePath": "/api/v1/internal",
+    "paths": {
+        "/audit/idp-region-portability": {
+            "post": {
+                "security": [
+                    {
+                        "SystemRole": []
+                    }
+                ],
+                "description": "Operator-only. Runs the §11.6 Region-Agnostic IdP Configuration Checklist across every tenant with an active IdP configuration and returns a per-tenant validation report. Not tenant-scoped — scans the full estate. Used for pre-migration and compliance audits.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "IdP"
+                ],
+                "summary": "RP-13 — Whole-estate IdP region-portability audit (operator-only)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/service.PortabilityAuditResult"
+                        }
+                    },
+                    "403": {
+                        "description": "insufficient_role (operator role required)",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/tenants/provision-direct": {
+            "post": {
+                "security": [
+                    {
+                        "SystemRole": []
+                    },
+                    {
+                        "IdempotencyKey": []
+                    }
+                ],
+                "description": "Creates a dedicated realm for a direct-paid tenant using least-loaded shard placement. Keycloak-effect-first. Idempotent on Idempotency-Key reuse.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Provisioning"
+                ],
+                "summary": "RP-2 — Provision dedicated paid realm",
+                "parameters": [
+                    {
+                        "description": "Direct provisioning payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/http.provisionDirectRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/service.ProvisionDirectResult"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid_request OR missing_idempotency_key",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "operation_in_progress OR realm_already_exists",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/tenants/provision-trial": {
+            "post": {
+                "security": [
+                    {
+                        "SystemRole": []
+                    },
+                    {
+                        "IdempotencyKey": []
+                    }
+                ],
+                "description": "Creates a shared trial realm for a new tenant and seeds the admin user. Keycloak-effect-first: realm is created in Keycloak before the local row is committed. Idempotent on Idempotency-Key reuse: replays the stored result without re-provisioning.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Provisioning"
+                ],
+                "summary": "RP-1 — Provision trial realm",
+                "parameters": [
+                    {
+                        "description": "Trial provisioning payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/http.provisionTrialRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/service.ProvisionTrialResult"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid_request OR missing_idempotency_key",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "operation_in_progress OR realm_already_exists",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/tenants/{id}/convert": {
+            "post": {
+                "security": [
+                    {
+                        "SystemRole": []
+                    },
+                    {
+                        "TenantID": []
+                    },
+                    {
+                        "IdempotencyKey": []
+                    }
+                ],
+                "description": "Migrates users from the shared trial realm to a new dedicated realm, preserving Keycloak sub UUIDs. TOTP credentials are copied; WebAuthn requires re-enrolment. Idempotent on Idempotency-Key reuse.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Provisioning"
+                ],
+                "summary": "RP-3 — Convert trial tenant to dedicated realm",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Tenant UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Conversion payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/http.convertRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/service.ConvertResult"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid_request OR missing_idempotency_key",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "realm_not_found",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "operation_in_progress OR invalid_realm_state",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/tenants/{id}/expire-trial": {
+            "post": {
+                "security": [
+                    {
+                        "SystemRole": []
+                    },
+                    {
+                        "TenantID": []
+                    },
+                    {
+                        "IdempotencyKey": []
+                    }
+                ],
+                "description": "Transitions a trial tenant to expired/disabled status after the grace period. Called by the RP-C1 reconciler CronJob; not intended for direct operator use. Disables the Keycloak realm and records the expiry timestamp. Idempotent on Idempotency-Key reuse.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Lifecycle"
+                ],
+                "summary": "RP-12 — Expire trial tenant",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Tenant UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/service.ExpireTrialResult"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid_request OR missing_idempotency_key",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "realm_not_found",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "operation_in_progress OR invalid_realm_state",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/tenants/{id}/idp": {
+            "put": {
+                "security": [
+                    {
+                        "SystemRole": []
+                    },
+                    {
+                        "TenantID": []
+                    },
+                    {
+                        "IdempotencyKey": []
+                    }
+                ],
+                "description": "Creates or replaces the tenant's identity provider in Keycloak. The IdP client secret is stored exclusively in OpenBao — never in Postgres. Runs the §11.6 region-portability validation gate before writing: CRITICAL failures return 409; unacknowledged WARN checks return 422 until the caller supplies the required ack codes in the `ack` field. Idempotent on Idempotency-Key reuse.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "IdP"
+                ],
+                "summary": "RP-6 — Configure tenant IdP (SAML/OIDC)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Tenant UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "IdP configuration payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/http.configureIdpRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/service.ConfigureIdpResult"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid_request OR missing_idempotency_key OR invalid_idp_protocol",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "realm_not_found",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "operation_in_progress OR idp_region_portability_failed",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "422": {
+                        "description": "idp_warnings_unacknowledged",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/tenants/{id}/idp/{alias}": {
+            "delete": {
+                "security": [
+                    {
+                        "SystemRole": []
+                    },
+                    {
+                        "TenantID": []
+                    }
+                ],
+                "description": "Deletes the specified identity provider from the tenant's Keycloak realm and removes the client secret from OpenBao. Idempotent: deleting an already-absent IdP returns 204.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "IdP"
+                ],
+                "summary": "RP-7 — Remove tenant IdP",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Tenant UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "IdP alias",
+                        "name": "alias",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "invalid_request",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "realm_not_found",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/tenants/{id}/reactivate": {
+            "post": {
+                "security": [
+                    {
+                        "SystemRole": []
+                    },
+                    {
+                        "TenantID": []
+                    },
+                    {
+                        "IdempotencyKey": []
+                    }
+                ],
+                "description": "Reverses both a billing-lapse suspension and an operator (RP-14) suspension from one endpoint. Re-enables the Keycloak realm and clears the suspended status. Body is optional; reason is informational only. Idempotent on Idempotency-Key reuse.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Lifecycle"
+                ],
+                "summary": "RP-10 — Reactivate suspended tenant realm",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Tenant UUID",
+                        "name": "id",
+                        "in": "path"
+                    },
+                    {
+                        "description": "Optional reactivation reason",
+                        "name": "request",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/http.reactivateRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/service.ReactivateResult"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid_request OR missing_idempotency_key",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "realm_not_found",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "operation_in_progress OR invalid_realm_state",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/tenants/{id}/realm": {
+            "get": {
+                "security": [
+                    {
+                        "SystemRole": []
+                    },
+                    {
+                        "TenantID": []
+                    }
+                ],
+                "description": "Returns the current realm record for the tenant: realm name, strategy (shared/dedicated), lifecycle status, Keycloak shard, and key timestamps. Read-only; no side effects.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Lifecycle"
+                ],
+                "summary": "RP-11 — Get realm info",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Tenant UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/service.GetRealmResult"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid_request",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "realm_not_found",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/tenants/{id}/realm-config": {
+            "patch": {
+                "security": [
+                    {
+                        "SystemRole": []
+                    },
+                    {
+                        "TenantID": []
+                    }
+                ],
+                "description": "Applies a single realm configuration key/value to the tenant's Keycloak realm. Local-intent-first (RP-INV-6): if Keycloak is transiently unreachable the desired value is persisted as `pending` in realm_config_reconciliations and the caller receives 202 Accepted with `applied:false, reconciling:true`. RP-C4 converges it later. A 200 with `applied:true` means the change is live in Keycloak.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "RealmConfig"
+                ],
+                "summary": "RP-8 — Apply realm configuration setting",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Tenant UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Realm config setting",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/http.applyRealmConfigRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Applied immediately",
+                        "schema": {
+                            "$ref": "#/definitions/service.ApplyRealmConfigResult"
+                        }
+                    },
+                    "202": {
+                        "description": "Queued for reconciliation (applied:false)",
+                        "schema": {
+                            "$ref": "#/definitions/service.ApplyRealmConfigResult"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid_request",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "realm_not_found",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/tenants/{id}/revert-conversion": {
+            "post": {
+                "security": [
+                    {
+                        "SystemRole": []
+                    },
+                    {
+                        "TenantID": []
+                    },
+                    {
+                        "IdempotencyKey": []
+                    }
+                ],
+                "description": "Rolls back a conversion within the allowed revert window (7 days trial grace, 14 days post-conversion). Migrates users back to the shared trial realm and deletes the dedicated realm. Body is optional; reason is informational only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Provisioning"
+                ],
+                "summary": "RP-4 — Revert trial-to-dedicated conversion",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Tenant UUID",
+                        "name": "id",
+                        "in": "path"
+                    },
+                    {
+                        "description": "Optional revert reason",
+                        "name": "request",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/http.revertConversionRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/service.RevertConversionResult"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid_request OR missing_idempotency_key",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "realm_not_found",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "operation_in_progress OR revert_window_expired",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/tenants/{id}/suspend": {
+            "post": {
+                "security": [
+                    {
+                        "SystemRole": []
+                    },
+                    {
+                        "TenantID": []
+                    },
+                    {
+                        "IdempotencyKey": []
+                    }
+                ],
+                "description": "Operator-only. Immediately disables the tenant's Keycloak realm and transitions status to suspended. Reason is required for the audit trail. Reversed by RP-10 Reactivate. Idempotent on Idempotency-Key reuse.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Lifecycle"
+                ],
+                "summary": "RP-14 — Emergency operator suspension",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Tenant UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Suspension reason (required)",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/http.suspendRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/service.SuspendResult"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid_request OR missing_idempotency_key",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "insufficient_role (operator role required)",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "realm_not_found",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "operation_in_progress OR invalid_realm_state",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/tenants/{id}/users": {
+            "post": {
+                "security": [
+                    {
+                        "SystemRole": []
+                    },
+                    {
+                        "TenantID": []
+                    },
+                    {
+                        "IdempotencyKey": []
+                    }
+                ],
+                "description": "Creates a Keycloak user in the tenant's realm for an accepted invitation. Sets required_actions (e.g. VERIFY_EMAIL, UPDATE_PASSWORD). Idempotent on Idempotency-Key reuse.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Users"
+                ],
+                "summary": "RP-5 — Create invited user in tenant realm",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Tenant UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Invited user payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/http.createInvitedUserRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/service.CreateInvitedUserResult"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid_request OR missing_idempotency_key",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "realm_not_found",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "operation_in_progress OR user_already_exists",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/tenants/{id}/users/{keycloak_user_id}": {
+            "delete": {
+                "security": [
+                    {
+                        "SystemRole": []
+                    },
+                    {
+                        "TenantID": []
+                    }
+                ],
+                "description": "Permanently deletes the Keycloak user from the tenant's realm. Idempotent: deleting an already-absent user returns 204. Part of the GDPR erasure flow — called by Org \u0026 Membership on membership deletion.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Users"
+                ],
+                "summary": "RP-15 — Delete user from tenant realm",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Tenant UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Keycloak user UUID",
+                        "name": "keycloak_user_id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "invalid_request",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "realm_not_found",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/tenants/{id}/users/{keycloak_user_id}/mfa-reset": {
+            "post": {
+                "security": [
+                    {
+                        "SystemRole": []
+                    },
+                    {
+                        "TenantID": []
+                    }
+                ],
+                "description": "Deletes all TOTP and WebAuthn credentials for the specified Keycloak user and sets UPDATE_PASSWORD as a required action. Fail-closed: returns error if Keycloak is unreachable (no reconciler). Idempotent — re-deleting already-absent credentials succeeds.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "MFA"
+                ],
+                "summary": "RP-9 — Reset user MFA credentials",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Tenant UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Keycloak user UUID",
+                        "name": "keycloak_user_id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "invalid_request",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "realm_not_found OR user_not_found",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/tenants/{id}/users/{keycloak_user_id}/revoke-sessions": {
+            "post": {
+                "security": [
+                    {
+                        "SystemRole": []
+                    },
+                    {
+                        "TenantID": []
+                    }
+                ],
+                "description": "Logs out the Keycloak user from all active sessions across all clients. Idempotent: revoking an already-session-free user returns 204. Called on membership suspension or offboarding.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Users"
+                ],
+                "summary": "RP-16 — Revoke all active sessions for a user",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Tenant UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Keycloak user UUID",
+                        "name": "keycloak_user_id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "invalid_request",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "realm_not_found OR user_not_found",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "http.ErrorResponse": {
+            "type": "object",
+            "properties": {
+                "details": {
+                    "type": "object",
+                    "additionalProperties": {}
+                },
+                "error": {
+                    "type": "string"
+                },
+                "request_id": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "integer"
+                },
+                "trace_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "http.applyRealmConfigRequest": {
+            "type": "object",
+            "required": [
+                "setting_key"
+            ],
+            "properties": {
+                "desired_value": {},
+                "setting_key": {
+                    "type": "string"
+                }
+            }
+        },
+        "http.configureIdpRequest": {
+            "type": "object",
+            "required": [
+                "display_name",
+                "idp_alias",
+                "protocol"
+            ],
+            "properties": {
+                "ack": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "config": {
+                    "type": "object",
+                    "additionalProperties": {}
+                },
+                "display_name": {
+                    "type": "string"
+                },
+                "idp_alias": {
+                    "type": "string"
+                },
+                "protocol": {
+                    "type": "string"
+                },
+                "secret": {
+                    "type": "string"
+                }
+            }
+        },
+        "http.convertRequest": {
+            "type": "object",
+            "required": [
+                "plan"
+            ],
+            "properties": {
+                "billing_subscription_id": {
+                    "type": "string"
+                },
+                "payment_method_id": {
+                    "description": "ignored — Billing/PCI domain, §5.2.1",
+                    "type": "string"
+                },
+                "plan": {
+                    "type": "string"
+                }
+            }
+        },
+        "http.createInvitedUserRequest": {
+            "type": "object",
+            "required": [
+                "email",
+                "full_name"
+            ],
+            "properties": {
+                "email": {
+                    "type": "string"
+                },
+                "full_name": {
+                    "type": "string"
+                },
+                "required_actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "http.provisionDirectRequest": {
+            "type": "object",
+            "required": [
+                "admin_email",
+                "admin_name",
+                "plan",
+                "tenant_id",
+                "tenant_name",
+                "tenant_slug"
+            ],
+            "properties": {
+                "admin_email": {
+                    "type": "string"
+                },
+                "admin_name": {
+                    "type": "string"
+                },
+                "billing_subscription_id": {
+                    "type": "string"
+                },
+                "hashed_password_seed": {
+                    "type": "string"
+                },
+                "plan": {
+                    "type": "string"
+                },
+                "tenant_id": {
+                    "type": "string"
+                },
+                "tenant_name": {
+                    "type": "string"
+                },
+                "tenant_slug": {
+                    "type": "string"
+                }
+            }
+        },
+        "http.provisionTrialRequest": {
+            "type": "object",
+            "required": [
+                "admin_email",
+                "admin_name",
+                "plan",
+                "tenant_id",
+                "tenant_name",
+                "tenant_slug"
+            ],
+            "properties": {
+                "admin_email": {
+                    "type": "string"
+                },
+                "admin_name": {
+                    "type": "string"
+                },
+                "hashed_password_seed": {
+                    "type": "string"
+                },
+                "plan": {
+                    "type": "string"
+                },
+                "tenant_id": {
+                    "type": "string"
+                },
+                "tenant_name": {
+                    "type": "string"
+                },
+                "tenant_slug": {
+                    "type": "string"
+                }
+            }
+        },
+        "http.reactivateRequest": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string"
+                }
+            }
+        },
+        "http.revertConversionRequest": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string"
+                }
+            }
+        },
+        "http.suspendRequest": {
+            "type": "object",
+            "required": [
+                "reason"
+            ],
+            "properties": {
+                "reason": {
+                    "type": "string"
+                }
+            }
+        },
+        "service.ApplyRealmConfigResult": {
+            "type": "object",
+            "properties": {
+                "applied": {
+                    "type": "boolean"
+                },
+                "reconciling": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "service.ConfigureIdpResult": {
+            "type": "object",
+            "properties": {
+                "idp_alias": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                }
+            }
+        },
+        "service.ConvertResult": {
+            "type": "object",
+            "properties": {
+                "keycloak_shard": {
+                    "type": "string"
+                },
+                "oidc_clients": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "realm": {
+                    "type": "string"
+                },
+                "shared_sessions_terminated": {
+                    "type": "boolean"
+                },
+                "strategy": {
+                    "type": "string"
+                },
+                "tenant_id": {
+                    "type": "string"
+                },
+                "users_migrated": {
+                    "type": "integer"
+                },
+                "webauthn_reenroll_required": {
+                    "type": "integer"
+                }
+            }
+        },
+        "service.CreateInvitedUserResult": {
+            "type": "object",
+            "properties": {
+                "keycloak_user_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "service.ExpireTrialResult": {
+            "type": "object",
+            "properties": {
+                "grace_ends_at": {
+                    "type": "string"
+                },
+                "tenant_id": {
+                    "type": "string"
+                },
+                "trial_ends_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "service.GetRealmResult": {
+            "type": "object",
+            "properties": {
+                "keycloak_shard": {
+                    "type": "string"
+                },
+                "realm_name": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "strategy": {
+                    "type": "string"
+                },
+                "tenant_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "service.PortabilityAuditResult": {
+            "type": "object",
+            "properties": {
+                "failing": {
+                    "type": "integer"
+                },
+                "failing_tenants": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "passing": {
+                    "type": "integer"
+                },
+                "total_idp_configs": {
+                    "type": "integer"
+                },
+                "total_tenants": {
+                    "type": "integer"
+                },
+                "warnings_only": {
+                    "type": "integer"
+                }
+            }
+        },
+        "service.ProvisionDirectResult": {
+            "type": "object",
+            "properties": {
+                "keycloak_shard": {
+                    "type": "string"
+                },
+                "oidc_clients": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "realm": {
+                    "type": "string"
+                },
+                "strategy": {
+                    "type": "string"
+                },
+                "tenant_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "service.ProvisionTrialResult": {
+            "type": "object",
+            "properties": {
+                "email_verification_sent": {
+                    "type": "boolean"
+                },
+                "keycloak_user_id": {
+                    "type": "string"
+                },
+                "realm": {
+                    "type": "string"
+                },
+                "strategy": {
+                    "type": "string"
+                },
+                "tenant_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "service.ReactivateResult": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string"
+                },
+                "tenant_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "service.RevertConversionResult": {
+            "type": "object",
+            "properties": {
+                "realm": {
+                    "type": "string"
+                },
+                "strategy": {
+                    "type": "string"
+                },
+                "tenant_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "service.SuspendResult": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string"
+                },
+                "tenant_id": {
+                    "type": "string"
+                }
+            }
+        }
+    },
+    "securityDefinitions": {
+        "IdempotencyKey": {
+            "description": "Caller-supplied UUID v4. Required on all mutating endpoints. Reusing a key for a completed operation replays the stored result.",
+            "type": "apiKey",
+            "name": "Idempotency-Key",
+            "in": "header"
+        },
+        "SystemRole": {
+            "description": "Must contain \"iam-system\". Injected by the API gateway / mesh; never set by callers directly.",
+            "type": "apiKey",
+            "name": "x-tenant-roles",
+            "in": "header"
+        },
+        "TenantID": {
+            "description": "Tenant UUID injected by the API gateway.",
+            "type": "apiKey",
+            "name": "x-tenant-id",
+            "in": "header"
+        }
+    }
+}

@@ -1,0 +1,1012 @@
+basePath: /api/v1/internal
+definitions:
+  http.ErrorResponse:
+    properties:
+      details:
+        additionalProperties: {}
+        type: object
+      error:
+        type: string
+      request_id:
+        type: string
+      status:
+        type: integer
+      trace_id:
+        type: string
+    type: object
+  http.applyRealmConfigRequest:
+    properties:
+      desired_value: {}
+      setting_key:
+        type: string
+    required:
+    - setting_key
+    type: object
+  http.configureIdpRequest:
+    properties:
+      ack:
+        items:
+          type: string
+        type: array
+      config:
+        additionalProperties: {}
+        type: object
+      display_name:
+        type: string
+      idp_alias:
+        type: string
+      protocol:
+        type: string
+      secret:
+        type: string
+    required:
+    - display_name
+    - idp_alias
+    - protocol
+    type: object
+  http.convertRequest:
+    properties:
+      billing_subscription_id:
+        type: string
+      payment_method_id:
+        description: ignored — Billing/PCI domain, §5.2.1
+        type: string
+      plan:
+        type: string
+    required:
+    - plan
+    type: object
+  http.createInvitedUserRequest:
+    properties:
+      email:
+        type: string
+      full_name:
+        type: string
+      required_actions:
+        items:
+          type: string
+        type: array
+    required:
+    - email
+    - full_name
+    type: object
+  http.provisionDirectRequest:
+    properties:
+      admin_email:
+        type: string
+      admin_name:
+        type: string
+      billing_subscription_id:
+        type: string
+      hashed_password_seed:
+        type: string
+      plan:
+        type: string
+      tenant_id:
+        type: string
+      tenant_name:
+        type: string
+      tenant_slug:
+        type: string
+    required:
+    - admin_email
+    - admin_name
+    - plan
+    - tenant_id
+    - tenant_name
+    - tenant_slug
+    type: object
+  http.provisionTrialRequest:
+    properties:
+      admin_email:
+        type: string
+      admin_name:
+        type: string
+      hashed_password_seed:
+        type: string
+      plan:
+        type: string
+      tenant_id:
+        type: string
+      tenant_name:
+        type: string
+      tenant_slug:
+        type: string
+    required:
+    - admin_email
+    - admin_name
+    - plan
+    - tenant_id
+    - tenant_name
+    - tenant_slug
+    type: object
+  http.reactivateRequest:
+    properties:
+      reason:
+        type: string
+    type: object
+  http.revertConversionRequest:
+    properties:
+      reason:
+        type: string
+    type: object
+  http.suspendRequest:
+    properties:
+      reason:
+        type: string
+    required:
+    - reason
+    type: object
+  service.ApplyRealmConfigResult:
+    properties:
+      applied:
+        type: boolean
+      reconciling:
+        type: boolean
+    type: object
+  service.ConfigureIdpResult:
+    properties:
+      idp_alias:
+        type: string
+      status:
+        type: string
+    type: object
+  service.ConvertResult:
+    properties:
+      keycloak_shard:
+        type: string
+      oidc_clients:
+        items:
+          type: string
+        type: array
+      realm:
+        type: string
+      shared_sessions_terminated:
+        type: boolean
+      strategy:
+        type: string
+      tenant_id:
+        type: string
+      users_migrated:
+        type: integer
+      webauthn_reenroll_required:
+        type: integer
+    type: object
+  service.CreateInvitedUserResult:
+    properties:
+      keycloak_user_id:
+        type: string
+    type: object
+  service.ExpireTrialResult:
+    properties:
+      grace_ends_at:
+        type: string
+      tenant_id:
+        type: string
+      trial_ends_at:
+        type: string
+    type: object
+  service.GetRealmResult:
+    properties:
+      keycloak_shard:
+        type: string
+      realm_name:
+        type: string
+      status:
+        type: string
+      strategy:
+        type: string
+      tenant_id:
+        type: string
+    type: object
+  service.PortabilityAuditResult:
+    properties:
+      failing:
+        type: integer
+      failing_tenants:
+        items:
+          type: string
+        type: array
+      passing:
+        type: integer
+      total_idp_configs:
+        type: integer
+      total_tenants:
+        type: integer
+      warnings_only:
+        type: integer
+    type: object
+  service.ProvisionDirectResult:
+    properties:
+      keycloak_shard:
+        type: string
+      oidc_clients:
+        items:
+          type: string
+        type: array
+      realm:
+        type: string
+      strategy:
+        type: string
+      tenant_id:
+        type: string
+    type: object
+  service.ProvisionTrialResult:
+    properties:
+      email_verification_sent:
+        type: boolean
+      keycloak_user_id:
+        type: string
+      realm:
+        type: string
+      strategy:
+        type: string
+      tenant_id:
+        type: string
+    type: object
+  service.ReactivateResult:
+    properties:
+      status:
+        type: string
+      tenant_id:
+        type: string
+    type: object
+  service.RevertConversionResult:
+    properties:
+      realm:
+        type: string
+      strategy:
+        type: string
+      tenant_id:
+        type: string
+    type: object
+  service.SuspendResult:
+    properties:
+      status:
+        type: string
+      tenant_id:
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact:
+    email: sharmila.dayalan@bcbpsolutions.com
+    name: BCBP Solutions
+  description: |-
+    Realm Provisioner microservice — sole writer to the Keycloak Admin API and system of record for tenant identity lifecycle (trial → active → suspended → offboarded).
+
+    **Tenant isolation:** All resource access is strictly scoped by x-tenant-id. Cross-tenant access is never permitted.
+    **Idempotency:** Every mutating endpoint requires an `Idempotency-Key` header. Resubmitting a completed key replays the stored result without re-executing.
+  license:
+    name: Proprietary
+  title: IAM Realm Provisioner API
+  version: "1.0"
+paths:
+  /audit/idp-region-portability:
+    post:
+      description: Operator-only. Runs the §11.6 Region-Agnostic IdP Configuration
+        Checklist across every tenant with an active IdP configuration and returns
+        a per-tenant validation report. Not tenant-scoped — scans the full estate.
+        Used for pre-migration and compliance audits.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/service.PortabilityAuditResult'
+        "403":
+          description: insufficient_role (operator role required)
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - SystemRole: []
+      summary: RP-13 — Whole-estate IdP region-portability audit (operator-only)
+      tags:
+      - IdP
+  /tenants/{id}/convert:
+    post:
+      consumes:
+      - application/json
+      description: Migrates users from the shared trial realm to a new dedicated realm,
+        preserving Keycloak sub UUIDs. TOTP credentials are copied; WebAuthn requires
+        re-enrolment. Idempotent on Idempotency-Key reuse.
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Conversion payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/http.convertRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/service.ConvertResult'
+        "400":
+          description: invalid_request OR missing_idempotency_key
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "404":
+          description: realm_not_found
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "409":
+          description: operation_in_progress OR invalid_realm_state
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - SystemRole: []
+      - TenantID: []
+      - IdempotencyKey: []
+      summary: RP-3 — Convert trial tenant to dedicated realm
+      tags:
+      - Provisioning
+  /tenants/{id}/expire-trial:
+    post:
+      description: Transitions a trial tenant to expired/disabled status after the
+        grace period. Called by the RP-C1 reconciler CronJob; not intended for direct
+        operator use. Disables the Keycloak realm and records the expiry timestamp.
+        Idempotent on Idempotency-Key reuse.
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/service.ExpireTrialResult'
+        "400":
+          description: invalid_request OR missing_idempotency_key
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "404":
+          description: realm_not_found
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "409":
+          description: operation_in_progress OR invalid_realm_state
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - SystemRole: []
+      - TenantID: []
+      - IdempotencyKey: []
+      summary: RP-12 — Expire trial tenant
+      tags:
+      - Lifecycle
+  /tenants/{id}/idp:
+    put:
+      consumes:
+      - application/json
+      description: 'Creates or replaces the tenant''s identity provider in Keycloak.
+        The IdP client secret is stored exclusively in OpenBao — never in Postgres.
+        Runs the §11.6 region-portability validation gate before writing: CRITICAL
+        failures return 409; unacknowledged WARN checks return 422 until the caller
+        supplies the required ack codes in the `ack` field. Idempotent on Idempotency-Key
+        reuse.'
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: IdP configuration payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/http.configureIdpRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/service.ConfigureIdpResult'
+        "400":
+          description: invalid_request OR missing_idempotency_key OR invalid_idp_protocol
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "404":
+          description: realm_not_found
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "409":
+          description: operation_in_progress OR idp_region_portability_failed
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "422":
+          description: idp_warnings_unacknowledged
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - SystemRole: []
+      - TenantID: []
+      - IdempotencyKey: []
+      summary: RP-6 — Configure tenant IdP (SAML/OIDC)
+      tags:
+      - IdP
+  /tenants/{id}/idp/{alias}:
+    delete:
+      description: 'Deletes the specified identity provider from the tenant''s Keycloak
+        realm and removes the client secret from OpenBao. Idempotent: deleting an
+        already-absent IdP returns 204.'
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: IdP alias
+        in: path
+        name: alias
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: invalid_request
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "404":
+          description: realm_not_found
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - SystemRole: []
+      - TenantID: []
+      summary: RP-7 — Remove tenant IdP
+      tags:
+      - IdP
+  /tenants/{id}/reactivate:
+    post:
+      consumes:
+      - application/json
+      description: Reverses both a billing-lapse suspension and an operator (RP-14)
+        suspension from one endpoint. Re-enables the Keycloak realm and clears the
+        suspended status. Body is optional; reason is informational only. Idempotent
+        on Idempotency-Key reuse.
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        type: string
+      - description: Optional reactivation reason
+        in: body
+        name: request
+        schema:
+          $ref: '#/definitions/http.reactivateRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/service.ReactivateResult'
+        "400":
+          description: invalid_request OR missing_idempotency_key
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "404":
+          description: realm_not_found
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "409":
+          description: operation_in_progress OR invalid_realm_state
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - SystemRole: []
+      - TenantID: []
+      - IdempotencyKey: []
+      summary: RP-10 — Reactivate suspended tenant realm
+      tags:
+      - Lifecycle
+  /tenants/{id}/realm:
+    get:
+      description: 'Returns the current realm record for the tenant: realm name, strategy
+        (shared/dedicated), lifecycle status, Keycloak shard, and key timestamps.
+        Read-only; no side effects.'
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/service.GetRealmResult'
+        "400":
+          description: invalid_request
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "404":
+          description: realm_not_found
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - SystemRole: []
+      - TenantID: []
+      summary: RP-11 — Get realm info
+      tags:
+      - Lifecycle
+  /tenants/{id}/realm-config:
+    patch:
+      consumes:
+      - application/json
+      description: 'Applies a single realm configuration key/value to the tenant''s
+        Keycloak realm. Local-intent-first (RP-INV-6): if Keycloak is transiently
+        unreachable the desired value is persisted as `pending` in realm_config_reconciliations
+        and the caller receives 202 Accepted with `applied:false, reconciling:true`.
+        RP-C4 converges it later. A 200 with `applied:true` means the change is live
+        in Keycloak.'
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Realm config setting
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/http.applyRealmConfigRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Applied immediately
+          schema:
+            $ref: '#/definitions/service.ApplyRealmConfigResult'
+        "202":
+          description: Queued for reconciliation (applied:false)
+          schema:
+            $ref: '#/definitions/service.ApplyRealmConfigResult'
+        "400":
+          description: invalid_request
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "404":
+          description: realm_not_found
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - SystemRole: []
+      - TenantID: []
+      summary: RP-8 — Apply realm configuration setting
+      tags:
+      - RealmConfig
+  /tenants/{id}/revert-conversion:
+    post:
+      consumes:
+      - application/json
+      description: Rolls back a conversion within the allowed revert window (7 days
+        trial grace, 14 days post-conversion). Migrates users back to the shared trial
+        realm and deletes the dedicated realm. Body is optional; reason is informational
+        only.
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        type: string
+      - description: Optional revert reason
+        in: body
+        name: request
+        schema:
+          $ref: '#/definitions/http.revertConversionRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/service.RevertConversionResult'
+        "400":
+          description: invalid_request OR missing_idempotency_key
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "404":
+          description: realm_not_found
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "409":
+          description: operation_in_progress OR revert_window_expired
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - SystemRole: []
+      - TenantID: []
+      - IdempotencyKey: []
+      summary: RP-4 — Revert trial-to-dedicated conversion
+      tags:
+      - Provisioning
+  /tenants/{id}/suspend:
+    post:
+      consumes:
+      - application/json
+      description: Operator-only. Immediately disables the tenant's Keycloak realm
+        and transitions status to suspended. Reason is required for the audit trail.
+        Reversed by RP-10 Reactivate. Idempotent on Idempotency-Key reuse.
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Suspension reason (required)
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/http.suspendRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/service.SuspendResult'
+        "400":
+          description: invalid_request OR missing_idempotency_key
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "403":
+          description: insufficient_role (operator role required)
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "404":
+          description: realm_not_found
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "409":
+          description: operation_in_progress OR invalid_realm_state
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - SystemRole: []
+      - TenantID: []
+      - IdempotencyKey: []
+      summary: RP-14 — Emergency operator suspension
+      tags:
+      - Lifecycle
+  /tenants/{id}/users:
+    post:
+      consumes:
+      - application/json
+      description: Creates a Keycloak user in the tenant's realm for an accepted invitation.
+        Sets required_actions (e.g. VERIFY_EMAIL, UPDATE_PASSWORD). Idempotent on
+        Idempotency-Key reuse.
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Invited user payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/http.createInvitedUserRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/service.CreateInvitedUserResult'
+        "400":
+          description: invalid_request OR missing_idempotency_key
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "404":
+          description: realm_not_found
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "409":
+          description: operation_in_progress OR user_already_exists
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - SystemRole: []
+      - TenantID: []
+      - IdempotencyKey: []
+      summary: RP-5 — Create invited user in tenant realm
+      tags:
+      - Users
+  /tenants/{id}/users/{keycloak_user_id}:
+    delete:
+      description: 'Permanently deletes the Keycloak user from the tenant''s realm.
+        Idempotent: deleting an already-absent user returns 204. Part of the GDPR
+        erasure flow — called by Org & Membership on membership deletion.'
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Keycloak user UUID
+        format: uuid
+        in: path
+        name: keycloak_user_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: invalid_request
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "404":
+          description: realm_not_found
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - SystemRole: []
+      - TenantID: []
+      summary: RP-15 — Delete user from tenant realm
+      tags:
+      - Users
+  /tenants/{id}/users/{keycloak_user_id}/mfa-reset:
+    post:
+      description: 'Deletes all TOTP and WebAuthn credentials for the specified Keycloak
+        user and sets UPDATE_PASSWORD as a required action. Fail-closed: returns error
+        if Keycloak is unreachable (no reconciler). Idempotent — re-deleting already-absent
+        credentials succeeds.'
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Keycloak user UUID
+        format: uuid
+        in: path
+        name: keycloak_user_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: invalid_request
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "404":
+          description: realm_not_found OR user_not_found
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - SystemRole: []
+      - TenantID: []
+      summary: RP-9 — Reset user MFA credentials
+      tags:
+      - MFA
+  /tenants/{id}/users/{keycloak_user_id}/revoke-sessions:
+    post:
+      description: 'Logs out the Keycloak user from all active sessions across all
+        clients. Idempotent: revoking an already-session-free user returns 204. Called
+        on membership suspension or offboarding.'
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Keycloak user UUID
+        format: uuid
+        in: path
+        name: keycloak_user_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: invalid_request
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "404":
+          description: realm_not_found OR user_not_found
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - SystemRole: []
+      - TenantID: []
+      summary: RP-16 — Revoke all active sessions for a user
+      tags:
+      - Users
+  /tenants/provision-direct:
+    post:
+      consumes:
+      - application/json
+      description: Creates a dedicated realm for a direct-paid tenant using least-loaded
+        shard placement. Keycloak-effect-first. Idempotent on Idempotency-Key reuse.
+      parameters:
+      - description: Direct provisioning payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/http.provisionDirectRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/service.ProvisionDirectResult'
+        "400":
+          description: invalid_request OR missing_idempotency_key
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "409":
+          description: operation_in_progress OR realm_already_exists
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - SystemRole: []
+      - IdempotencyKey: []
+      summary: RP-2 — Provision dedicated paid realm
+      tags:
+      - Provisioning
+  /tenants/provision-trial:
+    post:
+      consumes:
+      - application/json
+      description: 'Creates a shared trial realm for a new tenant and seeds the admin
+        user. Keycloak-effect-first: realm is created in Keycloak before the local
+        row is committed. Idempotent on Idempotency-Key reuse: replays the stored
+        result without re-provisioning.'
+      parameters:
+      - description: Trial provisioning payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/http.provisionTrialRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/service.ProvisionTrialResult'
+        "400":
+          description: invalid_request OR missing_idempotency_key
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "409":
+          description: operation_in_progress OR realm_already_exists
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - SystemRole: []
+      - IdempotencyKey: []
+      summary: RP-1 — Provision trial realm
+      tags:
+      - Provisioning
+securityDefinitions:
+  IdempotencyKey:
+    description: Caller-supplied UUID v4. Required on all mutating endpoints. Reusing
+      a key for a completed operation replays the stored result.
+    in: header
+    name: Idempotency-Key
+    type: apiKey
+  SystemRole:
+    description: Must contain "iam-system". Injected by the API gateway / mesh; never
+      set by callers directly.
+    in: header
+    name: x-tenant-roles
+    type: apiKey
+  TenantID:
+    description: Tenant UUID injected by the API gateway.
+    in: header
+    name: x-tenant-id
+    type: apiKey
+swagger: "2.0"
