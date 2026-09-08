@@ -100,7 +100,7 @@ WHERE status = 'in_progress' AND updated_at < now() - interval '1 hour';
 ```bash
 curl -X POST https://<host>/api/v1/internal/audit/idp-region-portability
 ```
-This is RP-13. The report must show zero failing tenants (or documented waivers for any WARN-level acknowledgement) before proceeding with the cutover. If `failing_tenants` is non-empty, resolve each tenant's IdP configuration against the §11.6 checklist (CRITICAL checks 1-2/4-6/10-12 block outright; WARN checks 7-9/13 require a recorded admin acknowledgement) before re-running the audit.
+This is RP-13. The report must show zero failing tenants (or documented waivers for any WARN-level acknowledgement) before proceeding with the cutover. If `failing_tenants` is non-empty, resolve each tenant's IdP configuration against the §11.6 checklist (CRITICAL checks 0-2/4-6/10-12/14-15 block outright; WARN checks 7-9/13 require a recorded admin acknowledgement) before re-running the audit.
 
 Note: as of this build, an empty `failing_tenants` array serializes as JSON `null` rather than `[]` — a cosmetic gap, not a correctness issue; treat `null` and `[]` as equivalent ("no failing tenants") when reading the report.
 

@@ -46,7 +46,7 @@ Every mutating endpoint above marked "required" enforces `RequireIdempotencyKey`
 | `idp_config_not_found` | 404 | |
 | `keycloak_user_not_found` | 404 | Additive — internal-only signal from `FindUserByEmail`, absorbed before reaching a caller (§9.2) |
 | `idp_requires_dedicated_realm` | 409 | RP-6 against a `shared`-strategy tenant |
-| `realm_already_dedicated` | 409 | RP-3 Convert on an already-dedicated tenant |
+| `realm_already_dedicated` | 409 | RP-3 Convert on an already-dedicated tenant; RP-12 ExpireTrial on a non-shared-strategy tenant (already converted, nothing to expire) |
 | `revert_window_expired` | 409 | RP-4 past the reversal window |
 | `tenant_offboarded` | 409 | Any mutation against a terminal (offboarded) tenant |
 | `operation_in_progress` | 409 | Idempotency-Key replay against a non-`succeeded` row |

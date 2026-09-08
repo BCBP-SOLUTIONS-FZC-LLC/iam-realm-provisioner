@@ -4,7 +4,7 @@ The Realm Provisioner Service — the **single writer to the Keycloak Admin API*
 
 **Repository:** `github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`
 **Module:** Go 1.26.6 · private module · deployed as two binaries from one image (`cmd/server`, `cmd/reconciler`)
-**Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.3 Approved** — names frozen at v1.0 sign-off (`docs/lld/iam-lld-realm-provisioner-service.md`; condensed reference at `docs/lld/IMPLEMENTATION_REFERENCE.md`)
+**Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.4 Approved** — names frozen at v1.0 sign-off (`docs/lld/iam-lld-realm-provisioner-service.md`; condensed reference at `docs/lld/IMPLEMENTATION_REFERENCE.md`)
 
 ---
 
@@ -151,7 +151,7 @@ iam-realm-provisioner/
 │   ├── asyncapi.yaml                  # AsyncAPI 3.0 — iam-tenant-events (9 published) + 3 inbound SQS channels
 │   └── embed.go                       # //go:embed asyncapi.yaml — served from the compiled binary, no source tree in the image
 ├── deploy/                            # Helm chart, AWS IAM policy, OpenBao policy, Prometheus alerts, Keycloak realm template
-├── docs/lld/                          # Frozen LLD v1.3 + condensed IMPLEMENTATION_REFERENCE.md
+├── docs/lld/                          # Frozen LLD v1.4 + condensed IMPLEMENTATION_REFERENCE.md
 ├── docs/runbook-schema-registry.md    # Schema-governance operator runbook (shared iam-tenant-events registry)
 ├── .githooks/pre-commit               # tidy + fmt-check + vet + lint; installed via `make setup`/`make install-hooks`
 ├── VERSIONING.md                      # SemVer policy + maintainer release process
@@ -388,6 +388,8 @@ make run         # start the server on :8080 (metrics on :9090)
 | `make extract-schemas` | Derive `internal/eventschema/*.json` from `api/asyncapi.yaml` |
 | `make schema-validate` | Validate AsyncAPI + this service's 9 event schemas — 8 passes, no AWS credentials needed |
 | `make schema-diff CURRENT=… PROPOSED=…` | Show compatibility diff between two schema files |
+| `make swag` | Generate Swagger docs into `docs/swagger/` from handler annotations — re-run and commit whenever they change |
+| `make swag-check` | Intended to fail if Swagger regeneration would change `docs/swagger/`; its backing script doesn't exist yet (known gap) |
 | `make schema-register` | Register this service's 9 event schemas to the shared Glue registry (requires `GLUE_REGISTRY_TENANT_NAME`) |
 | `make schema-verify` | Pre-deploy check that all 9 of this service's schemas exist in the target registry |
 | `make schema-prune` | Dry-run: list orphaned Glue schemas (add `EXECUTE=true` to delete — see `docs/runbook-schema-registry.md` for the shared-registry caveat with `iam-org-membership`) |
@@ -433,16 +435,18 @@ curl -i -X POST http://localhost:8080/api/v1/internal/tenants/$TENANT_ID/suspend
 
 ### Developer tools
 
-This service has **no Swagger UI** — the REST contract is the LLD endpoint catalogue plus `router.go`, not a generated OpenAPI spec. The only documentation surface is the AsyncAPI event-contract viewer (`registerDocsRoutes`, `internal/adapter/inbound/http/router.go`):
+Two documentation surfaces, both wired in `registerDocsRoutes` (`internal/adapter/inbound/http/router.go`): a **Swagger UI** for the mesh-internal REST contract (RP-1..RP-16), and the **AsyncAPI event-contract viewer** — an interactive dashboard (searchable, dark/light theme, deep-linkable schema fields) ported from `iam-org-membership`'s equivalent viewer.
 
 | Handler | Route | Gating | Purpose |
 |---|---|---|---|
-| `AsyncAPIHandler` | `GET /asyncapi` | `DocsConfig.active()` | Server-side HTML renderer for `api/asyncapi.yaml` |
+| `swaggerFiles`/`ginSwagger` | `GET /swagger/*any` | `DocsConfig.active()` | `swag`-generated OpenAPI 2.0 UI for all 16 RP-1..RP-16 handlers (custom-themed via `SwaggerThemeHandler`/`SwaggerInitializerHandler`) |
+| `AsyncAPIHandler` | `GET /asyncapi` | `DocsConfig.active()` | Interactive server-side HTML dashboard for `api/asyncapi.yaml` |
 | `AsyncAPIYAMLHandler` | `GET /asyncapi.yaml` | `DocsConfig.active()` | Serves the raw embedded spec bytes |
 
-`DocsConfig.active()` is `Environment != "production" || Enabled` — always mounted outside production; in production it's opt-in via `DOCS_ENABLED` and, if `DOCS_AUTH_TOKEN` is set, additionally bearer-token-gated. Both routes always carry `X-Frame-Options: DENY` and `X-Content-Type-Options: nosniff`. The spec is compiled into the binary via `//go:embed asyncapi.yaml` (`api/embed.go`), not read from disk — the distroless runtime image never copies the source tree in.
+`DocsConfig.active()` is `Environment != "production" || Enabled` — always mounted outside production; in production it's opt-in via `DOCS_ENABLED` and, if `DOCS_AUTH_TOKEN` is set, additionally bearer-token-gated. All three routes always carry `X-Frame-Options: DENY` and `X-Content-Type-Options: nosniff`. The AsyncAPI spec is compiled into the binary via `//go:embed asyncapi.yaml` (`api/embed.go`), not read from disk — the distroless runtime image never copies the source tree in. The Swagger spec is generated from `@Summary`/`@Router` annotations on every handler by `make swag` (global API metadata in `cmd/server/swagger_info.go`) into `docs/swagger/{docs.go,swagger.json,swagger.yaml}`, which **are** checked in — re-run `make swag` and commit the diff whenever a handler's annotations change. `make swag-check` is intended to fail CI on a stale/unregenerated `docs/swagger/` (mirroring `make schema-verify`'s spirit for the AsyncAPI side), but its backing script (`.github/scripts/check-swagger-stale.sh`) doesn't exist yet — a known gap, not yet enforced anywhere.
 
 ```bash
+open http://localhost:8080/swagger/index.html
 open http://localhost:8080/asyncapi
 ```
 
@@ -856,7 +860,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, extending the serv
 | [`.claude/request-flows.md`](.claude/request-flows.md) | Keycloak-effect-first discipline, compensating teardown, every RP-*/RP-C* flow, idempotency mechanics, GDPR/data-lifecycle |
 | [`.claude/operations.md`](.claude/operations.md) | Security, observability, configuration, CI/CD, testing, GDPR, integration points, open items |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Detailed architecture narrative with Mermaid diagrams — layer model, write flow, RLS/GUC flow, threat model |
-| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD, v1.3 Approved — §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
+| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD, v1.4 Approved — §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
 | [`docs/runbook.md`](docs/runbook.md) | Full operator procedures for the headline incident scenarios |
 
 ---

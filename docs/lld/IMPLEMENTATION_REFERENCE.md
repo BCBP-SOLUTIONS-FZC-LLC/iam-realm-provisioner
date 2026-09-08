@@ -1,6 +1,6 @@
-# Realm Provisioner — Implementation Reference (condensed from the frozen LLD v1.3)
+# Realm Provisioner — Implementation Reference (condensed from the frozen LLD v1.4)
 
-Source: `docs/lld/iam-lld-realm-provisioner-service.md` (v1.3, Approved, 2026-09-02). This file is a
+Source: `docs/lld/iam-lld-realm-provisioner-service.md` (v1.4, Approved, 2026-09-09). This file is a
 working extraction for implementation — where it and the LLD ever disagree, **the LLD (and its §25)
 governs**; re-read the source section cited before finalizing anything security- or name-sensitive.
 
@@ -262,11 +262,11 @@ from gateway identity headers via `pkg/requestctx`, never the body.
 - Body: `{idp_alias, protocol, config(non-secret), secret, ack[]}`.
 - `idp_alias` must match `^[a-zA-Z0-9_-]{1,64}$` (checked before the idempotency ledger is even touched) — no dot permitted at all, since the OpenBao KV path is built by interpolating this value directly and a `.`/`..` sequence could otherwise resolve outside the tenant-scoped prefix.
 - Ledgered against `Idempotency-Key` like every other mutating endpoint (§9.2): `idempotency.Begin` → replay a `succeeded` row's stored result, else proceed.
-- Flow (§8.4): load `tenant_realms` (must be `strategy='dedicated'` — federation needs dedicated realm) else `409 idp_requires_dedicated_realm` → run §11.6 validator → CRITICAL failure: `INSERT keycloak_idp_config_validations(outcome='failing')`, `400 idp_region_portability_failed {details.failed_checks[], details.validator_version}` → WARN(s) unacknowledged: `INSERT validations(outcome='warnings_only')`, `422 idp_warnings_unacknowledged {details.warnings[]}` → pass or WARN-acked: write secret to OpenBao KV (`secret/data/iam/realm-provisioner/idp/<tenant_id>/<alias>`) → create/update IdP + attribute mappers on Keycloak — on failure here, if the secret was just written **and** this alias had no prior config (confirmed via a lookup before the write), best-effort delete the now-orphaned OpenBao secret; an update to an already-configured alias never deletes on failure, since the pre-existing Keycloak IdP is unaffected by the failed update → `RunInTx{ UPSERT keycloak_idp_configs(status='active', NO secret column), INSERT validations(outcome), op=succeeded }`.
+- Flow (§8.4): load `tenant_realms` — `offboarded` → `409 tenant_offboarded`; not `strategy='dedicated'` — federation needs dedicated realm — → `409 idp_requires_dedicated_realm` → run §11.6 validator → CRITICAL failure: `INSERT keycloak_idp_config_validations(outcome='failing')`, `400 idp_region_portability_failed {details.failed_checks[], details.validator_version}` → WARN(s) unacknowledged: `INSERT validations(outcome='warnings_only')`, `422 idp_warnings_unacknowledged {details.warnings[]}` → pass or WARN-acked: write secret to OpenBao KV (`secret/data/iam/realm-provisioner/idp/<tenant_id>/<alias>`) → create/update IdP + attribute mappers on Keycloak — on failure here, if the secret was just written **and** this alias had no prior config (confirmed via a lookup before the write), best-effort delete the now-orphaned OpenBao secret; an update to an already-configured alias never deletes on failure, since the pre-existing Keycloak IdP is unaffected by the failed update → `RunInTx{ UPSERT keycloak_idp_configs(status='active', NO secret column), INSERT validations(outcome), op=succeeded }`.
 - Response 200: `{idp_alias, status:'active'}`. Emits audit event `TenantIdpConfigChanged` (Audit only — NOT one of the 9 tenant-lifecycle events, no `iam.tenant.events` publish for IdP changes).
 
 ### RP-7 `DELETE /tenants/:id/idp/:alias` — Org & Membership
-- Idempotent (not idempotency-key-guarded per catalogue "yes" not "key" — treat as safe-to-repeat delete). Deletes Keycloak IdP + OpenBao KV secret + `keycloak_idp_configs` row.
+- Idempotent (not idempotency-key-guarded per catalogue "yes" not "key" — treat as safe-to-repeat delete). Checks the tenant realm and the `keycloak_idp_configs` row exist (`404 tenant_realm_not_found` / `404 idp_config_not_found`) *before* touching Keycloak. Deletes Keycloak IdP → OpenBao KV secret (best-effort — a delete failure is logged, never returned) → `keycloak_idp_configs` row.
 
 ### RP-8 `PATCH /tenants/:id/realm-config` — Org & Membership (`PatchRealmConfig`)
 - Body: `{setting_key, desired_value}`. RP-INV-6: synchronous, never evented.
@@ -280,14 +280,15 @@ from gateway identity headers via `pkg/requestctx`, never the body.
 - Metric: `iam_realm_provisioner_mfa_reset_total{result}`.
 
 ### RP-10 `POST /tenants/:id/reactivate` — Billing / operator / reconciler
-- Two shapes (§8.11): **trial** reactivation (within 30-day grace) — re-enable disabled trial user, emit `TrialReactivated{tenant_id, new_trial_ends_at}`. **paid** reactivation — re-enable dedicated realm if it was `suspended` (whether from billing lapse OR operator RP-14 suspend — both are reversible via this one endpoint), emit `TenantReactivated{tenant_id, realm, source, reason}` with `source=operator` (this is the RP-produced side; billing's own reactivation of `source=billing` arrives via the `billing-realm-q` consumer, not this endpoint).
-- Rejected if `offboarded` (terminal, RP-INV-5).
+- Two shapes (§8.11): **trial** reactivation (within 30-day grace) — re-enable disabled trial user, emit `TrialReactivated{tenant_id, new_trial_ends_at}`; a nil `new_trial_ends_at` from the caller defaults to **+30 days from now** rather than being sent empty. **paid** reactivation — re-enable dedicated realm if it was `suspended` (whether from billing lapse OR operator RP-14 suspend — both are reversible via this one endpoint), emit `TenantReactivated{tenant_id, realm, source, reason}` with `source=operator` (this is the RP-produced side; billing's own reactivation of `source=billing` arrives via the `billing-realm-q` consumer, not this endpoint).
+- Rejected if `offboarded` (terminal, RP-INV-5) or still `provisioning` (`409 tenant_offboarded`, "tenant is still provisioning — cannot reactivate what was never active" — never reached `active`, nothing to revert).
 - Idempotent: reactivating an already-active tenant → `200` no-op, replay stored result.
 
 ### RP-11 `GET /tenants/:id/realm` — O&M / operator (read-only)
-- Reads `tenant_realms` row: `{tenant_id, realm_name, strategy, keycloak_shard, status, ...}`. No side effects.
+- Reads `tenant_realms` row: `{tenant_id, realm_name, strategy, keycloak_shard, status, record_version}`. No side effects.
 
 ### RP-12 `POST /tenants/:id/expire-trial` — reconciler (RP-C1) only
+- Rejected if not shared-strategy (`409 realm_already_dedicated` — already converted), `offboarded` (`409 tenant_offboarded`), or `suspended` (`409 tenant_offboarded`, "tenant is suspended" — a billing-lapse/operator suspension takes precedence).
 - Idempotent per-tenant trial-expiry effect: mark `tenant_realms.disabled_at`, disable the tenant's shared-realm users, emit `TrialExpired{tenant_id, trial_ends_at, grace_ends_at}`. The RP-C1 cron calls this once per expired row (fan-out from cron to per-tenant endpoint call, not inline cron logic — keeps the effect idempotent+replayable via the same ledger).
 
 ### RP-13 `POST /audit/idp-region-portability` — operator only (read-only, whole-estate scan)
@@ -512,14 +513,17 @@ trusted mesh peers (internal-route guard + mTLS); `x-tenant-id` header scopes + 
 also requires platform-admin role.
 
 **§11.6 Region-Agnostic IdP Configuration Checklist (§8.5):**
-- **CRITICAL (block, `400`):** (1-2) SAML SSO/SLO URL hostnames carry no AWS-region substring; (3)
+- **CRITICAL (block, `400`), 12 total:** (0) no config value contains an HTML/XML injection sequence;
+  (1-2) SAML SSO/SLO URL hostnames carry no AWS-region substring; (3)
   customer-provided signing cert; (4-6) ACS/SLO/EntityID point at region-neutral
   `auth.bcbpsolutions.com/realms/<tenant>/...`; (10) OIDC issuer/discovery region-neutral; (11) OIDC
-  redirect URIs region-neutral; (12) OIDC audience matches region-neutral client ID.
-- **WARN (allow w/ recorded ack, `200`):** (7) SAML NameID format `transient`; (8) custom
+  redirect URIs region-neutral; (12) OIDC audience matches region-neutral client ID; (14) OIDC `client_id`
+  is present; (15) OIDC `issuer` is a non-empty, valid HTTPS URL.
+- **WARN (allow w/ recorded ack, `200`), 4 total:** (7) SAML NameID format `transient`; (8) custom
   attribute-mapper URN region substrings; (9) SAML signature algorithm ≥ RSA-SHA256; (13) OIDC PKCE
   `S256`. Ack recorded with admin's `user_id` + timestamp in `keycloak_idp_config_validations.acknowledgements`.
-- Check IDs referenced elsewhere as `check_1_sso_url_region`, `check_4_acs_url_region`, etc.
+- Check IDs referenced elsewhere as `check_0_config_safe`, `check_1_sso_url_region`, `check_4_acs_url_region`,
+  `check_14_oidc_client_id`, `check_15_oidc_issuer_https`, etc. — 16 checks total (0-15).
 - Portability audit (RP-13, §8.5.3): operator-only, runs full checklist against every tenant's live
   IdP configs; report `{total_tenants, total_idp_configs, passing, warnings_only, failing, failing_tenants[]}`.
 

@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with the **Realm Provisioner Service** (`iam-realm-provisioner`), a Go microservice in the IAM subsystem (Tender Management SaaS platform). Refines the IAM HLD; LLD v1.3 Approved (`docs/lld/iam-lld-realm-provisioner-service.md`, condensed reference at `docs/lld/IMPLEMENTATION_REFERENCE.md`), owner database `provisioner` on shared RDS PostgreSQL. Where LLD and HLD disagree, HLD is authoritative.
+This file provides guidance to Claude Code when working with the **Realm Provisioner Service** (`iam-realm-provisioner`), a Go microservice in the IAM subsystem (Tender Management SaaS platform). Refines the IAM HLD; LLD v1.4 Approved (`docs/lld/iam-lld-realm-provisioner-service.md`, condensed reference at `docs/lld/IMPLEMENTATION_REFERENCE.md`), owner database `provisioner` on shared RDS PostgreSQL. Where LLD and HLD disagree, HLD is authoritative.
 
 ## What This Repo Is
 
@@ -57,6 +57,8 @@ make schema-validate    # platform-schemagov 8-pass AsyncAPI + event-schema vali
 make schema-register    # Register this service's 9 event schemas to the shared iam-tenant-events Glue registry
 make schema-verify      # Pre-deploy check: fail if any of the 9 schemas is missing from Glue (requires AWS)
 make schema-prune       # Dry-run: list orphaned Glue schemas (requires AWS; excludes O&M's TenantCreated/TrialStarted)
+make swag               # Generate Swagger docs (docs/swagger/) from handler annotations — re-run + commit on change
+make swag-check         # Intended to fail CI on stale docs/swagger/; backing script doesn't exist yet (known gap)
 ```
 
 **Testcontainers note:** Postgres, Keycloak, and OpenBao integration tests spin up real containers via `testcontainers-go`. Each `test/postgres/*.go` test calls `t.Parallel()` and spins its own container, capped at `TEST_POSTGRES_PARALLEL` (default 4) rather than `GOMAXPROCS`-wide. Each `test/integration/*.go` Keycloak test also calls `t.Parallel()` and spins its own container — a JVM/Quarkus image, far heavier than Postgres — capped tighter at `TEST_INTEGRATION_PARALLEL` (default 2); left uncapped this defaults to `GOMAXPROCS` and OOM-kills containers on dev/CI boxes with <16GB of Docker memory. The OpenBao tests in the same package (`openbao_test.go`) share that cap and additionally drive a real Kubernetes-auth login by stubbing the TokenReview endpoint the container calls out to (no real Kubernetes cluster is available). Docker must be running for anything beyond `test-unit`.
@@ -115,7 +117,7 @@ Detailed reference docs in `.claude/`:
 - [`request-flows.md`](request-flows.md) — Keycloak-effect-first discipline, compensating teardown, every RP-*/RP-C* flow, idempotency mechanics
 - [`operations.md`](operations.md) — security, observability, configuration, CI/CD, testing, GDPR, integration points, open items
 
-Full LLD (v1.3 Approved, `docs/lld/iam-lld-realm-provisioner-service.md`) and its condensed reference (`docs/lld/IMPLEMENTATION_REFERENCE.md`, §1 frozen name inventory through §24 operational runbooks), checked into this repo.
+Full LLD (v1.4 Approved, `docs/lld/iam-lld-realm-provisioner-service.md`) and its condensed reference (`docs/lld/IMPLEMENTATION_REFERENCE.md`, §1 frozen name inventory through §24 operational runbooks), checked into this repo.
 
 Supplementary docs in the repo root:
 - **`README.md`** — mental model, API/event overview, onboarding

@@ -2,7 +2,7 @@
 
 This document describes the internal structure, dependency rules, and runtime data flows of `iam-realm-provisioner`.
 
-`iam-realm-provisioner` is a **private Go service** (`github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.6) deployed as a containerised microservice (HPA 2–4 replicas), refining **IAM HLD v1.42 §5.2** (LLD v1.3, `docs/lld/iam-lld-realm-provisioner-service.md`, condensed at `docs/lld/IMPLEMENTATION_REFERENCE.md`; where LLD and HLD disagree, HLD is authoritative). It is the **single writer to the Keycloak Admin API** across the entire IAM subsystem (RP-INV-1, HLD §4.2/§5.2) and the system of record for the small amount of local state — realm identity, IdP config, reconciliation and idempotency ledgers — needed to make that writing safe, idempotent, and replayable. Org & Membership owns the application-side `tenants` row; this service owns Keycloak-side realm reality and its `tenant_realms` mirror (RP-D6) — neither writes the other's store. It ships as **two binaries from one image**: `cmd/server` (the mesh-only `/api/v1/internal` API, RP-1..RP-16, three inbound SQS consumers, and the transactional outbox runner) and `cmd/reconciler` (a single binary dispatched by `--job=<name>`, covering RP-C1..RP-C4 plus two operational prune jobs, each its own Kubernetes CronJob). The service sits on **neither of the platform's two hot paths** (HLD §4.3) — work is bursty, coarse-grained tenant-lifecycle operations, where correctness, auditability, and idempotency matter more than latency.
+`iam-realm-provisioner` is a **private Go service** (`github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.6) deployed as a containerised microservice (HPA 2–4 replicas), refining **IAM HLD v1.42 §5.2** (LLD v1.4, `docs/lld/iam-lld-realm-provisioner-service.md`, condensed at `docs/lld/IMPLEMENTATION_REFERENCE.md`; where LLD and HLD disagree, HLD is authoritative). It is the **single writer to the Keycloak Admin API** across the entire IAM subsystem (RP-INV-1, HLD §4.2/§5.2) and the system of record for the small amount of local state — realm identity, IdP config, reconciliation and idempotency ledgers — needed to make that writing safe, idempotent, and replayable. Org & Membership owns the application-side `tenants` row; this service owns Keycloak-side realm reality and its `tenant_realms` mirror (RP-D6) — neither writes the other's store. It ships as **two binaries from one image**: `cmd/server` (the mesh-only `/api/v1/internal` API, RP-1..RP-16, three inbound SQS consumers, and the transactional outbox runner) and `cmd/reconciler` (a single binary dispatched by `--job=<name>`, covering RP-C1..RP-C4 plus two operational prune jobs, each its own Kubernetes CronJob). The service sits on **neither of the platform's two hot paths** (HLD §4.3) — work is bursty, coarse-grained tenant-lifecycle operations, where correctness, auditability, and idempotency matter more than latency.
 
 **Does not own:** tenants-as-business-entities, memberships, roles, invitations (Org & Membership); JWT issuance / login (Keycloak itself); delegation, tender ACL, group-mapping, or the plan/department catalogues (sibling services extracted from Core); any per-user table (there is none — Keycloak is the sole store of user identity and credentials); secret material in Postgres (IdP secrets live only in OpenBao).
 
@@ -1006,16 +1006,17 @@ STRIDE analysis of `iam-realm-provisioner`. Every row is grounded in a real mech
 
 ## Developer tools
 
-This service has **no Swagger UI** — the REST contract is the LLD endpoint catalogue plus `router.go`, not a generated OpenAPI spec (README.md is explicit on this point). The only documentation surface is the AsyncAPI event-contract viewer, registered in `registerDocsRoutes` (`internal/adapter/inbound/http/router.go`).
+A Swagger UI **is** mounted, alongside the AsyncAPI event-contract viewer — both registered in `registerDocsRoutes` (`internal/adapter/inbound/http/router.go`).
 
 | Handler | Route | Gating | Purpose |
 |---|---|---|---|
-| `AsyncAPIHandler` | `GET /asyncapi` | `DocsConfig.active()` | Server-side HTML renderer for `api/asyncapi.yaml` |
+| `swaggerFiles`/`ginSwagger` | `GET /swagger/*any` | `DocsConfig.active()` | `swag`-generated OpenAPI 2.0 UI for the mesh-internal REST contract (all 16 RP-1..RP-16 handlers, custom-themed via `SwaggerThemeHandler`/`SwaggerInitializerHandler`) |
+| `AsyncAPIHandler` | `GET /asyncapi` | `DocsConfig.active()` | Interactive server-side HTML dashboard for `api/asyncapi.yaml` (search, dark/light theme, deep-linkable schema fields — ported from `iam-org-membership`'s equivalent viewer) |
 | `AsyncAPIYAMLHandler` | `GET /asyncapi.yaml` | `DocsConfig.active()` | Serves the raw embedded spec bytes |
 
-`DocsConfig.active()` is `Environment != "production" || Enabled` (`router.go`) — the docs surface is always mounted outside production, and in production is opt-in via `DOCS_ENABLED`. When mounted in production **and** `DOCS_AUTH_TOKEN` is set, both routes are additionally wrapped in a bearer-token check (`Authorization: Bearer <token>`, `401` otherwise); outside production, or with no token configured, there is no auth gate on either route. Both routes get `X-Frame-Options: DENY` and `X-Content-Type-Options: nosniff` headers regardless.
+`DocsConfig.active()` is `Environment != "production" || Enabled` (`router.go`) — the docs surface is always mounted outside production, and in production is opt-in via `DOCS_ENABLED`. When mounted in production **and** `DOCS_AUTH_TOKEN` is set, all three routes are additionally wrapped in a bearer-token check (`Authorization: Bearer <token>`, `401` otherwise); outside production, or with no token configured, there is no auth gate on any route. All three routes get `X-Frame-Options: DENY` and `X-Content-Type-Options: nosniff` headers regardless.
 
-`api/asyncapi.yaml` is compiled into the binary via `//go:embed asyncapi.yaml` (`api/embed.go`'s `AsyncAPISpec []byte`), not read from disk at runtime — the Dockerfile's distroless final stage copies only the two compiled binaries, not the source tree, so a disk-read-relative-path approach would 404/500 in the deployed container. `AsyncAPIYAMLHandler` serves `apispec.AsyncAPISpec` directly, already an in-memory `[]byte`; `AsyncAPIHandler` parses those same embedded bytes to render the HTML view.
+`api/asyncapi.yaml` is compiled into the binary via `//go:embed asyncapi.yaml` (`api/embed.go`'s `AsyncAPISpec []byte`), not read from disk at runtime — the Dockerfile's distroless final stage copies only the two compiled binaries, not the source tree, so a disk-read-relative-path approach would 404/500 in the deployed container. `AsyncAPIYAMLHandler` serves `apispec.AsyncAPISpec` directly, already an in-memory `[]byte`; `AsyncAPIHandler` parses those same embedded bytes to render the interactive dashboard. The Swagger spec (`docs/swagger/{docs.go,swagger.json,swagger.yaml}`) is checked-in, generated output — `make swag` regenerates it from `@Summary`/`@Router` annotations on every handler plus `cmd/server/swagger_info.go`'s global API metadata (`-g swagger_info.go -d cmd/server,internal/adapter/inbound/http`); `docs/swagger`'s generated `docs.go` is blank-imported by `cmd/server/main.go` to self-register the spec at init. `make swag-check` is meant to fail CI on a stale/unregenerated `docs/swagger/` (the Swagger-side mirror of `make schema-verify`'s AsyncAPI/Glue drift check) but currently shells out to a script (`.github/scripts/check-swagger-stale.sh`) that doesn't exist in the repo — a real gap, not yet enforced by any workflow.
 
 ---
 
@@ -1042,8 +1043,9 @@ graph LR
         arch["ARCHITECTURE.md\nembeds mermaid blocks + prose"]
         claude[".claude/CLAUDE.md + siblings\narchitecture.md · database-schema.md\napi-caching-events.md · request-flows.md · operations.md"]
         readme["README.md\nmental model · API/event overview · onboarding"]
-        asyncapi_yaml["api/asyncapi.yaml\nAsyncAPI 3.0 — iam-tenant-events SNS contract\n(9 published + 5 consumed)"]
-        lld["docs/lld/iam-lld-realm-provisioner-service.md\nfrozen LLD v1.3 + IMPLEMENTATION_REFERENCE.md"]
+        asyncapi_yaml["api/asyncapi.yaml\nAsyncAPI 3.0 — iam-tenant-events SNS contract\n(9 published + 6 consumed)"]
+        swag_annot["@Summary/@Router annotations\non all 16 RP-1..RP-16 handlers +\ncmd/server/swagger_info.go"]
+        lld["docs/lld/iam-lld-realm-provisioner-service.md\nfrozen LLD v1.4 + IMPLEMENTATION_REFERENCE.md"]
     end
 
     subgraph rendered["Rendered by"]
@@ -1051,7 +1053,8 @@ graph LR
         ide["IDE\nMermaid Preview plugin"]
         live["mermaid.live\nonline renderer"]
         claude_ai["Claude Code\ncontext-aware assistance"]
-        asyncapi_viewer["GET /asyncapi\nserver-side viewer (non-production,\nor DOCS_ENABLED + optional bearer gate)"]
+        asyncapi_viewer["GET /asyncapi\ninteractive dashboard (non-production,\nor DOCS_ENABLED + optional bearer gate)"]
+        swagger_ui["GET /swagger/*any\nswag-generated OpenAPI 2.0 UI (same gating)"]
     end
 
     mmd  -->|"embedded as\nfenced blocks"| arch
@@ -1061,6 +1064,7 @@ graph LR
     readme --> github
     lld --> claude_ai
     asyncapi_yaml --> asyncapi_viewer
+    swag_annot -->|"make swag"| swagger_ui
 ```
 
 | Document | Description |
@@ -1071,6 +1075,6 @@ graph LR
 | [`.claude/request-flows.md`](.claude/request-flows.md) | Provisioning, conversion, IdP, MFA, lapse, GDPR ordering |
 | [`.claude/operations.md`](.claude/operations.md) | Security, observability, configuration, deployment, CI/CD, dependency degradation matrix |
 | [`docs/architecture/README.md`](docs/architecture/README.md) | Standalone Mermaid diagram set index (the 9 `.mmd` files embedded above) |
-| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD (v1.3) — §16 open-question register, §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
+| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD (v1.4) — §16 open-question register, §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
 
 Render a diagram locally: open any `.mmd` file in a Mermaid-aware IDE (VS Code + Mermaid Preview, IntelliJ + Mermaid plugin) or paste into [mermaid.live](https://mermaid.live).

@@ -144,6 +144,7 @@ PUT /tenants/:id/idp {idp_alias, protocol, display_name, config{non-secret}, sec
     found + succeeded -> replay
     found + other     -> 409 operation_in_progress
   realm := tenant_realms.FindByTenantID(tenant_id)
+  realm.IsOffboarded() -> failIdempotency, 409 tenant_offboarded
   realm.Strategy != "dedicated" -> failIdempotency, 409 idp_requires_dedicated_realm
   validation := ValidateIdpConfig(protocol, config, acknowledgements)  -- §11.6 checklist, see below
   keycloak_idp_config_validations.Insert(tenant_id, idp_alias, ValidatorVersion, outcome, per-check results, acks)
@@ -163,9 +164,10 @@ PUT /tenants/:id/idp {idp_alias, protocol, display_name, config{non-secret}, sec
 
 DELETE /tenants/:id/idp/:alias
   !alias matches ^[a-zA-Z0-9_-]{1,64}$ -> 400 invalid_request
-  realm := tenant_realms.FindByTenantID(tenant_id)
+  realm := tenant_realms.FindByTenantID(tenant_id)    -- not found -> 404 tenant_realm_not_found
+  keycloak_idp_configs.FindByAlias(tenant_id, alias)  -- not found -> 404 idp_config_not_found (checked BEFORE Keycloak.DeleteIdp)
   Keycloak.DeleteIdp(realm.RealmName, alias)
-  OpenBao.DeleteIdpSecret(tenant_id, alias)
+  OpenBao.DeleteIdpSecret(tenant_id, alias)  -- best-effort: a delete failure is logged WARN, never returned
   keycloak_idp_configs.Delete(tenant_id, alias)
   -> 204
 ```
@@ -174,7 +176,7 @@ DELETE /tenants/:id/idp/:alias
 
 **RP-6 is now ledgered against `Idempotency-Key` like every other mutating endpoint (§9.2).** The route has always enforced `RequireIdempotencyKey`, but `ConfigureIdp` never actually called the idempotency store — a retry re-ran the entire flow (re-validating, re-recording an audit row, re-writing OpenBao, re-calling Keycloak) instead of replaying the stored result. It also adds a compensating OpenBao-secret delete when `CreateOrUpdateIdp` fails **after** the secret was already written — but only when `isNewConfig` (confirmed via `FindByAlias`): an update to an already-configured alias never deletes on failure, since the pre-existing Keycloak IdP is still live and completely unaffected by the failed update, even though `WriteIdpSecret` already overwrote OpenBao's copy with the new, never-applied value.
 
-**§11.6 Region-Agnostic IdP Configuration Checklist** (`idp_validator.go`): checks every SAML/OIDC config field against a fixed list of AWS region substrings (`ap-south-1`, `us-east-1`, etc.) and against the one platform-wide region-neutral auth host (`auth.bcbpsolutions.com`). CRITICAL checks (1-6, 10-12) — SSO URL region (1), SLO URL region (2), customer signing cert present (3), ACS URL points at the neutral host (4), SLO **response** URL region (5, examines a distinct `slo_response_url` config key — SAML's `SingleLogoutService` `ResponseLocation`, defaulting to `slo_url` when a caller never sets it), entity ID region (6), OIDC issuer/redirect/audience region (10-12) — **block** with `400`. WARN checks (7-9, 13) — SAML `NameIDFormat != "transient"`, attribute-mapper URNs region-free, strong signature algorithm (`RSA-SHA(256|384|512)`), OIDC PKCE `S256` — require a recorded acknowledgement (by check ID) or return `422`. RP-13's whole-estate audit re-runs the same `ValidateIdpConfig` function against every stored config's non-secret `Config` (never re-reading secrets from OpenBao) to compute pass/warnings/failing counts.
+**§11.6 Region-Agnostic IdP Configuration Checklist** (`idp_validator.go`): checks every SAML/OIDC config field against a fixed list of AWS region substrings (`ap-south-1`, `us-east-1`, etc.) and against the one platform-wide region-neutral auth host (`auth.bcbpsolutions.com`). CRITICAL checks (0-6, 10-12, 14-15 — 12 total) — no config value contains an HTML/XML injection sequence (0, scans every string value in the raw config map), SSO URL region (1), SLO URL region (2), customer signing cert present (3), ACS URL points at the neutral host (4), SLO **response** URL region (5, examines a distinct `slo_response_url` config key — SAML's `SingleLogoutService` `ResponseLocation`, defaulting to `slo_url` when a caller never sets it), entity ID region (6), OIDC issuer/redirect/audience region (10-12), OIDC `client_id` present (14), OIDC `issuer` is a non-empty valid HTTPS URL (15) — **block** with `400`. WARN checks (7-9, 13 — 4 total) — SAML `NameIDFormat != "transient"`, attribute-mapper URNs region-free, strong signature algorithm (`RSA-SHA(256|384|512)`), OIDC PKCE `S256` — require a recorded acknowledgement (by check ID) or return `422`. 16 checks total (0-15). RP-13's whole-estate audit re-runs the same `ValidateIdpConfig` function against every stored config's non-secret `Config` (never re-reading secrets from OpenBao) to compute pass/warnings/failing counts.
 
 ## RP-8 & RP-C4: Realm Config, Local-Intent-First (RP-INV-6)
 
@@ -210,10 +212,12 @@ POST /tenants/:id/users/:keycloak_user_id/mfa-reset
 POST /tenants/:id/reactivate {source, reason?, new_trial_ends_at?}
   row := tenant_realms.FindByTenantID(tenant_id)
   row.IsOffboarded() -> 409 tenant_offboarded  (terminal, RP-INV-5)
+  row.Status == "provisioning" -> 409 tenant_offboarded ("tenant is still provisioning — cannot reactivate what was never active")
   row.Status == "active" -> idempotent no-op, complete idempotency, return current status
   row.Strategy == "shared"    -> Keycloak.EnableUsersInRealm(realm, tenant_id)
   row.Strategy == "dedicated" -> Keycloak.EnableRealm(realm)
   RunInTx:
+    if shared and new_trial_ends_at is nil -> new_trial_ends_at := now()+30d  (never send TrialReactivated with an empty end date)
     row.{Status:"active", DisabledAt:nil, TrialEndsAt:new_trial_ends_at? if shared}
     tenant_realms.Update(row)
     row.Strategy=="shared" -> outbox.Enqueue(TrialReactivated{...})
@@ -224,7 +228,7 @@ One endpoint reverses **both** a billing-lapse suspension and an RP-14 operator 
 
 ## RP-12 & RP-C1: Trial Expiry
 
-`ExpireTrial` (RP-12) is the idempotent per-tenant effect: `DisableUsersInRealm` → `RunInTx{Status:"disabled", DisabledAt:now()}` + `outbox.Enqueue(TrialExpired{tenant_id, trial_ends_at, grace_ends_at})`. RP-C1 (`0 2 * * *`) sweeps `tenant_realms WHERE strategy='shared' AND status='active' AND trial_ends_at < now()` (`ListExpiredTrials`, backed by `idx_tenant_realms_trial_exp`) — **never queries O&M** — and calls the same idempotent effect per row, keyed `"trial-expiry:<tenant_id>:<trial_ends_at>"` so a changed `trial_ends_at` (e.g. from a reactivation) naturally produces a fresh idempotency key rather than colliding with a stale one.
+`ExpireTrial` (RP-12) rejects a non-shared-strategy tenant (`409 realm_already_dedicated` — already converted, nothing to expire), an offboarded tenant (`409 tenant_offboarded`), and a suspended tenant (`409 tenant_offboarded`, "tenant is suspended" — a billing-lapse/operator suspension takes precedence over trial bookkeeping). Otherwise it's the idempotent per-tenant effect: `DisableUsersInRealm` → `RunInTx{Status:"disabled", DisabledAt:now()}` + `outbox.Enqueue(TrialExpired{tenant_id, trial_ends_at, grace_ends_at})`. RP-C1 (`0 2 * * *`) sweeps `tenant_realms WHERE strategy='shared' AND status='active' AND trial_ends_at < now()` (`ListExpiredTrials`, backed by `idx_tenant_realms_trial_exp`) — **never queries O&M** — and calls the same idempotent effect per row, keyed `"trial-expiry:<tenant_id>:<trial_ends_at>"` so a changed `trial_ends_at` (e.g. from a reactivation) naturally produces a fresh idempotency key rather than colliding with a stale one.
 
 ## RP-14: Operator Suspend
 

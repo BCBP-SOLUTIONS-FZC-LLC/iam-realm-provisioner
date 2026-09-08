@@ -40,7 +40,7 @@ RP makes **no** end-user authorization decision — that is AuthZ Enrichment's j
 
 Checks every SAML/OIDC config field against a fixed list of AWS region substrings and against the one platform-wide region-neutral auth host (`auth.bcbpsolutions.com`).
 
-- **CRITICAL (block, `400 idp_region_portability_failed`):** SAML SSO/SLO URL hostnames carry no AWS-region substring; a customer-provided signing cert is present; ACS/SLO/EntityID point at the region-neutral host; OIDC issuer/discovery is region-neutral; OIDC redirect URIs are region-neutral; OIDC audience matches the region-neutral client ID.
+- **CRITICAL (block, `400 idp_region_portability_failed`), 12 total:** no config value contains an HTML/XML injection sequence; SAML SSO/SLO URL hostnames carry no AWS-region substring; a customer-provided signing cert is present; ACS/SLO/EntityID point at the region-neutral host; OIDC issuer/discovery is region-neutral; OIDC redirect URIs are region-neutral; OIDC audience matches the region-neutral client ID; an OIDC `client_id` is present; an OIDC `issuer` is a non-empty, valid HTTPS URL.
 - **WARN (allow with a recorded acknowledgement, else `422 idp_warnings_unacknowledged`):** SAML `NameIDFormat != "transient"`; custom attribute-mapper URNs are region-free; SAML signature algorithm ≥ `RSA-SHA256`; OIDC PKCE `S256`. Acknowledgement recorded with the admin's `user_id` + timestamp in `keycloak_idp_config_validations.acknowledgements`.
 - RP-13's whole-estate audit re-runs the same `ValidateIdpConfig` function against every stored config's non-secret `Config` (never re-reading secrets from OpenBao) to compute `{total_tenants, total_idp_configs, passing, warnings_only, failing, failing_tenants[]}`.
 
