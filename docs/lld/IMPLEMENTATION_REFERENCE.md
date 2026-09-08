@@ -1,6 +1,6 @@
-# Realm Provisioner — Implementation Reference (condensed from the frozen LLD v1.4)
+# Realm Provisioner — Implementation Reference (condensed from the frozen LLD v1.5)
 
-Source: `docs/lld/iam-lld-realm-provisioner-service.md` (v1.4, Approved, 2026-09-09). This file is a
+Source: `docs/lld/iam-lld-realm-provisioner-service.md` (v1.5, Approved, 2026-09-09). This file is a
 working extraction for implementation — where it and the LLD ever disagree, **the LLD (and its §25)
 governs**; re-read the source section cited before finalizing anything security- or name-sensitive.
 

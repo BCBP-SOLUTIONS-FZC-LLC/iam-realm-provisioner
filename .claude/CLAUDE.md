@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with the **Realm Provisioner Service** (`iam-realm-provisioner`), a Go microservice in the IAM subsystem (Tender Management SaaS platform). Refines the IAM HLD; LLD v1.4 Approved (`docs/lld/iam-lld-realm-provisioner-service.md`, condensed reference at `docs/lld/IMPLEMENTATION_REFERENCE.md`), owner database `provisioner` on shared RDS PostgreSQL. Where LLD and HLD disagree, HLD is authoritative.
+This file provides guidance to Claude Code when working with the **Realm Provisioner Service** (`iam-realm-provisioner`), a Go microservice in the IAM subsystem (Tender Management SaaS platform). Refines the IAM HLD; LLD v1.5 Approved (`docs/lld/iam-lld-realm-provisioner-service.md`, condensed reference at `docs/lld/IMPLEMENTATION_REFERENCE.md`), owner database `provisioner` on shared RDS PostgreSQL. Where LLD and HLD disagree, HLD is authoritative.
 
 ## What This Repo Is
 
@@ -117,7 +117,7 @@ Detailed reference docs in `.claude/`:
 - [`request-flows.md`](request-flows.md) — Keycloak-effect-first discipline, compensating teardown, every RP-*/RP-C* flow, idempotency mechanics
 - [`operations.md`](operations.md) — security, observability, configuration, CI/CD, testing, GDPR, integration points, open items
 
-Full LLD (v1.4 Approved, `docs/lld/iam-lld-realm-provisioner-service.md`) and its condensed reference (`docs/lld/IMPLEMENTATION_REFERENCE.md`, §1 frozen name inventory through §24 operational runbooks), checked into this repo.
+Full LLD (v1.5 Approved, `docs/lld/iam-lld-realm-provisioner-service.md`) and its condensed reference (`docs/lld/IMPLEMENTATION_REFERENCE.md`, §1 frozen name inventory through §24 operational runbooks), checked into this repo.
 
 Supplementary docs in the repo root:
 - **`README.md`** — mental model, API/event overview, onboarding

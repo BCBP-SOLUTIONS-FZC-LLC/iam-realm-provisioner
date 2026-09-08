@@ -65,7 +65,14 @@ Note: the **JSON filenames** in `internal/eventschema/`
 convention. That is a source-file convention only and does not dictate the
 registered Glue schema name — `internal/eventschema/asyncapi_drift_test.go`
 is the CI-enforced guarantee that the file stem's PascalCase form and the
-`ByEventType` map key always agree.
+`ByEventType` map key always agree. `validate` reads `internal/eventschema/`
+directly (filename doesn't matter to it), but `diff`/`register` genuinely
+need the PascalCase name — so `schema-registry.yml`'s `staging`/`production`/
+`pr-check` jobs (and the local `make schema-register` target) all run
+`.github/scripts/stage-produced-event-schemas.sh` first, copying the 9 files
+into `.tmp/glue-schemas/<PascalCaseName>.json` before ever calling `diff`/
+`register` — the actual mechanism that makes the filename convention above
+a non-issue for the registered name, not just a documentation claim.
 
 ## Pre-deploy checklist
 
