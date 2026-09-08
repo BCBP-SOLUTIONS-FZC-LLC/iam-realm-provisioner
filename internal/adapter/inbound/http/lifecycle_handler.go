@@ -12,6 +12,19 @@ import (
 // ── RP-11: GET realm (read-only) ─────────────────────────────────────────
 
 // GetRealm handles RP-11 (GET /tenants/:id/realm).
+//
+// @Summary      RP-11 — Get realm info
+// @Description  Returns the current realm record for the tenant: realm name, strategy (shared/dedicated), lifecycle status, Keycloak shard, and key timestamps. Read-only; no side effects.
+// @Tags         Lifecycle
+// @Produce      json
+// @Param        id  path      string  true  "Tenant UUID"  format(uuid)
+// @Success      200 {object}  service.GetRealmResult
+// @Failure      400 {object}  ErrorResponse  "invalid_request"
+// @Failure      404 {object}  ErrorResponse  "realm_not_found"
+// @Failure      500 {object}  ErrorResponse
+// @Security     SystemRole
+// @Security     TenantID
+// @Router       /tenants/{id}/realm [get]
 func (h *InternalHandler) GetRealm(c *gin.Context) {
 	if h.Lifecycle == nil {
 		h.fallback.GetRealm(c)
@@ -37,6 +50,23 @@ type reactivateRequest struct {
 }
 
 // Reactivate handles RP-10 (POST /tenants/:id/reactivate).
+//
+// @Summary      RP-10 — Reactivate suspended tenant realm
+// @Description  Reverses both a billing-lapse suspension and an operator (RP-14) suspension from one endpoint. Re-enables the Keycloak realm and clears the suspended status. Body is optional; reason is informational only. Idempotent on Idempotency-Key reuse.
+// @Tags         Lifecycle
+// @Accept       json
+// @Produce      json
+// @Param        id       path      string             false  "Tenant UUID"  format(uuid)
+// @Param        request  body      reactivateRequest  false  "Optional reactivation reason"
+// @Success      200      {object}  service.ReactivateResult
+// @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
+// @Failure      404      {object}  ErrorResponse  "realm_not_found"
+// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR invalid_realm_state"
+// @Failure      500      {object}  ErrorResponse
+// @Security     SystemRole
+// @Security     TenantID
+// @Security     IdempotencyKey
+// @Router       /tenants/{id}/reactivate [post]
 func (h *InternalHandler) Reactivate(c *gin.Context) {
 	if h.Lifecycle == nil {
 		h.fallback.Reactivate(c)
@@ -60,6 +90,21 @@ func (h *InternalHandler) Reactivate(c *gin.Context) {
 // ── RP-12: expire-trial (reconciler-only) ────────────────────────────────
 
 // ExpireTrial handles RP-12 (POST /tenants/:id/expire-trial).
+//
+// @Summary      RP-12 — Expire trial tenant
+// @Description  Transitions a trial tenant to expired/disabled status after the grace period. Called by the RP-C1 reconciler CronJob; not intended for direct operator use. Disables the Keycloak realm and records the expiry timestamp. Idempotent on Idempotency-Key reuse.
+// @Tags         Lifecycle
+// @Produce      json
+// @Param        id  path      string  true  "Tenant UUID"  format(uuid)
+// @Success      200 {object}  service.ExpireTrialResult
+// @Failure      400 {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
+// @Failure      404 {object}  ErrorResponse  "realm_not_found"
+// @Failure      409 {object}  ErrorResponse  "operation_in_progress OR invalid_realm_state"
+// @Failure      500 {object}  ErrorResponse
+// @Security     SystemRole
+// @Security     TenantID
+// @Security     IdempotencyKey
+// @Router       /tenants/{id}/expire-trial [post]
 func (h *InternalHandler) ExpireTrial(c *gin.Context) {
 	if h.Lifecycle == nil {
 		h.fallback.ExpireTrial(c)
@@ -85,6 +130,24 @@ type suspendRequest struct {
 }
 
 // Suspend handles RP-14 (POST /tenants/:id/suspend).
+//
+// @Summary      RP-14 — Emergency operator suspension
+// @Description  Operator-only. Immediately disables the tenant's Keycloak realm and transitions status to suspended. Reason is required for the audit trail. Reversed by RP-10 Reactivate. Idempotent on Idempotency-Key reuse.
+// @Tags         Lifecycle
+// @Accept       json
+// @Produce      json
+// @Param        id       path      string          true  "Tenant UUID"  format(uuid)
+// @Param        request  body      suspendRequest  true  "Suspension reason (required)"
+// @Success      200      {object}  service.SuspendResult
+// @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
+// @Failure      403      {object}  ErrorResponse  "insufficient_role (operator role required)"
+// @Failure      404      {object}  ErrorResponse  "realm_not_found"
+// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR invalid_realm_state"
+// @Failure      500      {object}  ErrorResponse
+// @Security     SystemRole
+// @Security     TenantID
+// @Security     IdempotencyKey
+// @Router       /tenants/{id}/suspend [post]
 func (h *InternalHandler) Suspend(c *gin.Context) {
 	if h.Lifecycle == nil {
 		h.fallback.Suspend(c)
@@ -111,6 +174,20 @@ func (h *InternalHandler) Suspend(c *gin.Context) {
 // ── RP-15: delete user (idempotent) ──────────────────────────────────────
 
 // DeleteUser handles RP-15 (DELETE /tenants/:id/users/:keycloak_user_id).
+//
+// @Summary      RP-15 — Delete user from tenant realm
+// @Description  Permanently deletes the Keycloak user from the tenant's realm. Idempotent: deleting an already-absent user returns 204. Part of the GDPR erasure flow — called by Org & Membership on membership deletion.
+// @Tags         Users
+// @Produce      json
+// @Param        id                path  string  true  "Tenant UUID"        format(uuid)
+// @Param        keycloak_user_id  path  string  true  "Keycloak user UUID"  format(uuid)
+// @Success      204               "No Content"
+// @Failure      400               {object}  ErrorResponse  "invalid_request"
+// @Failure      404               {object}  ErrorResponse  "realm_not_found"
+// @Failure      500               {object}  ErrorResponse
+// @Security     SystemRole
+// @Security     TenantID
+// @Router       /tenants/{id}/users/{keycloak_user_id} [delete]
 func (h *InternalHandler) DeleteUser(c *gin.Context) {
 	if h.Lifecycle == nil {
 		h.fallback.DeleteUser(c)
@@ -137,6 +214,20 @@ func (h *InternalHandler) DeleteUser(c *gin.Context) {
 // side) ───────────────────────────────────────────────────────────────────
 
 // RevokeSessions handles RP-16 (POST /tenants/:id/users/:keycloak_user_id/revoke-sessions).
+//
+// @Summary      RP-16 — Revoke all active sessions for a user
+// @Description  Logs out the Keycloak user from all active sessions across all clients. Idempotent: revoking an already-session-free user returns 204. Called on membership suspension or offboarding.
+// @Tags         Users
+// @Produce      json
+// @Param        id                path  string  true  "Tenant UUID"        format(uuid)
+// @Param        keycloak_user_id  path  string  true  "Keycloak user UUID"  format(uuid)
+// @Success      204               "No Content"
+// @Failure      400               {object}  ErrorResponse  "invalid_request"
+// @Failure      404               {object}  ErrorResponse  "realm_not_found OR user_not_found"
+// @Failure      500               {object}  ErrorResponse
+// @Security     SystemRole
+// @Security     TenantID
+// @Router       /tenants/{id}/users/{keycloak_user_id}/revoke-sessions [post]
 func (h *InternalHandler) RevokeSessions(c *gin.Context) {
 	if h.Lifecycle == nil {
 		h.fallback.RevokeSessions(c)

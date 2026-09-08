@@ -136,6 +136,13 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 	// already-succeeded key does not inflate the attempt count.
 	defer func() { metrics.ProvisionTotal.WithLabelValues("trial", outcome(err)).Inc() }()
 
+	// Guard: reject re-provisioning an offboarded (exported/deleted) tenant
+	// before touching Keycloak (RP-1, §8.1, ErrTenantOffboarded).
+	if existing, ferr := s.realms.FindByTenantID(ctx, req.TenantID); ferr == nil && existing.IsOffboarded() {
+		s.failIdempotency(ctx, idempotencyKey)
+		return nil, domain.NewError(domain.ErrTenantOffboarded, "tenant has been offboarded and cannot be re-provisioned")
+	}
+
 	kcUserID, err := s.keycloak.CreateTrialUser(ctx, port.CreateUserRequest{
 		Email: req.AdminEmail, FullName: req.AdminName, TenantID: req.TenantID,
 		HashedPasswordSeed: req.HashedPasswordSeed, EmailVerified: false,
@@ -237,6 +244,13 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 		return replayOrConflict[ProvisionDirectResult](existing)
 	}
 	defer func() { metrics.ProvisionTotal.WithLabelValues("direct", outcome(err)).Inc() }()
+
+	// Guard: reject re-provisioning an offboarded (exported/deleted) tenant
+	// before touching Keycloak (RP-2, §8.2, ErrTenantOffboarded).
+	if existing, ferr := s.realms.FindByTenantID(ctx, req.TenantID); ferr == nil && existing.IsOffboarded() {
+		s.failIdempotency(ctx, idempotencyKey)
+		return nil, domain.NewError(domain.ErrTenantOffboarded, "tenant has been offboarded and cannot be re-provisioned")
+	}
 
 	realmName := dedicatedRealmName(req.TenantSlug)
 	shard, err := s.selectShard(ctx)

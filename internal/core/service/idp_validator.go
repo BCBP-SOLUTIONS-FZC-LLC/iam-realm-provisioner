@@ -85,6 +85,8 @@ func ValidateIdpConfig(protocol domain.IdpProtocol, cfg map[string]any, acked ma
 		return ""
 	}
 
+	record(domain.CheckConfigSafe, !hasInjection(cfg), true)
+
 	if protocol == domain.IdpProtocolSAML {
 		ssoURL := str("sso_url")
 		sloURL := str("slo_url")
@@ -117,10 +119,13 @@ func ValidateIdpConfig(protocol domain.IdpProtocol, cfg map[string]any, acked ma
 		record(domain.CheckSignatureAlgorithm, sigAlg == "" || isStrongSignatureAlgorithm(sigAlg), false)
 	} else {
 		issuer := str("issuer")
+		clientID := str("client_id")
 		redirectURI := str("redirect_uri")
 		audience := str("audience")
 		pkce := str("pkce_method")
 
+		record(domain.CheckOIDCClientID, clientID != "", true)
+		record(domain.CheckOIDCIssuerHTTPS, isHTTPSURL(issuer), true)
 		record(domain.CheckOIDCIssuerRegion, issuer == "" || !carriesRegion(issuer), true)
 		record(domain.CheckOIDCRedirectRegion, redirectURI == "" || !carriesRegion(redirectURI), true)
 		record(domain.CheckOIDCAudienceRegion, audience == "" || !carriesRegion(audience), true)
@@ -150,6 +155,28 @@ func mapperURNsCarryRegion(cfg map[string]any) bool {
 }
 
 var strongSigAlgPattern = regexp.MustCompile(`^RSA-SHA(256|384|512)$`)
+
+// injectionPattern matches HTML/XML injection characters that must not appear
+// in any IdP config field value (check_0_config_safe, CRITICAL).
+var injectionPattern = regexp.MustCompile(`[<>]|<!`)
+
+// isHTTPSURL reports whether rawURL is a non-empty, parseable HTTPS URL.
+func isHTTPSURL(rawURL string) bool {
+	if rawURL == "" {
+		return false
+	}
+	u, err := url.Parse(rawURL)
+	return err == nil && u.Scheme == "https" && u.Host != ""
+}
+
+func hasInjection(cfg map[string]any) bool {
+	for _, v := range cfg {
+		if s, ok := v.(string); ok && injectionPattern.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
 
 func isStrongSignatureAlgorithm(alg string) bool {
 	return strongSigAlgPattern.MatchString(alg)

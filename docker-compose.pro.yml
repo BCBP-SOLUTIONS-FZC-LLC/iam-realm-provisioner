@@ -1,0 +1,25 @@
+# LocalStack Pro override — enables Glue Schema Registry and KMS.
+# Requires a valid LOCALSTACK_AUTH_TOKEN (set in .env or exported).
+#
+#   LOCALSTACK_AUTH_TOKEN=<your-token> \
+#   docker compose -f docker-compose.yml -f docker-compose.pro.yml up
+#
+# With Pro:
+#   - Glue Schema Registry: set GLUE_REGISTRY_TENANT_NAME in .env to activate
+#     GlueCodec (the 9 event schemas in internal/eventschema/ are mounted and
+#     registered automatically on container start)
+#   - KMS: S3 realm-export objects encrypted server-side (REALM_EXPORT_KMS_KEY)
+#   - All other services (S3, SNS, SQS) work identically to community edition
+services:
+  localstack:
+    image: localstack/localstack-pro:latest
+    environment:
+      SERVICES: sns,sqs,s3,glue,kms
+      LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN}
+    volumes:
+      - ./internal/eventschema:/etc/localstack/init/schemas:ro
+
+  app:
+    environment:
+      GLUE_REGISTRY_TENANT_NAME: ${GLUE_REGISTRY_TENANT_NAME:-iam-tenant-events}
+      REALM_EXPORT_KMS_KEY: ${REALM_EXPORT_KMS_KEY:-}

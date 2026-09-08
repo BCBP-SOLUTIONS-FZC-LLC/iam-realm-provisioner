@@ -95,11 +95,16 @@ help:
 	@echo "  make race             - all tests with -race flag"
 	@echo "  make run              - run the server locally (go run)"
 	@echo "  make run-reconciler   - run one reconciler job locally, e.g. make run-reconciler JOB=trial-expiry"
+	@echo "  make mock             - start BOTH mocks (Keycloak :8091 + O&M :8082) in one command"
+	@echo "  make mock OM_MODE=lapses - start both mocks with O&M in lapses mode"
+	@echo "  make mock-keycloak    - start Keycloak mock only (:8091)"
+	@echo "  make mock-org         - start O&M mock only (:8082)"
 	@echo "  make build            - compile both binaries to bin/"
 	@echo "  make cover            - coverage HTML report"
 	@echo "  make cover-func       - coverage summary by function"
 	@echo "  make ci               - tidy + fmt-check + vet + lint + arch-lint + test-ci + build"
-	@echo "  make docker-up        - start local infra (Postgres + LocalStack + Keycloak + OpenBao)"
+	@echo "  make docker-up        - start Postgres + LocalStack + Keycloak + OpenBao (community)"
+	@echo "  make docker-up-pro    - start Postgres + LocalStack Pro only (use with 'make mock')"
 	@echo "  make docker-down      - stop local containers"
 	@echo "  make migrate-up       - apply pending domain migrations against DATABASE_MIGRATION_URL"
 	@echo "  make migrate-down     - roll back one domain migration"
@@ -116,6 +121,10 @@ help:
 	@echo "  make schema-register  - register this service's 9 event schemas to Glue (requires AWS/LocalStack)"
 	@echo "  make schema-verify    - pre-deploy check: fail if any of RP's 9 schemas is missing (requires AWS)"
 	@echo "  make schema-prune     - dry-run: list orphaned Glue schemas (requires AWS; excludes O&M's TenantCreated/TrialStarted)"
+	@echo ""
+	@echo "Swagger:"
+	@echo "  make swag             - generate Swagger docs from annotations (output: docs/swagger/)"
+	@echo "  make swag-check       - fail if Swagger regeneration changes docs/swagger/"
 
 # -----------------------------
 # GO BASICS
@@ -250,6 +259,25 @@ run:
 	@-lsof -ti :$${APP_PORT:-8080} | xargs kill -9 2>/dev/null; true
 	bash -c 'set -a && source .env && set +a && BUILD_VERSION=$(BUILD_VERSION) $(GO) run ./cmd/server'
 
+.PHONY: mock
+mock:
+	@echo "Starting Keycloak mock (:8091) + Org & Membership mock (:8082)..."
+	@-lsof -ti :8091 | xargs kill -9 2>/dev/null; true
+	@-lsof -ti :8082 | xargs kill -9 2>/dev/null; true
+	cd ../mock-servers && python3 run.py $(if $(OM_MODE),--om-mode $(OM_MODE),)
+
+.PHONY: mock-keycloak
+mock-keycloak:
+	@echo "Starting Keycloak Admin mock on port 8091..."
+	@-lsof -ti :8091 | xargs kill -9 2>/dev/null; true
+	python3 ../mock-servers/mock_keycloak.py --port 8091
+
+.PHONY: mock-org
+mock-org:
+	@echo "Starting Org & Membership mock on port 8082..."
+	@-lsof -ti :8082 | xargs kill -9 2>/dev/null; true
+	python3 ../mock-servers/mock_org.py --port 8082 $(if $(OM_MODE),--mode $(OM_MODE),)
+
 .PHONY: run-reconciler
 run-reconciler:
 	@test -n "$(JOB)" || { echo "Usage: make run-reconciler JOB=<job-name>"; exit 1; }
@@ -300,8 +328,15 @@ migrate-create:
 
 .PHONY: docker-up
 docker-up:
-	@echo "Starting local PostgreSQL + LocalStack + Keycloak + OpenBao..."
+	@echo "Starting local PostgreSQL + LocalStack + Keycloak + OpenBao (community)..."
 	docker compose up -d postgres localstack keycloak openbao
+
+.PHONY: docker-up-pro
+docker-up-pro:
+	@echo "Starting Postgres + LocalStack Pro (Glue + KMS)..."
+	@echo "NOTE: Keycloak + OpenBao are provided by 'make mock' (Python mocks on :8091 + :8082)"
+	@grep -q '^LOCALSTACK_AUTH_TOKEN=.\+' .env 2>/dev/null || { echo "ERROR: LOCALSTACK_AUTH_TOKEN not set in .env"; exit 1; }
+	docker compose -f docker-compose.yml -f docker-compose.pro.yml up -d postgres localstack
 
 .PHONY: docker-down
 docker-down:
@@ -458,6 +493,27 @@ cover: test-ci
 .PHONY: cover-func
 cover-func: test-ci
 	$(GO) tool cover -func=coverage.out
+
+# -----------------------------
+# SWAGGER
+# -----------------------------
+
+# swag: generate Swagger JSON/YAML from handler annotations into docs/swagger/.
+# Re-run whenever annotations change. The output is checked in to the repo.
+.PHONY: swag
+swag:
+	@echo "Generating Swagger docs..."
+	$(GO) run github.com/swaggo/swag/cmd/swag@v1.16.6 init \
+	  -g swagger_info.go \
+	  -d cmd/server,internal/adapter/inbound/http \
+	  --output docs/swagger \
+	  --parseDependency \
+	  --parseInternal
+	@echo "Swagger docs written to docs/swagger/"
+
+.PHONY: swag-check
+swag-check:
+	bash .github/scripts/check-swagger-stale.sh
 
 # -----------------------------
 # CLEAN

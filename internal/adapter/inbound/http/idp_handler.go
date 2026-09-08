@@ -21,6 +21,24 @@ type configureIdpRequest struct {
 }
 
 // ConfigureIdp handles RP-6 (PUT /tenants/:id/idp).
+//
+// @Summary      RP-6 — Configure tenant IdP (SAML/OIDC)
+// @Description  Creates or replaces the tenant's identity provider in Keycloak. The IdP client secret is stored exclusively in OpenBao — never in Postgres. Runs the §11.6 region-portability validation gate before writing: CRITICAL failures return 409; unacknowledged WARN checks return 422 until the caller supplies the required ack codes in the `ack` field. Idempotent on Idempotency-Key reuse.
+// @Tags         IdP
+// @Accept       json
+// @Produce      json
+// @Param        id       path      string               true  "Tenant UUID"  format(uuid)
+// @Param        request  body      configureIdpRequest  true  "IdP configuration payload"
+// @Success      200      {object}  service.ConfigureIdpResult
+// @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key OR invalid_idp_protocol"
+// @Failure      404      {object}  ErrorResponse  "realm_not_found"
+// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR idp_region_portability_failed"
+// @Failure      422      {object}  ErrorResponse  "idp_warnings_unacknowledged"
+// @Failure      500      {object}  ErrorResponse
+// @Security     SystemRole
+// @Security     TenantID
+// @Security     IdempotencyKey
+// @Router       /tenants/{id}/idp [put]
 func (h *InternalHandler) ConfigureIdp(c *gin.Context) {
 	if h.Idp == nil {
 		h.fallback.ConfigureIdp(c)
@@ -55,6 +73,20 @@ func (h *InternalHandler) ConfigureIdp(c *gin.Context) {
 // ── RP-7 ─────────────────────────────────────────────────────────────────
 
 // RemoveIdp handles RP-7 (DELETE /tenants/:id/idp/:alias).
+//
+// @Summary      RP-7 — Remove tenant IdP
+// @Description  Deletes the specified identity provider from the tenant's Keycloak realm and removes the client secret from OpenBao. Idempotent: deleting an already-absent IdP returns 204.
+// @Tags         IdP
+// @Produce      json
+// @Param        id     path  string  true  "Tenant UUID"  format(uuid)
+// @Param        alias  path  string  true  "IdP alias"
+// @Success      204    "No Content"
+// @Failure      400    {object}  ErrorResponse  "invalid_request"
+// @Failure      404    {object}  ErrorResponse  "realm_not_found"
+// @Failure      500    {object}  ErrorResponse
+// @Security     SystemRole
+// @Security     TenantID
+// @Router       /tenants/{id}/idp/{alias} [delete]
 func (h *InternalHandler) RemoveIdp(c *gin.Context) {
 	if h.Idp == nil {
 		h.fallback.RemoveIdp(c)
@@ -76,6 +108,16 @@ func (h *InternalHandler) RemoveIdp(c *gin.Context) {
 // ── RP-13 (operator-only, whole-estate, not tenant-scoped) ───────────────
 
 // PortabilityAudit handles RP-13 (POST /audit/idp-region-portability).
+//
+// @Summary      RP-13 — Whole-estate IdP region-portability audit (operator-only)
+// @Description  Operator-only. Runs the §11.6 Region-Agnostic IdP Configuration Checklist across every tenant with an active IdP configuration and returns a per-tenant validation report. Not tenant-scoped — scans the full estate. Used for pre-migration and compliance audits.
+// @Tags         IdP
+// @Produce      json
+// @Success      200  {object}  service.PortabilityAuditResult
+// @Failure      403  {object}  ErrorResponse  "insufficient_role (operator role required)"
+// @Failure      500  {object}  ErrorResponse
+// @Security     SystemRole
+// @Router       /audit/idp-region-portability [post]
 func (h *InternalHandler) PortabilityAudit(c *gin.Context) {
 	if h.Idp == nil {
 		h.fallback.PortabilityAudit(c)
@@ -97,6 +139,22 @@ type applyRealmConfigRequest struct {
 }
 
 // ApplyRealmConfig handles RP-8 (PATCH /tenants/:id/realm-config).
+//
+// @Summary      RP-8 — Apply realm configuration setting
+// @Description  Applies a single realm configuration key/value to the tenant's Keycloak realm. Local-intent-first (RP-INV-6): if Keycloak is transiently unreachable the desired value is persisted as `pending` in realm_config_reconciliations and the caller receives 202 Accepted with `applied:false, reconciling:true`. RP-C4 converges it later. A 200 with `applied:true` means the change is live in Keycloak.
+// @Tags         RealmConfig
+// @Accept       json
+// @Produce      json
+// @Param        id       path      string                   true  "Tenant UUID"  format(uuid)
+// @Param        request  body      applyRealmConfigRequest  true  "Realm config setting"
+// @Success      200      {object}  service.ApplyRealmConfigResult  "Applied immediately"
+// @Success      202      {object}  service.ApplyRealmConfigResult  "Queued for reconciliation (applied:false)"
+// @Failure      400      {object}  ErrorResponse  "invalid_request"
+// @Failure      404      {object}  ErrorResponse  "realm_not_found"
+// @Failure      500      {object}  ErrorResponse
+// @Security     SystemRole
+// @Security     TenantID
+// @Router       /tenants/{id}/realm-config [patch]
 func (h *InternalHandler) ApplyRealmConfig(c *gin.Context) {
 	if h.RealmConfig == nil {
 		h.fallback.ApplyRealmConfig(c)

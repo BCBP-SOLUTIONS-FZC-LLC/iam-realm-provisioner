@@ -53,6 +53,20 @@ type provisionTrialRequest struct {
 }
 
 // ProvisionTrial handles RP-1 (POST /tenants/provision-trial).
+//
+// @Summary      RP-1 — Provision trial realm
+// @Description  Creates a shared trial realm for a new tenant and seeds the admin user. Keycloak-effect-first: realm is created in Keycloak before the local row is committed. Idempotent on Idempotency-Key reuse: replays the stored result without re-provisioning.
+// @Tags         Provisioning
+// @Accept       json
+// @Produce      json
+// @Param        request  body      provisionTrialRequest        true  "Trial provisioning payload"
+// @Success      201      {object}  service.ProvisionTrialResult
+// @Failure      400      {object}  ErrorResponse                "invalid_request OR missing_idempotency_key"
+// @Failure      409      {object}  ErrorResponse                "operation_in_progress OR realm_already_exists"
+// @Failure      500      {object}  ErrorResponse
+// @Security     SystemRole
+// @Security     IdempotencyKey
+// @Router       /tenants/provision-trial [post]
 func (h *InternalHandler) ProvisionTrial(c *gin.Context) {
 	if h.Provisioning == nil {
 		h.fallback.ProvisionTrial(c)
@@ -93,6 +107,20 @@ type provisionDirectRequest struct {
 }
 
 // ProvisionDirect handles RP-2 (POST /tenants/provision-direct).
+//
+// @Summary      RP-2 — Provision dedicated paid realm
+// @Description  Creates a dedicated realm for a direct-paid tenant using least-loaded shard placement. Keycloak-effect-first. Idempotent on Idempotency-Key reuse.
+// @Tags         Provisioning
+// @Accept       json
+// @Produce      json
+// @Param        request  body      provisionDirectRequest        true  "Direct provisioning payload"
+// @Success      201      {object}  service.ProvisionDirectResult
+// @Failure      400      {object}  ErrorResponse                 "invalid_request OR missing_idempotency_key"
+// @Failure      409      {object}  ErrorResponse                 "operation_in_progress OR realm_already_exists"
+// @Failure      500      {object}  ErrorResponse
+// @Security     SystemRole
+// @Security     IdempotencyKey
+// @Router       /tenants/provision-direct [post]
 func (h *InternalHandler) ProvisionDirect(c *gin.Context) {
 	if h.Provisioning == nil {
 		h.fallback.ProvisionDirect(c)
@@ -107,6 +135,10 @@ func (h *InternalHandler) ProvisionDirect(c *gin.Context) {
 		HandleError(c, domain.NewError(domain.ErrInvalidRequest, "tenant_slug must not contain '/', whitespace, or control characters"))
 		return
 	}
+	if !validPlan(req.Plan) {
+		HandleError(c, domain.NewError(domain.ErrInvalidRequest, "plan must be one of: starter, pro, enterprise"))
+		return
+	}
 	result, err := h.Provisioning.ProvisionDirect(c.Request.Context(), idempotencyKey(c), service.ProvisionDirectRequest{
 		TenantID: req.TenantID, TenantName: req.TenantName, TenantSlug: req.TenantSlug,
 		AdminEmail: req.AdminEmail, AdminName: req.AdminName,
@@ -117,7 +149,7 @@ func (h *InternalHandler) ProvisionDirect(c *gin.Context) {
 		HandleError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, result)
+	c.JSON(http.StatusCreated, result)
 }
 
 // ── RP-3 ─────────────────────────────────────────────────────────────────
@@ -129,6 +161,23 @@ type convertRequest struct {
 }
 
 // Convert handles RP-3 (POST /tenants/:id/convert).
+//
+// @Summary      RP-3 — Convert trial tenant to dedicated realm
+// @Description  Migrates users from the shared trial realm to a new dedicated realm, preserving Keycloak sub UUIDs. TOTP credentials are copied; WebAuthn requires re-enrolment. Idempotent on Idempotency-Key reuse.
+// @Tags         Provisioning
+// @Accept       json
+// @Produce      json
+// @Param        id       path      string          true  "Tenant UUID"  format(uuid)
+// @Param        request  body      convertRequest  true  "Conversion payload"
+// @Success      200      {object}  service.ConvertResult
+// @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
+// @Failure      404      {object}  ErrorResponse  "realm_not_found"
+// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR invalid_realm_state"
+// @Failure      500      {object}  ErrorResponse
+// @Security     SystemRole
+// @Security     TenantID
+// @Security     IdempotencyKey
+// @Router       /tenants/{id}/convert [post]
 func (h *InternalHandler) Convert(c *gin.Context) {
 	if h.Provisioning == nil {
 		h.fallback.Convert(c)
@@ -161,6 +210,23 @@ type revertConversionRequest struct {
 }
 
 // RevertConversion handles RP-4 (POST /tenants/:id/revert-conversion).
+//
+// @Summary      RP-4 — Revert trial-to-dedicated conversion
+// @Description  Rolls back a conversion within the allowed revert window (7 days trial grace, 14 days post-conversion). Migrates users back to the shared trial realm and deletes the dedicated realm. Body is optional; reason is informational only.
+// @Tags         Provisioning
+// @Accept       json
+// @Produce      json
+// @Param        id       path      string                  false  "Tenant UUID"  format(uuid)
+// @Param        request  body      revertConversionRequest false  "Optional revert reason"
+// @Success      200      {object}  service.RevertConversionResult
+// @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
+// @Failure      404      {object}  ErrorResponse  "realm_not_found"
+// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR revert_window_expired"
+// @Failure      500      {object}  ErrorResponse
+// @Security     SystemRole
+// @Security     TenantID
+// @Security     IdempotencyKey
+// @Router       /tenants/{id}/revert-conversion [post]
 func (h *InternalHandler) RevertConversion(c *gin.Context) {
 	if h.Provisioning == nil {
 		h.fallback.RevertConversion(c)
@@ -190,6 +256,23 @@ type createInvitedUserRequest struct {
 }
 
 // CreateInvitedUser handles RP-5 (POST /tenants/:id/users).
+//
+// @Summary      RP-5 — Create invited user in tenant realm
+// @Description  Creates a Keycloak user in the tenant's realm for an accepted invitation. Sets required_actions (e.g. VERIFY_EMAIL, UPDATE_PASSWORD). Idempotent on Idempotency-Key reuse.
+// @Tags         Users
+// @Accept       json
+// @Produce      json
+// @Param        id       path      string                    true  "Tenant UUID"  format(uuid)
+// @Param        request  body      createInvitedUserRequest  true  "Invited user payload"
+// @Success      201      {object}  service.CreateInvitedUserResult
+// @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
+// @Failure      404      {object}  ErrorResponse  "realm_not_found"
+// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR user_already_exists"
+// @Failure      500      {object}  ErrorResponse
+// @Security     SystemRole
+// @Security     TenantID
+// @Security     IdempotencyKey
+// @Router       /tenants/{id}/users [post]
 func (h *InternalHandler) CreateInvitedUser(c *gin.Context) {
 	if h.Provisioning == nil {
 		h.fallback.CreateInvitedUser(c)
@@ -218,6 +301,20 @@ func (h *InternalHandler) CreateInvitedUser(c *gin.Context) {
 // ── RP-9: MFA reset (fail-closed, idempotent) ────────────────────────────
 
 // ResetMFA handles RP-9 (POST /tenants/:id/users/:keycloak_user_id/mfa-reset).
+//
+// @Summary      RP-9 — Reset user MFA credentials
+// @Description  Deletes all TOTP and WebAuthn credentials for the specified Keycloak user and sets UPDATE_PASSWORD as a required action. Fail-closed: returns error if Keycloak is unreachable (no reconciler). Idempotent — re-deleting already-absent credentials succeeds.
+// @Tags         MFA
+// @Produce      json
+// @Param        id                path  string  true  "Tenant UUID"        format(uuid)
+// @Param        keycloak_user_id  path  string  true  "Keycloak user UUID"  format(uuid)
+// @Success      204               "No Content"
+// @Failure      400               {object}  ErrorResponse  "invalid_request"
+// @Failure      404               {object}  ErrorResponse  "realm_not_found OR user_not_found"
+// @Failure      500               {object}  ErrorResponse
+// @Security     SystemRole
+// @Security     TenantID
+// @Router       /tenants/{id}/users/{keycloak_user_id}/mfa-reset [post]
 func (h *InternalHandler) ResetMFA(c *gin.Context) {
 	if h.Mfa == nil {
 		h.fallback.ResetMFA(c)
@@ -259,6 +356,10 @@ func validTenantSlug(slug string) bool {
 	}
 	return true
 }
+
+var validPlans = map[string]bool{"starter": true, "pro": true, "enterprise": true}
+
+func validPlan(plan string) bool { return validPlans[plan] }
 
 func parseTenantID(c *gin.Context) (uuid.UUID, error) {
 	id, err := uuid.Parse(c.Param("id"))

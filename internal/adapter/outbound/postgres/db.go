@@ -7,8 +7,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
@@ -229,7 +232,44 @@ func wrapConnErr(err error) error {
 	if pgcommon.IsConnectionException(err) || pgcommon.IsInsufficientResources(err) || isOperatorOrSystemErrorSQLState(err) || errors.Is(err, puddle.ErrClosedPool) {
 		return domain.NewError(domain.ErrDBUnavailable, "database unavailable")
 	}
+	// pgx returns Go-level network errors when the connection is dropped
+	// mid-flight (e.g. Postgres container stopped while a query is in
+	// flight). These are not *pgconn.PgError values so the SQLSTATE checks
+	// above miss them — catch them here so callers always get 503, not 500.
+	if isNetworkError(err) {
+		return domain.NewError(domain.ErrDBUnavailable, "database unavailable")
+	}
 	return err
+}
+
+// isNetworkError reports whether err is a Go-level network/IO failure that
+// pgx surfaces when the TCP connection to Postgres is lost mid-flight
+// (container stop, network partition, ECONNRESET). These never reach the
+// SQLSTATE classification path because pgx never received a protocol
+// response — they are unambiguously availability failures (503).
+func isNetworkError(err error) bool {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		return true
+	}
+	// syscall errors: ECONNRESET, ECONNREFUSED, EPIPE, ETIMEDOUT
+	var sysErr syscall.Errno
+	if errors.As(err, &sysErr) {
+		switch sysErr { //nolint:exhaustive // only transient-connection codes are retryable
+		case syscall.ECONNRESET, syscall.ECONNREFUSED, syscall.EPIPE, syscall.ETIMEDOUT:
+			return true
+		}
+	}
+	// pgx wraps some errors in a string — catch "connection refused" and
+	// "connection reset" as a last-resort text match.
+	msg := err.Error()
+	return strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "EOF")
 }
 
 // isOperatorOrSystemErrorSQLState reports whether err is a Postgres error

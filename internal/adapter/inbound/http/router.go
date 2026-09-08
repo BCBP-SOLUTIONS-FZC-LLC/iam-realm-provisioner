@@ -10,9 +10,12 @@ import (
 	"context"
 	"crypto/subtle"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 )
@@ -191,6 +194,17 @@ func registerDocsRoutes(r *gin.Engine, cfg RouterConfig) {
 		}
 	}
 
+	stdSwagger := ginSwagger.WrapHandler(swaggerFiles.Handler)
+	r.GET("/swagger/*any", secHeaders, authMiddleware, func(c *gin.Context) {
+		switch {
+		case strings.HasSuffix(c.Request.URL.Path, "/index.css"):
+			SwaggerThemeHandler(c)
+		case strings.HasSuffix(c.Request.URL.Path, "/swagger-initializer.js"):
+			SwaggerInitializerHandler(c)
+		default:
+			stdSwagger(c)
+		}
+	})
 	r.GET("/asyncapi", secHeaders, authMiddleware, AsyncAPIHandler)
 	r.GET("/asyncapi.yaml", secHeaders, authMiddleware, AsyncAPIYAMLHandler)
 }

@@ -113,6 +113,10 @@ func (s *IdpService) ConfigureIdp(ctx context.Context, idempotencyKey string, te
 		s.failIdempotency(ctx, idempotencyKey)
 		return nil, err
 	}
+	if realm.IsOffboarded() {
+		s.failIdempotency(ctx, idempotencyKey)
+		return nil, domain.NewError(domain.ErrTenantOffboarded, "tenant has been offboarded")
+	}
 	if !realm.IsDedicated() {
 		s.failIdempotency(ctx, idempotencyKey)
 		return nil, domain.NewError(domain.ErrIdpRequiresDedicatedRealm, "IdP configuration requires a dedicated realm")
@@ -222,11 +226,14 @@ func (s *IdpService) RemoveIdp(ctx context.Context, tenantID uuid.UUID, idpAlias
 	if err != nil {
 		return err
 	}
+	if _, err := s.idpConfigs.FindByAlias(ctx, tenantID, idpAlias); err != nil {
+		return err
+	}
 	if err := s.keycloak.DeleteIdp(ctx, realm.RealmName, idpAlias); err != nil {
 		return err
 	}
 	if err := s.openbao.DeleteIdpSecret(ctx, tenantID, idpAlias); err != nil {
-		return err
+		s.log.WarnContext(ctx, "remove_idp: openbao secret delete failed (best-effort)", "tenant_id", tenantID, "idp_alias", idpAlias, "error", err.Error())
 	}
 	return s.idpConfigs.Delete(ctx, tenantID, idpAlias)
 }

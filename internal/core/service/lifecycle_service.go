@@ -72,6 +72,7 @@ type GetRealmResult struct {
 	Strategy      string    `json:"strategy"`
 	KeycloakShard *string   `json:"keycloak_shard,omitempty"`
 	Status        string    `json:"status"`
+	RecordVersion int64     `json:"record_version"`
 }
 
 // GetRealm implements RP-11: returns tenantID's current realm state.
@@ -82,7 +83,7 @@ func (s *LifecycleService) GetRealm(ctx context.Context, tenantID uuid.UUID) (*G
 	}
 	return &GetRealmResult{
 		TenantID: row.TenantID, RealmName: row.RealmName, Strategy: string(row.Strategy),
-		KeycloakShard: row.KeycloakShard, Status: string(row.Status),
+		KeycloakShard: row.KeycloakShard, Status: string(row.Status), RecordVersion: row.RecordVersion,
 	}, nil
 }
 
@@ -116,6 +117,10 @@ func (s *LifecycleService) Reactivate(ctx context.Context, idempotencyKey string
 		s.failIdempotency(ctx, idempotencyKey)
 		return nil, domain.NewError(domain.ErrTenantOffboarded, "tenant is offboarded — this transition is terminal (RP-INV-5)")
 	}
+	if row.Status == domain.RealmStatusProvisioning {
+		s.failIdempotency(ctx, idempotencyKey)
+		return nil, domain.NewError(domain.ErrTenantOffboarded, "tenant is still provisioning — cannot reactivate what was never active")
+	}
 	if row.Status == domain.RealmStatusActive {
 		// Idempotent no-op — already active.
 		result := &ReactivateResult{TenantID: tenantID, Status: string(row.Status)}
@@ -140,7 +145,11 @@ func (s *LifecycleService) Reactivate(ctx context.Context, idempotencyKey string
 		row.Status = domain.RealmStatusActive
 		row.DisabledAt = nil
 		row.SuspensionSource = nil
-		if row.Strategy == domain.RealmStrategyShared && newTrialEndsAt != nil {
+		if row.Strategy == domain.RealmStrategyShared {
+			if newTrialEndsAt == nil {
+				extended := time.Now().UTC().AddDate(0, 0, 30)
+				newTrialEndsAt = &extended
+			}
 			row.TrialEndsAt = newTrialEndsAt
 		}
 		if err := s.realms.Update(ctx, row); err != nil {
@@ -151,10 +160,7 @@ func (s *LifecycleService) Reactivate(ctx context.Context, idempotencyKey string
 			return nil
 		}
 		if row.Strategy == domain.RealmStrategyShared {
-			ends := ""
-			if newTrialEndsAt != nil {
-				ends = newTrialEndsAt.UTC().Format(time.RFC3339)
-			}
+			ends := newTrialEndsAt.UTC().Format(time.RFC3339)
 			return pub.Enqueue(ctx, &domain.Event{
 				Type: domain.EventTrialReactivated, TenantID: tenantID,
 				Data: domain.TrialReactivatedPayload{TenantID: tenantID, NewTrialEndsAt: ends},
@@ -204,7 +210,15 @@ func (s *LifecycleService) ExpireTrial(ctx context.Context, idempotencyKey strin
 	}
 	if row.Strategy != domain.RealmStrategyShared {
 		s.failIdempotency(ctx, idempotencyKey)
-		return nil, domain.NewError(domain.ErrInvalidRequest, "expire-trial only applies to shared-strategy tenants")
+		return nil, domain.NewError(domain.ErrRealmAlreadyDedicated, "expire-trial only applies to shared-strategy tenants")
+	}
+	if row.IsOffboarded() {
+		s.failIdempotency(ctx, idempotencyKey)
+		return nil, domain.NewError(domain.ErrTenantOffboarded, "tenant has been offboarded")
+	}
+	if row.Status == domain.RealmStatusSuspended {
+		s.failIdempotency(ctx, idempotencyKey)
+		return nil, domain.NewError(domain.ErrTenantOffboarded, "tenant is suspended")
 	}
 
 	if err := s.keycloak.DisableUsersInRealm(ctx, row.RealmName, tenantID); err != nil {

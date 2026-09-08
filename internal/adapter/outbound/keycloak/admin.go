@@ -235,7 +235,7 @@ func (a *Admin) RegisterOIDCClients(ctx context.Context, realmName, _ string) (c
 	}
 	builtin := map[string]bool{"realm-management": true, "account": true, "account-console": true,
 		"broker": true, "security-admin-console": true, "admin-cli": true}
-	var ids []string
+	ids := []string{}
 	for _, c := range clients {
 		if c.ClientID == nil || builtin[*c.ClientID] {
 			continue

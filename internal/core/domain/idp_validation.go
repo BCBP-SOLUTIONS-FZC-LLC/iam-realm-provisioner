@@ -21,9 +21,10 @@ const (
 )
 
 // §11.6 Region-Agnostic IdP Configuration Checklist check IDs. CRITICAL
-// checks (1-6, 10-12) block with 400 idp_region_portability_failed;
+// checks (0, 1-6, 10-12) block with 400 idp_region_portability_failed;
 // WARN checks (7-9, 13) allow with a recorded acknowledgement.
 const (
+	CheckConfigSafe          = "check_0_config_safe"
 	CheckSSOURLRegion        = "check_1_sso_url_region"
 	CheckSLOURLRegion        = "check_2_slo_url_region"
 	CheckCustomerSigningCert = "check_3_customer_signing_cert"
@@ -37,13 +38,17 @@ const (
 	CheckOIDCRedirectRegion  = "check_11_oidc_redirect_region" //nolint:gosec // G101 false positive: a §11.6 checklist ID constant, not a credential
 	CheckOIDCAudienceRegion  = "check_12_oidc_audience_region"
 	CheckOIDCPKCE            = "check_13_oidc_pkce"
+	CheckOIDCClientID        = "check_14_oidc_client_id"
+	CheckOIDCIssuerHTTPS     = "check_15_oidc_issuer_https"
 )
 
 // CriticalChecks lists every §11.6 check whose failure blocks with 400.
 var CriticalChecks = []string{
+	CheckConfigSafe,
 	CheckSSOURLRegion, CheckSLOURLRegion, CheckCustomerSigningCert,
 	CheckACSURLRegion, CheckSLOResponseRegion, CheckEntityIDRegion,
 	CheckOIDCIssuerRegion, CheckOIDCRedirectRegion, CheckOIDCAudienceRegion,
+	CheckOIDCClientID, CheckOIDCIssuerHTTPS,
 }
 
 // WarnChecks lists every §11.6 check whose failure requires a recorded
