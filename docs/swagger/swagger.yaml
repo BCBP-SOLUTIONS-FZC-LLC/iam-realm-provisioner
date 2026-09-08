@@ -192,6 +192,8 @@ definitions:
         type: string
       realm_name:
         type: string
+      record_version:
+        type: integer
       status:
         type: string
       strategy:
@@ -929,8 +931,8 @@ paths:
       produces:
       - application/json
       responses:
-        "200":
-          description: OK
+        "201":
+          description: Created
           schema:
             $ref: '#/definitions/service.ProvisionDirectResult'
         "400":

@@ -58,7 +58,7 @@ make schema-register    # Register this service's 9 event schemas to the shared 
 make schema-verify      # Pre-deploy check: fail if any of the 9 schemas is missing from Glue (requires AWS)
 make schema-prune       # Dry-run: list orphaned Glue schemas (requires AWS; excludes O&M's TenantCreated/TrialStarted)
 make swag               # Generate Swagger docs (docs/swagger/) from handler annotations — re-run + commit on change
-make swag-check         # Intended to fail CI on stale docs/swagger/; backing script doesn't exist yet (known gap)
+make swag-check         # Fails if docs/swagger/ is stale relative to handler annotations (regenerate-and-diff, not yet wired into any workflow)
 ```
 
 **Testcontainers note:** Postgres, Keycloak, and OpenBao integration tests spin up real containers via `testcontainers-go`. Each `test/postgres/*.go` test calls `t.Parallel()` and spins its own container, capped at `TEST_POSTGRES_PARALLEL` (default 4) rather than `GOMAXPROCS`-wide. Each `test/integration/*.go` Keycloak test also calls `t.Parallel()` and spins its own container — a JVM/Quarkus image, far heavier than Postgres — capped tighter at `TEST_INTEGRATION_PARALLEL` (default 2); left uncapped this defaults to `GOMAXPROCS` and OOM-kills containers on dev/CI boxes with <16GB of Docker memory. The OpenBao tests in the same package (`openbao_test.go`) share that cap and additionally drive a real Kubernetes-auth login by stubbing the TokenReview endpoint the container calls out to (no real Kubernetes cluster is available). Docker must be running for anything beyond `test-unit`.

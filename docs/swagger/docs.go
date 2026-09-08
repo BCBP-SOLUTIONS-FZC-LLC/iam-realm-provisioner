@@ -91,8 +91,8 @@ const docTemplate = `{
                     }
                 ],
                 "responses": {
-                    "200": {
-                        "description": "OK",
+                    "201": {
+                        "description": "Created",
                         "schema": {
                             "$ref": "#/definitions/service.ProvisionDirectResult"
                         }
@@ -1374,6 +1374,9 @@ const docTemplate = `{
                 },
                 "realm_name": {
                     "type": "string"
+                },
+                "record_version": {
+                    "type": "integer"
                 },
                 "status": {
                     "type": "string"
