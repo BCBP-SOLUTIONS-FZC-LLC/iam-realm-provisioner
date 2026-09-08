@@ -16,11 +16,6 @@ registries:
     username: x-access-token
     password: ${{ secrets.GO_PRIVATE_TOKEN }}
 
-# Dependabot version updates are temporarily paused (open-pull-requests-limit:
-# 0 on every ecosystem below) at the repo owner's request. This stops new
-# update PRs from being opened without losing the registries/schedule/label
-# config. To re-enable, restore each limit to its prior value (gomod: 5,
-# docker: 3, github-actions: 5) and remove this comment.
 updates:
   - package-ecosystem: gomod
     directory: /
@@ -28,19 +23,27 @@ updates:
       - github-bcbp
     schedule:
       interval: weekly
-    open-pull-requests-limit: 0
+    open-pull-requests-limit: 5
     labels: [dependencies, go]
 
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 0
+    open-pull-requests-limit: 3
     labels: [dependencies, docker]
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 0
+    open-pull-requests-limit: 5
     labels: [dependencies, github-actions]
+
+# ─────────────────────────────────────────────────────────────────────────
+# DISABLED (temporarily) — renamed from dependabot.yml so GitHub stops
+# reading it: no scheduled checks, no new PRs. To re-enable, restore the
+# original filename:
+#   git mv .github/dependabot.yml.disabled .github/dependabot.yml
+# Nothing else needs to change — the config above is untouched.
+# ─────────────────────────────────────────────────────────────────────────
