@@ -245,9 +245,9 @@ docs: update Environment variables table for BAO_IDP_PATH_PREFIX
 
 Releases are handled via the CI/CD pipeline (`.github/workflows/ci.yml`). SemVer rules, the runtime contract, image-tag scheme, and the intended tagged-release checklist are in [VERSIONING.md](VERSIONING.md).
 
-1. `validate-test` (race detector + coverage gate + arch-lint + e2e) and `validate-quality` (fmt/tidy/vet/lint/vuln/mod-verify/Dockerfile checks) run in parallel with `build-image`.
-2. A single Docker image is built (`linux/amd64`, distroless static-debian12:nonroot) carrying both `iam-realm-provisioner-server` and `iam-realm-provisioner-reconciler`; Trivy CVE scan and smoke tests run against it.
-3. On push to `main`, the image is pushed to GHCR and signed with Cosign keyless signing (Sigstore OIDC).
+1. `validate-test` (race detector + coverage gate + arch-lint + e2e), `validate-quality` (fmt/tidy/vet/lint/vuln/mod-verify/Dockerfile checks), and `build-image` (Hadolint + cache-only Docker build, `linux/amd64`, distroless static-debian12:nonroot, carrying both `iam-realm-provisioner-server` and `iam-realm-provisioner-reconciler`) all run in parallel with no dependency on each other.
+2. `build-image`'s cache then feeds `trivy` (CVE scan) and `smoke` (smoke tests against both binaries), which run in parallel with each other.
+3. On push to `main`, `push` builds+pushes the image to GHCR and signs it with Cosign keyless signing (Sigstore OIDC).
 4. The Helm chart in `deploy/helm/iam-realm-provisioner/` is applied by the platform CD pipeline — one Deployment (the server) plus 6 CronJobs (the reconciler jobs), all dispatched from the same image with a `command` override.
 5. Separately, schema changes (`internal/eventschema/*.json`, `api/asyncapi.yaml`) trigger `schema-registry.yml`, which registers this service's 9 event schemas to the shared `iam-tenant-events` Glue registry (staging on push to `main`, production on release) — see `docs/runbook-schema-registry.md`.
 
