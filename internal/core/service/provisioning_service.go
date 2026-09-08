@@ -101,6 +101,14 @@ func (s *ProvisioningService) bestEffortDeleteRealm(ctx context.Context, realmNa
 // a real tenant id) is a real conflict: createErr is returned unchanged so
 // the caller still gets ErrUserEmailConflict, not a masked/wrong error.
 func (s *ProvisioningService) resolveUserCreateConflict(ctx context.Context, realmName, email string, wantTenantID uuid.UUID, createErr error) (uuid.UUID, error) {
+	if wantTenantID == uuid.Nil {
+		// Guards the comment's own claim above: without this, a caller
+		// reaching here with an unset TenantID (uuid.Nil) would match ANY
+		// attribute-less legacy user found by FindUserByEmail — both sides
+		// zero-value — and hand back that unrelated user's id as if it
+		// were newly created for this (non-existent) tenant.
+		return uuid.Nil, createErr
+	}
 	existing, err := s.keycloak.FindUserByEmail(ctx, realmName, email)
 	if err != nil {
 		// Couldn't confirm which case this is — surface the ORIGINAL

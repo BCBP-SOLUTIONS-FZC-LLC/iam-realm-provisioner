@@ -147,6 +147,30 @@ func TestProvisionTrial_EmailConflict_DifferentTenant_ReturnsConflict(t *testing
 	assert.Equal(t, domain.OpStatusFailed, idem.rows["key-conflict-2"].Status)
 }
 
+// A caller reaching the conflict resolver with an unset TenantID (uuid.Nil
+// — should never happen given real request binding, but the resolver must
+// not silently trust it) must never match an attribute-less legacy user
+// FindUserByEmail happens to return (also uuid.Nil, since it carries no
+// tenant_id attribute) — that would hand back an unrelated stranger's
+// Keycloak id as if it were this "tenant"'s own. FindUserByEmailFn is left
+// unset here deliberately: if the nil-guard were ever removed, the mock
+// would panic on the call this test proves never happens.
+func TestProvisionTrial_EmailConflict_NilTenantID_NeverLooksUpOrMatches(t *testing.T) {
+	svc, kc, _, idem, _ := newProvisioningTestService(t)
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) {
+		return uuid.Nil, domain.NewError(domain.ErrUserEmailConflict, "email already exists in realm")
+	}
+
+	_, err := svc.ProvisionTrial(context.Background(), "key-conflict-nil", service.ProvisionTrialRequest{
+		TenantID: uuid.Nil, AdminEmail: "owner@acme.example", AdminName: "Dana Owner",
+	})
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrUserEmailConflict, de.Code)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["key-conflict-nil"].Status)
+}
+
 // If FindUserByEmail itself fails (Keycloak flaky right when we're trying
 // to disambiguate), the caller must still see the ORIGINAL conflict error —
 // not the unrelated lookup failure, which would be a confusing regression
