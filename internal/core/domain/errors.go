@@ -17,12 +17,14 @@ const (
 	ErrIdpWarningsUnacknowledged  ErrorCode = "idp_warnings_unacknowledged"   // 422
 	ErrTenantRealmNotFound        ErrorCode = "tenant_realm_not_found"        // 404
 	ErrIdpConfigNotFound          ErrorCode = "idp_config_not_found"          // 404
+	ErrKeycloakUserNotFound       ErrorCode = "keycloak_user_not_found"       // 404
 	ErrIdpRequiresDedicatedRealm  ErrorCode = "idp_requires_dedicated_realm"  // 409
 	ErrRealmAlreadyDedicated      ErrorCode = "realm_already_dedicated"       // 409
 	ErrRevertWindowExpired        ErrorCode = "revert_window_expired"         // 409
 	ErrTenantOffboarded           ErrorCode = "tenant_offboarded"             // 409
 	ErrOperationInProgress        ErrorCode = "operation_in_progress"         // 409
 	ErrOptimisticLockConflict     ErrorCode = "optimistic_lock_conflict"      // 409
+	ErrUserEmailConflict          ErrorCode = "user_email_conflict"           // 409
 	ErrKeycloakUnavailable        ErrorCode = "keycloak_unavailable"          // 502
 	ErrConversionFailed           ErrorCode = "conversion_failed"             // 502
 	ErrOrgMembershipUnavailable   ErrorCode = "org_membership_unavailable"    // 503
@@ -35,6 +37,15 @@ const (
 	ErrInvalidRequest ErrorCode = "invalid_request" // 400
 )
 
+// ErrKeycloakUserNotFound and ErrUserEmailConflict are additive to the
+// frozen §17 taxonomy (same pattern as ErrInvalidRequest above): resolving
+// a create-user 409 into "lost-response retry of my own request" vs "a
+// genuine conflict" (§9.2) needs both a distinguishable not-found signal
+// from FindUserByEmail and a distinguishable conflict signal from
+// CreateTrialUser/CreateInvitedUser — previously both folded into the
+// generic ErrKeycloakUnavailable (502), which a caller could never tell
+// apart from an actual Keycloak outage.
+
 // httpStatus maps every ErrorCode to its frozen HTTP status (§17).
 var httpStatus = map[ErrorCode]int{
 	ErrInvalidRequest:             400,
@@ -46,12 +57,14 @@ var httpStatus = map[ErrorCode]int{
 	ErrIdpWarningsUnacknowledged:  422,
 	ErrTenantRealmNotFound:        404,
 	ErrIdpConfigNotFound:          404,
+	ErrKeycloakUserNotFound:       404,
 	ErrIdpRequiresDedicatedRealm:  409,
 	ErrRealmAlreadyDedicated:      409,
 	ErrRevertWindowExpired:        409,
 	ErrTenantOffboarded:           409,
 	ErrOperationInProgress:        409,
 	ErrOptimisticLockConflict:     409,
+	ErrUserEmailConflict:          409,
 	ErrKeycloakUnavailable:        502,
 	ErrConversionFailed:           502,
 	ErrOrgMembershipUnavailable:   503,

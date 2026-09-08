@@ -88,6 +88,40 @@ func (s *ProvisioningService) bestEffortDeleteRealm(ctx context.Context, realmNa
 	}
 }
 
+// resolveUserCreateConflict handles a domain.ErrUserEmailConflict from
+// CreateTrialUser/CreateInvitedUser (RP-1/RP-2/RP-5, §9.2): looks up the
+// existing user by email and compares its tenant_id attribute against
+// wantTenantID. A match means createErr's 409 is this caller's OWN earlier
+// attempt whose success response was lost (retryTransport never retries a
+// 409 itself, but the caller — e.g. an HTTP client retrying the same
+// Idempotency-Key after a network blip — can) — safe to resume with the
+// existing user's id as if CreateUser had returned it directly. A mismatch
+// (a different tenant's user genuinely holds this email) or an
+// attribute-less legacy user (TenantID stays uuid.Nil, which never equals
+// a real tenant id) is a real conflict: createErr is returned unchanged so
+// the caller still gets ErrUserEmailConflict, not a masked/wrong error.
+func (s *ProvisioningService) resolveUserCreateConflict(ctx context.Context, realmName, email string, wantTenantID uuid.UUID, createErr error) (uuid.UUID, error) {
+	existing, err := s.keycloak.FindUserByEmail(ctx, realmName, email)
+	if err != nil {
+		// Couldn't confirm which case this is — surface the ORIGINAL
+		// conflict rather than the lookup failure, so the caller still
+		// gets a clean 409 instead of a confusing unrelated error.
+		return uuid.Nil, createErr
+	}
+	if existing.TenantID == wantTenantID {
+		return existing.ID, nil
+	}
+	return uuid.Nil, createErr
+}
+
+// isUserEmailConflict reports whether err is domain.ErrUserEmailConflict —
+// the distinguishable signal CreateTrialUser/CreateInvitedUser produce on a
+// 409 (§9.2), as opposed to every other Keycloak failure.
+func isUserEmailConflict(err error) bool {
+	var de *domain.Error
+	return errors.As(err, &de) && de.Code == domain.ErrUserEmailConflict
+}
+
 // marshalIdempotencyResult marshals v for storage in the idempotency
 // ledger. A marshal failure is logged, not propagated — the caller stores
 // whatever bytes result (matching the pre-existing best-effort semantics)
@@ -140,6 +174,9 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 		Email: req.AdminEmail, FullName: req.AdminName, TenantID: req.TenantID,
 		HashedPasswordSeed: req.HashedPasswordSeed, EmailVerified: false,
 	})
+	if isUserEmailConflict(err) {
+		kcUserID, err = s.resolveUserCreateConflict(ctx, s.sharedRealm, req.AdminEmail, req.TenantID, err)
+	}
 	if err != nil {
 		s.failIdempotency(ctx, idempotencyKey)
 		return nil, err
@@ -255,11 +292,21 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 		s.failIdempotency(ctx, idempotencyKey)
 		return nil, err
 	}
-	if _, err := s.keycloak.CreateInvitedUser(ctx, realmName, port.CreateUserRequest{
+	_, err = s.keycloak.CreateInvitedUser(ctx, realmName, port.CreateUserRequest{
 		Email: req.AdminEmail, FullName: req.AdminName, TenantID: req.TenantID,
 		HashedPasswordSeed: req.HashedPasswordSeed, EmailVerified: false,
 		RequiredActions: []string{"VERIFY_EMAIL"},
-	}); err != nil {
+	})
+	if isUserEmailConflict(err) {
+		// A lost-response retry of THIS SAME request lands here with the
+		// realm already fully provisioned — resolve in place rather than
+		// falling through to the compensating delete below, which would
+		// otherwise destroy and recreate a perfectly good realm+OIDC
+		// clients just to dodge an email that's actually this tenant's own
+		// already-created user (§9.2).
+		_, err = s.resolveUserCreateConflict(ctx, realmName, req.AdminEmail, req.TenantID, err)
+	}
+	if err != nil {
 		s.bestEffortDeleteRealm(ctx, realmName)
 		s.failIdempotency(ctx, idempotencyKey)
 		return nil, err
@@ -546,6 +593,9 @@ func (s *ProvisioningService) CreateInvitedUser(ctx context.Context, idempotency
 		Email: req.Email, FullName: req.FullName, TenantID: tenantID,
 		RequiredActions: req.RequiredActions, EmailVerified: false,
 	})
+	if isUserEmailConflict(err) {
+		userID, err = s.resolveUserCreateConflict(ctx, row.RealmName, req.Email, tenantID, err)
+	}
 	if err != nil {
 		s.failIdempotency(ctx, idempotencyKey)
 		return nil, err

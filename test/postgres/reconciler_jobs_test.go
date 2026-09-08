@@ -60,6 +60,9 @@ func (f *fakeJobsKeycloakAdmin) CreateTrialUser(ctx context.Context, req port.Cr
 func (f *fakeJobsKeycloakAdmin) CreateInvitedUser(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
 	panic("not implemented")
 }
+func (f *fakeJobsKeycloakAdmin) FindUserByEmail(ctx context.Context, realmName, email string) (*port.ExistingUser, error) {
+	panic("not implemented")
+}
 func (f *fakeJobsKeycloakAdmin) MigrateUser(ctx context.Context, sourceRealm, targetRealm string, keycloakUserID uuid.UUID) (bool, error) {
 	panic("not implemented")
 }

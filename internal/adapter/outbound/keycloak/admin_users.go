@@ -61,7 +61,7 @@ func (a *Admin) CreateTrialUser(ctx context.Context, req port.CreateUserRequest)
 	}
 	id, err := a.client.CreateUser(ctx, tok, "trial", buildUser(req))
 	if err != nil {
-		return uuid.Nil, wrapErr("create_trial_user", err)
+		return uuid.Nil, wrapCreateUserErr("create_trial_user", req.Email, err)
 	}
 	if err := a.client.SendVerifyEmail(ctx, tok, id, "trial"); err != nil {
 		a.log.Warn("send verify email failed", map[string]any{"error": err.Error(), "user_id": id})
@@ -81,9 +81,57 @@ func (a *Admin) CreateInvitedUser(ctx context.Context, realmName string, req por
 	}
 	id, err := a.client.CreateUser(ctx, tok, realmName, buildUser(req))
 	if err != nil {
-		return uuid.Nil, wrapErr("create_invited_user", err)
+		return uuid.Nil, wrapCreateUserErr("create_invited_user", req.Email, err)
 	}
 	return uuid.Parse(id)
+}
+
+// wrapCreateUserErr classifies a CreateUser failure: a 409 (Keycloak's
+// username/email uniqueness constraint) surfaces as the distinguishable
+// domain.ErrUserEmailConflict — instead of the generic wrapErr's
+// ErrKeycloakUnavailable, which a caller could never tell apart from an
+// actual Keycloak outage — so provisioning_service.go can resolve it via
+// FindUserByEmail (§9.2: a lost-response retry of the caller's own request
+// vs. a genuine conflict). Every other error keeps wrapErr's semantics.
+func wrapCreateUserErr(op, email string, err error) error {
+	if isConflict(err) {
+		return domain.NewError(domain.ErrUserEmailConflict, "email already exists in realm").WithDetails(map[string]any{"email": email})
+	}
+	return wrapErr(op, err)
+}
+
+// FindUserByEmail looks up a user by exact email match in realmName (§9.2)
+// — used by callers of CreateTrialUser/CreateInvitedUser to disambiguate a
+// lost-response retry of their own request from a genuine email conflict.
+func (a *Admin) FindUserByEmail(ctx context.Context, realmName, email string) (existing *port.ExistingUser, err error) {
+	ctx, done := a.begin(ctx, "find_user_by_email")
+	defer func() { done(err) }()
+
+	tok, err := a.token(ctx)
+	if err != nil {
+		return nil, wrapErr("find_user_by_email: token", err)
+	}
+	exact := true
+	users, err := a.client.GetUsers(ctx, tok, realmName, gocloak.GetUsersParams{Email: &email, Exact: &exact})
+	if err != nil {
+		return nil, wrapErr("find_user_by_email", err)
+	}
+	if len(users) == 0 || users[0].ID == nil {
+		return nil, domain.NewError(domain.ErrKeycloakUserNotFound, "no user with this email in realm").WithDetails(map[string]any{"realm": realmName})
+	}
+	id, err := uuid.Parse(*users[0].ID)
+	if err != nil {
+		return nil, wrapErr("find_user_by_email: parse id", err)
+	}
+	existing = &port.ExistingUser{ID: id}
+	if users[0].Attributes != nil {
+		if vals, ok := (*users[0].Attributes)[tenantIDAttribute]; ok && len(vals) > 0 {
+			if tid, parseErr := uuid.Parse(vals[0]); parseErr == nil {
+				existing.TenantID = tid
+			}
+		}
+	}
+	return existing, nil
 }
 
 // MigrateUser recreates a trial user in the dedicated realm, preserving
