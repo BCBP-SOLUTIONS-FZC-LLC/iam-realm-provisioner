@@ -15,6 +15,15 @@
 #                   local dev without those services running, all three
 #                   queues are provisioned against this one topic so a
 #                   developer can hand-publish test events to any of them).
+#   1 dev-only debug SQS — local-outbound-debug-q, unfiltered subscription
+#                   to iam-tenant-events. In production every consumer of
+#                   this service's 9 produced events provisions its own
+#                   subscriber queue (there is deliberately no "outbound
+#                   queue" owned by this service — see README/architecture
+#                   notes on SNS fan-out), so nothing here mirrors that in
+#                   prod. This queue exists purely so a developer can watch
+#                   this service's own produced events land somewhere
+#                   inspectable without standing up a real consumer.
 set -euo pipefail
 
 export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-test}"
@@ -72,8 +81,14 @@ subscribe_queue "$TENANT_TOPIC_ARN" "$TENANT_REALM_Q" '{"EventType": ["TrialStar
 subscribe_queue "$TENANT_TOPIC_ARN" "$MEMBERSHIP_REALM_Q" '{"EventType": ["DepartmentMembershipGranted","DepartmentMembershipLevelChanged","TenantRoleGranted","TenantRoleRevoked"]}'
 subscribe_queue "$TENANT_TOPIC_ARN" "$BILLING_REALM_Q" '{"EventType": ["TenantReactivated"]}'
 
+# -- Dev-only outbound debug queue (unfiltered — every produced event lands
+#    here) -------------------------------------------------------------
+DEBUG_Q=$(awslocal sqs create-queue --queue-name local-outbound-debug-q --query QueueUrl --output text)
+subscribe_queue "$TENANT_TOPIC_ARN" "$DEBUG_Q"
+
 echo "[init-localstack] done."
 echo "  SNS_TOPIC_TENANT_ARN=$TENANT_TOPIC_ARN"
 echo "  SQS_MEMBERSHIP_REALM_QUEUE_URL=$MEMBERSHIP_REALM_Q"
 echo "  SQS_TENANT_REALM_QUEUE_URL=$TENANT_REALM_Q"
 echo "  SQS_BILLING_REALM_QUEUE_URL=$BILLING_REALM_Q"
+echo "  SQS_LOCAL_OUTBOUND_DEBUG_QUEUE_URL=$DEBUG_Q (dev-only: catches every produced event, unfiltered)"
