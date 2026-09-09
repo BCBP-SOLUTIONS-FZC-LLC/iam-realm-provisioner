@@ -62,6 +62,9 @@ services:
   # node, backed by its own embedded H2-equivalent (dev-file) store — NOT
   # for production use (production Keycloak is externally managed per
   # HLD §4.2/§4.3).
+  #
+  # NOTE: docker-compose.pro.yml duplicates this block verbatim (it's a
+  # standalone file, not an override) — keep both in sync if this changes.
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
     command: start-dev
@@ -97,6 +100,9 @@ services:
   # token>` against this container) rather than relying on `make docker-up`
   # alone; test/integration/openbao_test.go is what exercises the real
   # Kubernetes-auth login end to end.
+  #
+  # NOTE: docker-compose.pro.yml duplicates this block verbatim (it's a
+  # standalone file, not an override) — keep both in sync if this changes.
   openbao:
     image: openbao/openbao:latest
     command: ["server", "-dev"]

@@ -2,6 +2,7 @@ package keycloak
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -92,6 +93,39 @@ func TestCreateRealmFromTemplate_Success(t *testing.T) {
 
 	err := a.CreateRealmFromTemplate(context.Background(), realm, "tpl")
 	require.NoError(t, err)
+}
+
+// TestCreateRealmFromTemplate_NeverSetsRealmID guards against Keycloak's
+// REALM.ID column (VARCHAR(36), sized for a bare UUID) overflowing on a
+// long realm name: RP-3's "tenant-"+<36-char tenant UUID> is 43 characters
+// and once overflowed that column on every real Keycloak, surfaced as an
+// opaque 409 "Conflict detected" the existing conflict-handling branch
+// misread as "realm already exists". The fix was to stop setting rep.ID at
+// all (Keycloak assigns its own PK); this test fails if that regresses.
+func TestCreateRealmFromTemplate_NeverSetsRealmID(t *testing.T) {
+	realm := "tenant-82e241d8-f134-4470-9be1-ec5e061f299a" // 43 chars, matches RP-3's dedicatedRealmName shape
+	require.Greater(t, len(realm), 36, "test realm name must exceed Keycloak's REALM.ID column length to be a meaningful guard")
+
+	var capturedBody map[string]any
+	a := newFakeAdmin(t, []tokenResponse{okTokenResponse(), okTokenResponse()}, func(mux *http.ServeMux) {
+		mux.HandleFunc("POST /admin/realms/", func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+			writeLocation(w, realm)
+			writeJSON(w, http.StatusCreated, `{}`)
+		})
+		mux.HandleFunc("POST "+realmPath(realm, "roles"), func(w http.ResponseWriter, r *http.Request) {
+			writeLocation(w, "role-id")
+			writeJSON(w, http.StatusCreated, `{}`)
+		})
+		userProfileHandlers(mux, realm, false, false)
+	})
+
+	err := a.CreateRealmFromTemplate(context.Background(), realm, "tpl")
+	require.NoError(t, err)
+
+	id, present := capturedBody["id"]
+	require.False(t, present && id != nil, "CreateRealm request body must never set id — Keycloak's REALM.ID column overflows on a realm name this long")
+	require.Equal(t, realm, capturedBody["realm"], "the logical realm name must still be set")
 }
 
 func TestCreateRealmFromTemplate_LoadTemplateError(t *testing.T) {
