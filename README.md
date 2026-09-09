@@ -489,11 +489,14 @@ make docker-up
 | `membership-realm-q` (+ `-dlq`) | SQS queue, filtered `EventType IN [DepartmentMembershipGranted, DepartmentMembershipLevelChanged, TenantRoleGranted, TenantRoleRevoked]` |
 | `tenant-realm-q` (+ `-dlq`) | SQS queue, filtered `EventType IN [TrialStarted]` |
 | `billing-realm-q` (+ `-dlq`) | SQS queue, filtered `EventType IN [TenantReactivated]` |
-| `local-outbound-debug-q` | SQS queue, **unfiltered** — dev-only, catches every one of this service's 9 produced events |
+| `tenant-orgm-q` (+ `-dlq`) | SQS queue, **unfiltered** — dev-only fan-out for O&M's LLD §7.4 subscription (all 9 produced events) |
+| `tenant-audit-q` (+ `-dlq`) | SQS queue, **unfiltered** — dev-only fan-out for Audit's LLD §7.4 subscription (all 9 produced events) |
+| `tenant-notif-q` (+ `-dlq`) | SQS queue, dev-only fan-out for Notification's LLD §7.4 subscription, filtered `EventType IN [TenantConverted, DirectPaidSignup, TrialExpired, TenantSuspended, TenantReactivated]` |
+| `tenant-authz-q` (+ `-dlq`) | SQS queue, dev-only fan-out for AuthZ Enrichment's LLD §7.4 subscription, filtered `EventType IN [TenantConverted]` |
 
-`local-outbound-debug-q` has no production equivalent — in production, every consumer of this service's *outbound* events (O&M, Billing) provisions its own subscriber queue, so this service never owns one itself. It exists purely so a developer can watch an outbound event land somewhere inspectable (Step 5 below) without needing a real consumer or guessing which of the three filtered queues would have caught it.
+The last four queues mirror LLD §7.4's "Outbound — `iam.tenant.events` via the outbox" consumer mapping exactly — in production each belongs to its real consumer (O&M, Audit, Notification, AuthZ Enrichment), which is why this service never owns one itself; provisioning them locally (the same approach `iam-org-membership`'s `init-localstack.sh` takes for its own topics) lets a developer observe the full fan-out for any of this service's 9 produced events without standing up those services.
 
-In production these three queues subscribe to **three different upstream topics** (O&M's `iam.membership.events`, O&M's `iam.tenant.events`, Billing's `billing.events`); in local dev, without those services running, the script subscribes all three to this service's own `iam-tenant-events` topic so a developer can hand-publish test events to any of them. Each SNS→SQS subscription sets `RawMessageDelivery=true`.
+In production the three inbound queues above subscribe to **three different upstream topics** (O&M's `iam.membership.events`, O&M's `iam.tenant.events`, Billing's `billing.events`); in local dev, without those services running, the script subscribes all three to this service's own `iam-tenant-events` topic so a developer can hand-publish test events to any of them. Each SNS→SQS subscription sets `RawMessageDelivery=true`.
 
 ### Step 2 — Verify SNS/SQS exist
 
@@ -521,19 +524,17 @@ curl -s -X POST http://localhost:8080/api/v1/internal/tenants/provision-trial \
   -d "{\"tenant_id\":\"$TENANT_ID\",\"tenant_name\":\"Acme\",\"tenant_slug\":\"acme\",\"admin_email\":\"owner@acme.test\",\"admin_name\":\"Owner\",\"plan\":\"trial\"}" | jq .
 ```
 
-A `201` means the row and the `TrialTenantProvisioned` outbox event committed atomically. Expect the message in `local-outbound-debug-q` within ~500 ms (Step 5) — none of the three filtered queues subscribe to this event type.
+A `201` means the row and the `TrialTenantProvisioned` outbox event committed atomically. Per LLD §7.4, `TrialTenantProvisioned` fans out to `tenant-orgm-q` and `tenant-audit-q` (both unfiltered) — expect the message in either within ~500 ms (Step 5). It never reaches `tenant-notif-q`/`tenant-authz-q` (filtered to a different event subset) or any of the three *inbound* queues (`membership-realm-q`/`tenant-realm-q`/`billing-realm-q` filter for entirely different event types this service consumes, not produces).
 
 ### Step 5 — Read messages from SQS
 
-Step 4's `provision-trial` call produces `TrialTenantProvisioned` — none of the three filtered queues' subscriptions match that event type (they filter for membership/`TrialStarted`/`TenantReactivated` respectively), so read it from the unfiltered debug queue instead:
-
 ```bash
 docker compose exec localstack awslocal sqs receive-message \
-  --queue-url http://localhost:4566/000000000000/local-outbound-debug-q \
+  --queue-url http://localhost:4566/000000000000/tenant-orgm-q \
   --max-number-of-messages 10 --region ap-south-1 | jq '.Messages[].Body | fromjson'
 ```
 
-To see a message land in one of the three filtered queues instead, hand-publish an event whose type matches its filter (e.g. `TrialStarted` for `tenant-realm-q`) directly via `awslocal sns publish`.
+Swap in `tenant-audit-q` for the same result (both are unfiltered), or `tenant-notif-q`/`tenant-authz-q` to see only the subset of events each actually subscribes to (§7.4) — e.g. converting a trial tenant (RP-3) produces `TenantConverted`, which lands in all four.
 
 `receive-message` only hides messages for the visibility timeout — use `delete-message` with the `ReceiptHandle` to remove them permanently.
 
