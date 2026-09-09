@@ -333,10 +333,9 @@ docker-up:
 
 .PHONY: docker-up-pro
 docker-up-pro:
-	@echo "Starting Postgres + LocalStack Pro (Glue + KMS)..."
-	@echo "NOTE: Keycloak + OpenBao are provided by 'make mock' (Python mocks on :8091 + :8082)"
+	@echo "Starting Postgres + LocalStack Pro (Glue + KMS) + Keycloak + OpenBao..."
 	@grep -q '^LOCALSTACK_AUTH_TOKEN=.\+' .env 2>/dev/null || { echo "ERROR: LOCALSTACK_AUTH_TOKEN not set in .env"; exit 1; }
-	docker compose -f docker-compose.yml -f docker-compose.pro.yml up -d postgres localstack
+	docker compose -f docker-compose.pro.yml up -d postgres localstack keycloak openbao
 
 .PHONY: docker-down
 docker-down:
