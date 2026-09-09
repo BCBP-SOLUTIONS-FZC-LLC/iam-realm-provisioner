@@ -375,9 +375,13 @@ make run         # start the server on :8080 (metrics on :9090)
 | `make test-postgres` | Postgres + RLS integration (testcontainers-go) |
 | `make test-integration` | Cross-layer (SNS/SQS/Keycloak/OpenBao via testcontainers) |
 | `make test-e2e` | End-to-end tests |
+| `make test-load` | RP-3 migration load test (fake Keycloak, no Docker); `LOAD_TEST_FULL=1` for N=500 |
 | `make race` | All three suites with `-race`, no coverage merge |
 | `make run` | Run the server locally (kills `APP_PORT` first, sources `.env`) |
 | `make run-reconciler JOB=<name>` | Run one reconciler job locally, e.g. `JOB=trial-expiry` |
+| `make mock` | Start both Python mock servers from the sibling `../mock-servers` repo — Keycloak Admin mock (`:8091`) + Org & Membership mock (`:8082`); `OM_MODE=<mode>` forwards to the O&M mock |
+| `make mock-keycloak` / `make mock-org` | Start just one of the two mocks above |
+| `make help` | Print the same command list this table documents, from the Makefile itself |
 | `make build` | Compile both binaries to `bin/` |
 | `make cover` / `make cover-func` | Coverage HTML report / per-function summary |
 | `make ci` | `tidy` + `fmt-check` + `vet` + `lint` + `arch-lint` + `test-ci` + `build` |

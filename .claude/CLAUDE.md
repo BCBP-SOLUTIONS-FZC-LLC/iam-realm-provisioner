@@ -43,6 +43,10 @@ make test-load          # RP-3 migration load test (fake Keycloak, no Docker); L
 make race               # All tests with -race flag
 make run                # Run the server locally (kills APP_PORT first, sources .env)
 make run-reconciler JOB=<name>  # Run one reconciler job locally, e.g. JOB=trial-expiry
+make mock               # Start Python mocks from sibling ../mock-servers: Keycloak Admin (:8091) + Org & Membership (:8082); OM_MODE=<mode> forwards to the O&M mock
+make mock-keycloak      # Just the Keycloak Admin mock (:8091)
+make mock-org           # Just the Org & Membership mock (:8082)
+make help               # Print the Makefile's own command list
 make build              # Compile both binaries to bin/ (iam-realm-provisioner-server, iam-realm-provisioner-reconciler)
 make cover              # Coverage HTML report
 make cover-func         # Coverage summary by function
