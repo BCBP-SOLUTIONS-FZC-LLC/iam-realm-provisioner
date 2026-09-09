@@ -4,7 +4,7 @@ The Realm Provisioner Service — the **single writer to the Keycloak Admin API*
 
 **Repository:** `github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`
 **Module:** Go 1.26.6 · private module · deployed as two binaries from one image (`cmd/server`, `cmd/reconciler`)
-**Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.5 Approved** — names frozen at v1.0 sign-off (`docs/lld/iam-lld-realm-provisioner-service.md`; condensed reference at `docs/lld/IMPLEMENTATION_REFERENCE.md`)
+**Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.6 Approved** — names frozen at v1.0 sign-off (`docs/lld/iam-lld-realm-provisioner-service.md`; condensed reference at `docs/lld/IMPLEMENTATION_REFERENCE.md`)
 
 ---
 
@@ -151,7 +151,7 @@ iam-realm-provisioner/
 │   ├── asyncapi.yaml                  # AsyncAPI 3.0 — iam-tenant-events (9 published) + 3 inbound SQS channels
 │   └── embed.go                       # //go:embed asyncapi.yaml — served from the compiled binary, no source tree in the image
 ├── deploy/                            # Helm chart, AWS IAM policy, OpenBao policy, Prometheus alerts, Keycloak realm template
-├── docs/lld/                          # Frozen LLD v1.5 + condensed IMPLEMENTATION_REFERENCE.md
+├── docs/lld/                          # Frozen LLD v1.6 + condensed IMPLEMENTATION_REFERENCE.md
 ├── docs/runbook-schema-registry.md    # Schema-governance operator runbook (shared iam-tenant-events registry)
 ├── .githooks/pre-commit               # tidy + fmt-check + vet + lint; installed via `make setup`/`make install-hooks`
 ├── VERSIONING.md                      # SemVer policy + maintainer release process
@@ -382,6 +382,7 @@ make run         # start the server on :8080 (metrics on :9090)
 | `make cover` / `make cover-func` | Coverage HTML report / per-function summary |
 | `make ci` | `tidy` + `fmt-check` + `vet` + `lint` + `arch-lint` + `test-ci` + `build` |
 | `make docker-up` / `make docker-down` | Start/stop Postgres + LocalStack + Keycloak + OpenBao |
+| `make docker-up-pro` | Start the standalone `docker-compose.pro.yml` stack instead (LocalStack **Pro** — Glue Schema Registry + KMS — plus the same Postgres/Keycloak/OpenBao; requires `LOCALSTACK_AUTH_TOKEN` in `.env`) |
 | `make migrate-up` / `make migrate-down` / `make migrate-create NAME=<x>` | Migration helpers (standalone `golang-migrate` CLI; the server self-migrates at startup) |
 | `make clean` | Remove `bin/` and coverage artefacts |
 | `make schema-pull` | Pull the `platform-schemagov` Docker image (`0.4`) |
@@ -488,6 +489,9 @@ make docker-up
 | `membership-realm-q` (+ `-dlq`) | SQS queue, filtered `EventType IN [DepartmentMembershipGranted, DepartmentMembershipLevelChanged, TenantRoleGranted, TenantRoleRevoked]` |
 | `tenant-realm-q` (+ `-dlq`) | SQS queue, filtered `EventType IN [TrialStarted]` |
 | `billing-realm-q` (+ `-dlq`) | SQS queue, filtered `EventType IN [TenantReactivated]` |
+| `local-outbound-debug-q` | SQS queue, **unfiltered** — dev-only, catches every one of this service's 9 produced events |
+
+`local-outbound-debug-q` has no production equivalent — in production, every consumer of this service's *outbound* events (O&M, Billing) provisions its own subscriber queue, so this service never owns one itself. It exists purely so a developer can watch an outbound event land somewhere inspectable (Step 5 below) without needing a real consumer or guessing which of the three filtered queues would have caught it.
 
 In production these three queues subscribe to **three different upstream topics** (O&M's `iam.membership.events`, O&M's `iam.tenant.events`, Billing's `billing.events`); in local dev, without those services running, the script subscribes all three to this service's own `iam-tenant-events` topic so a developer can hand-publish test events to any of them. Each SNS→SQS subscription sets `RawMessageDelivery=true`.
 
@@ -517,15 +521,19 @@ curl -s -X POST http://localhost:8080/api/v1/internal/tenants/provision-trial \
   -d "{\"tenant_id\":\"$TENANT_ID\",\"tenant_name\":\"Acme\",\"tenant_slug\":\"acme\",\"admin_email\":\"owner@acme.test\",\"admin_name\":\"Owner\",\"plan\":\"trial\"}" | jq .
 ```
 
-A `201` means the row and the `TrialTenantProvisioned` outbox event committed atomically. Expect the message in `tenant-realm-q`-adjacent queues within ~500 ms (only in local dev, where all three queues subscribe to this one topic).
+A `201` means the row and the `TrialTenantProvisioned` outbox event committed atomically. Expect the message in `local-outbound-debug-q` within ~500 ms (Step 5) — none of the three filtered queues subscribe to this event type.
 
 ### Step 5 — Read messages from SQS
 
+Step 4's `provision-trial` call produces `TrialTenantProvisioned` — none of the three filtered queues' subscriptions match that event type (they filter for membership/`TrialStarted`/`TenantReactivated` respectively), so read it from the unfiltered debug queue instead:
+
 ```bash
 docker compose exec localstack awslocal sqs receive-message \
-  --queue-url http://localhost:4566/000000000000/membership-realm-q \
+  --queue-url http://localhost:4566/000000000000/local-outbound-debug-q \
   --max-number-of-messages 10 --region ap-south-1 | jq '.Messages[].Body | fromjson'
 ```
+
+To see a message land in one of the three filtered queues instead, hand-publish an event whose type matches its filter (e.g. `TrialStarted` for `tenant-realm-q`) directly via `awslocal sns publish`.
 
 `receive-message` only hides messages for the visibility timeout — use `delete-message` with the `ReceiptHandle` to remove them permanently.
 
@@ -713,6 +721,16 @@ Unlike a compose file that starts infra-only, this repo's `docker-compose.yml` i
 
 `make docker-up` only starts `postgres`, `localstack`, `keycloak`, and `openbao` — not `app` — so local dev typically still runs the service itself via `make run` for fast rebuilds.
 
+### LocalStack Pro (`docker-compose.pro.yml`)
+
+A separate, fully standalone compose file — not an override of `docker-compose.yml` — for local dev against LocalStack **Pro** (Glue Schema Registry + KMS): `postgres`/`keycloak`/`openbao` are identical to the community stack, `localstack` runs the Pro image with `SERVICES: sns,sqs,s3,glue,kms`. Run it with `make docker-up-pro` or directly:
+
+```bash
+LOCALSTACK_AUTH_TOKEN=<your-token> docker compose -f docker-compose.pro.yml up -d postgres localstack keycloak openbao
+```
+
+Both compose files carry a cross-reference comment on their `keycloak`/`openbao` blocks — since they're duplicated (not shared via `extends`/override), an edit to one must be mirrored in the other.
+
 ### Building the service image
 
 ```bash
@@ -860,7 +878,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, extending the serv
 | [`.claude/request-flows.md`](.claude/request-flows.md) | Keycloak-effect-first discipline, compensating teardown, every RP-*/RP-C* flow, idempotency mechanics, GDPR/data-lifecycle |
 | [`.claude/operations.md`](.claude/operations.md) | Security, observability, configuration, CI/CD, testing, GDPR, integration points, open items |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Detailed architecture narrative with Mermaid diagrams — layer model, write flow, RLS/GUC flow, threat model |
-| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD, v1.5 Approved — §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
+| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD, v1.6 Approved — §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
 | [`docs/runbook.md`](docs/runbook.md) | Full operator procedures for the headline incident scenarios |
 
 ---

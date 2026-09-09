@@ -75,7 +75,11 @@ POST /tenants/:id/convert {plan, billing_subscription_id, payment_method_id (acc
   slug := tenant_id.String()   -- the FULL uuid, not a truncated prefix (§9.3 fix below): Convert's request
                                   body carries no slug (§5.2), and this service persists no tenant_slug of
                                   its own, so a stable name is derived from the tenant id itself
-  realmName := "tenant-" + slug
+  realmName := "tenant-" + slug   -- 43 chars; CreateRealmFromTemplate must set only rep.Realm to this,
+                                     never Keycloak's internal REALM.ID PK (VARCHAR(36)) -- doing so once
+                                     overflowed that column on every real conversion, surfaced as an opaque
+                                     409 the conflict branch below misread as "resume a prior attempt" (fixed,
+                                     LLD rev 1.6)
   shard := selectShard()
   realmMayHaveMigratedUsers := false
   Keycloak.CreateRealmFromTemplate(realmName, "v1")
