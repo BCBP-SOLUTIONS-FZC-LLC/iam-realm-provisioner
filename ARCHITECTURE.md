@@ -2,7 +2,7 @@
 
 This document describes the internal structure, dependency rules, and runtime data flows of `iam-realm-provisioner`.
 
-`iam-realm-provisioner` is a **private Go service** (`github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.6) deployed as a containerised microservice (HPA 2–4 replicas), refining **IAM HLD v1.42 §5.2** (LLD v1.6, `docs/lld/iam-lld-realm-provisioner-service.md`, condensed at `docs/lld/IMPLEMENTATION_REFERENCE.md`; where LLD and HLD disagree, HLD is authoritative). It is the **single writer to the Keycloak Admin API** across the entire IAM subsystem (RP-INV-1, HLD §4.2/§5.2) and the system of record for the small amount of local state — realm identity, IdP config, reconciliation and idempotency ledgers — needed to make that writing safe, idempotent, and replayable. Org & Membership owns the application-side `tenants` row; this service owns Keycloak-side realm reality and its `tenant_realms` mirror (RP-D6) — neither writes the other's store. It ships as **two binaries from one image**: `cmd/server` (the mesh-only `/api/v1/internal` API, RP-1..RP-16, three inbound SQS consumers, and the transactional outbox runner) and `cmd/reconciler` (a single binary dispatched by `--job=<name>`, covering RP-C1..RP-C4 plus two operational prune jobs, each its own Kubernetes CronJob). The service sits on **neither of the platform's two hot paths** (HLD §4.3) — work is bursty, coarse-grained tenant-lifecycle operations, where correctness, auditability, and idempotency matter more than latency.
+`iam-realm-provisioner` is a **private Go service** (`github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.6) deployed as a containerised microservice (HPA 2–4 replicas), refining **IAM HLD v1.42 §5.2** (LLD v1.8, `docs/lld/iam-lld-realm-provisioner-service.md`; where LLD and HLD disagree, HLD is authoritative). It is the **single writer to the Keycloak Admin API** across the entire IAM subsystem (RP-INV-1, HLD §4.2/§5.2) and the system of record for the small amount of local state — realm identity, IdP config, reconciliation and idempotency ledgers — needed to make that writing safe, idempotent, and replayable. Org & Membership owns the application-side `tenants` row; this service owns Keycloak-side realm reality and its `tenant_realms` mirror (RP-D6) — neither writes the other's store. It ships as **two binaries from one image**: `cmd/server` (the mesh-only `/api/v1/internal` API, RP-1..RP-16, three inbound SQS consumers, and the transactional outbox runner) and `cmd/reconciler` (a single binary dispatched by `--job=<name>`, covering RP-C1..RP-C4 plus two operational prune jobs, each its own Kubernetes CronJob). The service sits on **neither of the platform's two hot paths** (HLD §4.3) — work is bursty, coarse-grained tenant-lifecycle operations, where correctness, auditability, and idempotency matter more than latency.
 
 **Does not own:** tenants-as-business-entities, memberships, roles, invitations (Org & Membership); JWT issuance / login (Keycloak itself); delegation, tender ACL, group-mapping, or the plan/department catalogues (sibling services extracted from Core); any per-user table (there is none — Keycloak is the sole store of user identity and credentials); secret material in Postgres (IdP secrets live only in OpenBao).
 
@@ -33,7 +33,7 @@ graph TD
         orgmembership["orgmembership/\nHTTPClient — I-8 residual-MFA check + I-16 subscription-lapse poll"]
         s3["s3/\nObjectStore — realm export (RP-EVT-4)"]
         eventbus["eventbus/\nValidatingCodec (enqueue) · GlueCodec (SNS)\nOutbox Runner · single topic iam.tenant.events"]
-        metrics["metrics/\niam_realm_provisioner_* business instruments"]
+        metrics["metrics/\niam_realm_provisioner_* (Tier 3, authoritative) +\nplatform_* (Tier 1, Status: Proposed) instruments"]
     end
 
     subgraph eventschema_grp["Embedded Schemas  —  internal/eventschema/"]
@@ -626,7 +626,8 @@ graph LR
     subgraph prom["Prometheus  →  /metrics on dedicated METRICS_PORT (never shares a listener)"]
         p1["http_requests_total{method,route,status_class}\nhttp_request_duration_seconds · http_active_requests\n(platform-gincommon, free)"]
         p2["events_* / outbox_* / sqs_*\n(platform-events, incl. outbox_dead_letters_total)"]
-        p3["iam_realm_provisioner_* business instruments\n(internal/adapter/outbound/metrics/metrics.go):\nprovision_total{kind,result} · users_migrated_total\nrealm_active_gauge{strategy} · keycloak_call_duration_seconds{op}\nkeycloak_call_failures_total{op} · admin_token_refresh_total{trigger}\nidp_validation_total{outcome} · mfa_role_sync_total{action}\nrealm_config_pending_gauge · trial_expiry_processed/deferred_total\nlapse_processed_total{transition} · realm_export_total{result}\nuser_delete_total{result} · session_revoke_total{result}\nmfa_reset_total{result} · template_drift{realm_version}\nrls_violations_total{violation_type} · unknown_event_acknowledged_total{topic,event_type}\nprocessed_events_duplicates_total{consumer}"]
+        p3["iam_realm_provisioner_* Tier 3 (service-specific) instruments —\nAUTHORITATIVE for every alert/SLO\n(internal/adapter/outbound/metrics/metrics.go), §25 frozen prefix:\nprovision_total{kind,result} · users_migrated_total\nrealm_active_gauge{strategy} · keycloak_call_duration_seconds{op}\nkeycloak_call_failures_total{op} · admin_token_refresh_total{trigger}\nidp_validation_total{outcome} · mfa_role_sync_total{action}\nrealm_config_pending_gauge · trial_expiry_processed/deferred_total\nlapse_processed_total{transition} · realm_export_total{result}\nuser_delete_total{result} · session_revoke_total{result}\nmfa_reset_total{result} · template_drift{realm_version}\nrls_violations_total{violation_type} · unknown_event_acknowledged_total{topic,event_type}\nprocessed_events_duplicates_total{consumer}"]
+        p4["platform_* Tier 1 (cross-domain) candidates — Status: Proposed,\nshadow-emitted only, NOT wired into any alert/SLO pending\nPlatform Observability Registry ratification (rules 11/12):\n{domain=\"iam\", service=\"realm-provisioner\", environment}\nplatform_dependency_request_seconds{dependency,operation,outcome}\nplatform_duplicate_messages_total{consumer}\nplatform_rls_violations_total{violation_type}\nsee internal/adapter/outbound/metrics/registry.go's PlatformRegistry"]
     end
 
     subgraph otel["OpenTelemetry Traces"]
@@ -1045,7 +1046,7 @@ graph LR
         readme["README.md\nmental model · API/event overview · onboarding"]
         asyncapi_yaml["api/asyncapi.yaml\nAsyncAPI 3.0 — iam-tenant-events SNS contract\n(9 published + 6 consumed)"]
         swag_annot["@Summary/@Router annotations\non all 16 RP-1..RP-16 handlers +\ncmd/server/swagger_info.go"]
-        lld["docs/lld/iam-lld-realm-provisioner-service.md\nfrozen LLD v1.6 + IMPLEMENTATION_REFERENCE.md"]
+        lld["docs/lld/iam-lld-realm-provisioner-service.md\nfrozen LLD v1.8"]
     end
 
     subgraph rendered["Rendered by"]
@@ -1075,6 +1076,6 @@ graph LR
 | [`.claude/request-flows.md`](.claude/request-flows.md) | Provisioning, conversion, IdP, MFA, lapse, GDPR ordering |
 | [`.claude/operations.md`](.claude/operations.md) | Security, observability, configuration, deployment, CI/CD, dependency degradation matrix |
 | [`docs/architecture/README.md`](docs/architecture/README.md) | Standalone Mermaid diagram set index (the 9 `.mmd` files embedded above) |
-| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD (v1.6) — §16 open-question register, §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
+| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD (v1.8) — §16 open-question register, §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
 
 Render a diagram locally: open any `.mmd` file in a Mermaid-aware IDE (VS Code + Mermaid Preview, IntelliJ + Mermaid plugin) or paste into [mermaid.live](https://mermaid.live).

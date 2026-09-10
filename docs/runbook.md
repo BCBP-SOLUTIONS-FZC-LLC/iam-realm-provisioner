@@ -1,6 +1,6 @@
 # Operator Runbook — iam-realm-provisioner
 
-Full procedures for the headline scenarios listed in LLD §24. This service is the single writer to the Keycloak Admin API and the system of record for tenant identity lifecycle — most incidents here are either "Keycloak is unhappy" or "something didn't land locally after Keycloak succeeded." Grafana dashboard: "IAM — Realm Provisioner". Metric prefix: `iam_realm_provisioner_*` (frozen, §25). Alert rules: `deploy/monitoring/app-alerts.yml`.
+Full procedures for the headline scenarios listed in LLD §24. This service is the single writer to the Keycloak Admin API and the system of record for tenant identity lifecycle — most incidents here are either "Keycloak is unhappy" or "something didn't land locally after Keycloak succeeded." Grafana dashboard: "IAM — Realm Provisioner". Metric prefixes: `iam_realm_provisioner_*` (Tier 3, service-specific, frozen §25 — **the metric every alert below actually reads**) and `platform_*` (Tier 1, shared across domains, all `Status: Proposed` — shadow-emitted for Platform Observability Registry ratification, not yet wired into any alert; see `.claude/operations.md` §11.1). Alert rules: `deploy/monitoring/app-alerts.yml`.
 
 ---
 
@@ -9,7 +9,7 @@ Full procedures for the headline scenarios listed in LLD §24. This service is t
 **Symptom:** `keycloak_call_failures_total` alert firing (rate > 5% for 5m), provisioning endpoints returning `502`/`realm_provisioning_failed`.
 
 **Diagnosis:**
-1. Check `iam_realm_provisioner_keycloak_call_duration_seconds{op}` and `iam_realm_provisioner_keycloak_call_failures_total{op}` broken down by operation — is it one op (e.g. `create_realm`) or everything?
+1. Check `iam_realm_provisioner_keycloak_call_duration_seconds{op}` and `iam_realm_provisioner_keycloak_call_failures_total{op}` broken down by operation — is it one op (e.g. `create_realm`) or everything? (A `platform_dependency_request_seconds{dependency="keycloak",operation,outcome}` Tier 1 candidate shadow-emits the same data, but it is `Status: Proposed` — not yet ratified — so it is not what this alert reads.)
 2. Check `iam_realm_provisioner_admin_token_refresh_total{trigger="401"}` — a spike here means the admin credential was rotated (client secret changed in OpenBao/Keycloak) and the cached token is stale everywhere, not that Keycloak itself is down.
 3. Check the client-side rate limiter budget (`KEYCLOAK_RATE_LIMIT_RPS`, default 20) — a burst of retries from callers can self-inflict 429s that look like a Keycloak outage.
 4. Check Keycloak's own health/logs directly if reachable.

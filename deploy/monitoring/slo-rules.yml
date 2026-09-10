@@ -15,7 +15,14 @@
 #  SLO-2  Keycloak Admin API call success rate
 #         Target: 99% of Keycloak Admin API calls
 #         (iam_realm_provisioner_keycloak_call_duration_seconds) succeed.
-#         This is the dependency this service is most exposed to — every
+#         A Tier 1 platform_dependency_request_seconds{dependency="keycloak"}
+#         candidate is shadow-emitted from the same call site (Status:
+#         Proposed in internal/adapter/outbound/metrics/registry.go's
+#         PlatformRegistry — not yet ratified per the Enterprise Platform
+#         Observability Standard's governance rules, so this SLO
+#         intentionally still reads the Tier 3 pair; see
+#         deploy/monitoring/app-alerts.yml's header). This is the
+#         dependency this service is most exposed to — every
 #         provisioning/migration/IdP/MFA operation is a Keycloak call.
 #
 #  SLO-3  Reconciler convergence

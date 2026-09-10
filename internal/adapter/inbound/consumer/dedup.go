@@ -23,6 +23,9 @@ func skipDuplicate(ctx context.Context, dedup port.ProcessedEventsStore, consume
 		if metrics.ProcessedEventsDuplicates != nil {
 			metrics.ProcessedEventsDuplicates.WithLabelValues(string(consumer)).Inc()
 		}
+		if metrics.DuplicateMessagesTotal != nil {
+			metrics.DuplicateMessagesTotal.WithLabelValues(string(consumer)).Inc()
+		}
 		return true, nil
 	}
 	return false, nil

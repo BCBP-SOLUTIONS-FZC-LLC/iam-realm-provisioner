@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with the **Realm Provisioner Service** (`iam-realm-provisioner`), a Go microservice in the IAM subsystem (Tender Management SaaS platform). Refines the IAM HLD; LLD v1.6 Approved (`docs/lld/iam-lld-realm-provisioner-service.md`, condensed reference at `docs/lld/IMPLEMENTATION_REFERENCE.md`), owner database `provisioner` on shared RDS PostgreSQL. Where LLD and HLD disagree, HLD is authoritative.
+This file provides guidance to Claude Code when working with the **Realm Provisioner Service** (`iam-realm-provisioner`), a Go microservice in the IAM subsystem (Tender Management SaaS platform). Refines the IAM HLD; LLD v1.8 Approved (`docs/lld/iam-lld-realm-provisioner-service.md`), owner database `provisioner` on shared RDS PostgreSQL. Where LLD and HLD disagree, HLD is authoritative.
 
 ## What This Repo Is
 
@@ -31,6 +31,8 @@ make fmt-check          # Verify gofmt formatting without modifying files (mirro
 make vet                # go vet ./...
 make lint               # golangci-lint (via go tool golangci-lint)
 make arch-lint          # go-arch-lint dependency-rule enforcement (§3.4) + RP-INV-1/RLS-6 greps
+make metrics-registry-lint # Enterprise Platform Observability Standard: no unratified platform_* metric sources a live alert/recording-rule/SLO
+make metric-naming-lint # Enterprise Platform Observability Standard: naming/suffix/label/registry-compliance rules against every registered metric
 make mod-verify         # go mod verify (check module download integrity)
 make vuln-check         # govulncheck ./internal/... ./pkg/...
 make test               # Unit + postgres + integration tests in parallel (requires Docker; e2e is separate — make test-e2e)
@@ -50,7 +52,7 @@ make help               # Print the Makefile's own command list
 make build              # Compile both binaries to bin/ (iam-realm-provisioner-server, iam-realm-provisioner-reconciler)
 make cover              # Coverage HTML report
 make cover-func         # Coverage summary by function
-make ci                 # tidy + fmt-check + vet + lint + arch-lint + test-ci + build (full CI pipeline)
+make ci                 # tidy + fmt-check + vet + lint + arch-lint + metrics-registry-lint + metric-naming-lint + test-ci + build (full CI pipeline)
 make docker-up          # Start Postgres + LocalStack + Keycloak + OpenBao (Docker required)
 make docker-up-pro      # Standalone LocalStack Pro stack instead (docker-compose.pro.yml — Glue + KMS, same Postgres/Keycloak/OpenBao; requires LOCALSTACK_AUTH_TOKEN)
 make docker-down        # Stop containers
@@ -111,7 +113,7 @@ Cross-cutting discipline: Keycloak-effect-first, then local commit (§9.1, see a
 
 ## Operations
 
-Security (Keycloak admin role set — `create-realm` on master, `realm-admin` composite on managed realms; credential protection via OpenBao, never env/image/git; per-tenant IdP secrets, never a Postgres pointer; network isolation, mesh-only); observability (`iam_realm_provisioner_*`-prefixed metrics, tracing, structured logging, dashboards, alerts); configuration (all env vars, fail-fast checks, realm-template versioning + drift detection); deployment (topology, two workloads from one image, 6 CronJobs, Helm chart layout, CI/CD pipeline); testing strategy (unit/integration/contract/e2e/RLS/load); GDPR/data-lifecycle (minimal PII, erasure on trial hard-delete and offboarding, export-before-delete invariant); integration points with O&M/Billing/Signup BFF. Full detail in **[`.claude/operations.md`](operations.md)**.
+Security (Keycloak admin role set — `create-realm` on master, `realm-admin` composite on managed realms; credential protection via OpenBao, never env/image/git; per-tenant IdP secrets, never a Postgres pointer; network isolation, mesh-only); observability (Enterprise Platform Observability Standard three-tier metrics — `iam_realm_provisioner_*` Tier 3, authoritative, + three shadow-emitted `platform_*` Tier 1 candidates pending Platform Observability Registry ratification — tracing, structured logging, dashboards, alerts); configuration (all env vars, fail-fast checks, realm-template versioning + drift detection); deployment (topology, two workloads from one image, 6 CronJobs, Helm chart layout, CI/CD pipeline); testing strategy (unit/integration/contract/e2e/RLS/load); GDPR/data-lifecycle (minimal PII, erasure on trial hard-delete and offboarding, export-before-delete invariant); integration points with O&M/Billing/Signup BFF. Full detail in **[`.claude/operations.md`](operations.md)**.
 
 ## See Also
 
@@ -122,7 +124,7 @@ Detailed reference docs in `.claude/`:
 - [`request-flows.md`](request-flows.md) — Keycloak-effect-first discipline, compensating teardown, every RP-*/RP-C* flow, idempotency mechanics
 - [`operations.md`](operations.md) — security, observability, configuration, CI/CD, testing, GDPR, integration points, open items
 
-Full LLD (v1.6 Approved, `docs/lld/iam-lld-realm-provisioner-service.md`) and its condensed reference (`docs/lld/IMPLEMENTATION_REFERENCE.md`, §1 frozen name inventory through §24 operational runbooks), checked into this repo.
+Full LLD (v1.8 Approved, `docs/lld/iam-lld-realm-provisioner-service.md`), checked into this repo.
 
 Supplementary docs in the repo root:
 - **`README.md`** — mental model, API/event overview, onboarding

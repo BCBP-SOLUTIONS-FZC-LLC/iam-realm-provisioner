@@ -4,7 +4,7 @@ The Realm Provisioner Service — the **single writer to the Keycloak Admin API*
 
 **Repository:** `github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`
 **Module:** Go 1.26.6 · private module · deployed as two binaries from one image (`cmd/server`, `cmd/reconciler`)
-**Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.6 Approved** — names frozen at v1.0 sign-off (`docs/lld/iam-lld-realm-provisioner-service.md`; condensed reference at `docs/lld/IMPLEMENTATION_REFERENCE.md`)
+**Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.8 Approved** — names frozen at v1.0 sign-off (`docs/lld/iam-lld-realm-provisioner-service.md`)
 
 ---
 
@@ -145,13 +145,13 @@ iam-realm-provisioner/
 │           ├── orgmembership/         # HTTP client for O&M's I-8 residual-MFA check + I-16 subscription-lapse poll (RP-C3)
 │           ├── s3/                    # Realm-export object store (offboarding, RP-EVT-4)
 │           ├── httpx/                 # Shared instrumented http.RoundTripper (traceparent injection)
-│           └── metrics/               # iam_realm_provisioner_* Prometheus counters/histograms/gauges
+│           └── metrics/               # iam_realm_provisioner_* (Tier 3) + platform_* (Tier 1) Prometheus counters/histograms/gauges
 ├── pkg/requestctx/                    # Typed RequestContext{UserID, TenantID, Roles}
 ├── api/
 │   ├── asyncapi.yaml                  # AsyncAPI 3.0 — iam-tenant-events (9 published) + 3 inbound SQS channels
 │   └── embed.go                       # //go:embed asyncapi.yaml — served from the compiled binary, no source tree in the image
 ├── deploy/                            # Helm chart, AWS IAM policy, OpenBao policy, Prometheus alerts, Keycloak realm template
-├── docs/lld/                          # Frozen LLD v1.6 + condensed IMPLEMENTATION_REFERENCE.md
+├── docs/lld/                          # Frozen LLD v1.8
 ├── docs/runbook-schema-registry.md    # Schema-governance operator runbook (shared iam-tenant-events registry)
 ├── .githooks/pre-commit               # tidy + fmt-check + vet + lint; installed via `make setup`/`make install-hooks`
 ├── VERSIONING.md                      # SemVer policy + maintainer release process
@@ -170,9 +170,10 @@ iam-realm-provisioner/
 | `adapters_inbound` (http/consumer) | `core/domain`, `core/port`, `core/service`, `requestctx`, `apispec`, `observability` |
 | `cmd` (server/reconciler) | Everything above |
 
-Plus two extra CI-enforced invariants (`.github/scripts/arch-lint.sh`) beyond the layering check itself:
+Plus one extra CI-enforced invariant (`.github/scripts/arch-lint.sh`) beyond the layering check itself:
 - **RP-INV-1** — `grep -rl "Nerzal/gocloak" --include="*.go" .` outside `internal/adapter/outbound/keycloak/` must be empty.
-- **RLS-6** — `grep -rn "SET app\.tenant_id"` across `*.go`/`*.sql` must only ever appear as `SET LOCAL` (transaction-scoped), never a session-scoped `SET`.
+
+RLS-6 (no non-`SET LOCAL` write to `app.tenant_id`) is checked separately, inline in `validate-quality.yml` (not `arch-lint.sh`) — matching the sibling IAM services' convention of inlining that gate directly in the workflow.
 
 ### Storage and messaging
 
@@ -366,7 +367,9 @@ make run         # start the server on :8080 (metrics on :9090)
 | `make install-hooks` | Install `.githooks/pre-commit` (tidy + fmt-check + vet + lint); also run by `make setup` |
 | `make tidy` / `make fmt` / `make fmt-check` / `make vet` | Go basics; `fmt-check` mirrors CI, does not modify files |
 | `make lint` | `golangci-lint` via `go tool` |
-| `make arch-lint` | `go-arch-lint` dependency-rule enforcement + RP-INV-1/RLS-6 greps |
+| `make arch-lint` | `go-arch-lint` dependency-rule enforcement + RP-INV-1 grep |
+| `make metrics-registry-lint` | Enterprise Platform Observability Standard: no unratified `platform_*` metric sources a live alert/recording-rule/SLO |
+| `make metric-naming-lint` | Enterprise Platform Observability Standard: naming/suffix/label/registry-compliance rules against every registered metric |
 | `make mod-verify` | `go mod verify` |
 | `make vuln-check` | `govulncheck ./internal/... ./pkg/...` |
 | `make test` | Unit + postgres + integration in parallel (Docker required) |
@@ -384,7 +387,7 @@ make run         # start the server on :8080 (metrics on :9090)
 | `make help` | Print the same command list this table documents, from the Makefile itself |
 | `make build` | Compile both binaries to `bin/` |
 | `make cover` / `make cover-func` | Coverage HTML report / per-function summary |
-| `make ci` | `tidy` + `fmt-check` + `vet` + `lint` + `arch-lint` + `test-ci` + `build` |
+| `make ci` | `tidy` + `fmt-check` + `vet` + `lint` + `arch-lint` + `metrics-registry-lint` + `metric-naming-lint` + `test-ci` + `build` |
 | `make docker-up` / `make docker-down` | Start/stop Postgres + LocalStack + Keycloak + OpenBao |
 | `make docker-up-pro` | Start the standalone `docker-compose.pro.yml` stack instead (LocalStack **Pro** — Glue Schema Registry + KMS — plus the same Postgres/Keycloak/OpenBao; requires `LOCALSTACK_AUTH_TOKEN` in `.env`) |
 | `make migrate-up` / `make migrate-down` / `make migrate-create NAME=<x>` | Migration helpers (standalone `golang-migrate` CLI; the server self-migrates at startup) |
@@ -568,7 +571,8 @@ docker compose exec postgres psql -U postgres -d provisioner -c \
 
 - **`test/postgres/rls_test.go`** — the 5 canonical RLS cases (missing GUC → 0 rows; cross-tenant `INSERT`/`UPDATE` rejected; cross-tenant `SELECT`/`UPDATE` see/affect 0 rows; **Case 5** — no GUC leakage across a pooled PgBouncer backend, pool pinned to `MaxConns=1`) plus two structural tests (every tenant-scoped table has `rowsecurity=true AND forcerowsecurity=true`; `outbox_events`/`processed_events`/`exporter_watermarks` deliberately do not).
 - **`internal/eventschema/asyncapi_drift_test.go`** — asserts `api/asyncapi.yaml`'s `iamTenantEvents` channel message list and `eventschema.ByEventType`'s map keys name exactly the same 9 events. This repo's CI-enforceable substitute for a live AWS Glue Schema Registry comparison.
-- **RP-INV-1 / RLS-6 greps** — `.github/scripts/arch-lint.sh`: no `Nerzal/gocloak` import outside `internal/adapter/outbound/keycloak/`; no non-`SET LOCAL` write to `app.tenant_id`.
+- **RP-INV-1 grep** — `.github/scripts/arch-lint.sh`: no `Nerzal/gocloak` import outside `internal/adapter/outbound/keycloak/`.
+- **RLS-6 grep** — inline in `validate-quality.yml` (not a standalone script, matching the sibling IAM services): no non-`SET LOCAL` write to `app.tenant_id`.
 
 ### Coverage
 
@@ -653,7 +657,12 @@ Coverage is measured over `./cmd/...`, `./internal/...`, `./pkg/...` (`COVER_PKG
 
 ### Metrics
 
-All `iam_realm_provisioner_`-prefixed (`internal/adapter/outbound/metrics/metrics.go`, §25 frozen names): `provision_total{kind,result}`, `users_migrated_total`, `realm_active_gauge{strategy}`, `keycloak_call_duration_seconds{op}`, `keycloak_call_failures_total{op}`, `admin_token_refresh_total{trigger}` (`proactive`\|`401`), `idp_validation_total{outcome}`, `mfa_role_sync_total{action}`, `realm_config_pending_gauge`, `trial_expiry_processed_total`, `trial_expiry_deferred_total`, `lapse_processed_total{transition}`, `realm_export_total{result}`, `user_delete_total{result}`, `session_revoke_total{result}`, `mfa_reset_total{result}`, `template_drift{realm_version}`, `rls_violations_total{violation_type}` — plus passthrough `http_*` (`platform-gincommon`), `events_*`/`outbox_*`/`sqs_*` (`platform-events`, incl. `outbox_dead_letters_total`), and `pgcommon_*` pool/query instruments.
+Follows the Enterprise Platform Observability Standard's three-tier hierarchy (`internal/adapter/outbound/metrics/metrics.go`'s package doc has the full per-metric rationale; `internal/adapter/outbound/metrics/registry.go`'s `PlatformRegistry` carries the full ratification packets — semantic definition, labels and their allowed values, cardinality, aggregation expectations):
+
+- **Tier 1 `platform_*`, all `Status: Proposed`** (shared across every domain, `{domain="iam", service="realm-provisioner", environment}` labels; submitted to the Platform Observability Registry, **not yet ratified** — shadow-emitted only, per the standard's governance rules 11/12 not wired into any alert/dashboard/SLO/HPA): `platform_dependency_request_seconds{dependency,operation,outcome}`, `platform_duplicate_messages_total{consumer}`, `platform_rls_violations_total{violation_type}`.
+- **Tier 3 `iam_realm_provisioner_`-prefixed** (§25 frozen names — this repo's sole authoritative alerting/SLO source; RP-INV-1 — sole Keycloak Admin API caller — means no Tier 2 domain-shared metric currently applies): `provision_total{kind,result}`, `users_migrated_total`, `realm_active_gauge{strategy}`, `keycloak_call_duration_seconds{op}`, `keycloak_call_failures_total{op}`, `admin_token_refresh_total{trigger}` (`proactive`\|`401`), `idp_validation_total{outcome}`, `mfa_role_sync_total{action}`, `realm_config_pending_gauge`, `trial_expiry_processed_total`, `trial_expiry_deferred_total`, `lapse_processed_total{transition}`, `realm_export_total{result}`, `user_delete_total{result}`, `session_revoke_total{result}`, `mfa_reset_total{result}`, `template_drift{realm_version}`, `rls_violations_total{violation_type}`, `unknown_event_acknowledged_total{topic,event_type}`, `processed_events_duplicates_total{consumer}`.
+
+The three Tier 1 candidates keep emitting in parallel with their Tier 3 counterpart indefinitely, pending governance ratification (no removal date on the Tier 3 side — it stays authoritative until/unless a candidate is ratified). CI-enforced Go tests (`TestNamingConvention_ConformsToPlatformObservabilityStandard`, `TestPlatformRegistry_EntriesAreWellFormed`) check naming/registry/label-vocabulary compliance on every build; `.github/scripts/metrics-registry-lint.sh` fails the build if a `Proposed` metric is used as a live alert/recording-rule/SLO source. Plus passthrough `http_*` (`platform-gincommon`), `events_*`/`outbox_*`/`sqs_*` (`platform-events`, incl. `outbox_dead_letters_total`), and `pgcommon_*` pool/query instruments.
 
 Three DB-state gauges (`realm_active_gauge`, `realm_config_pending_gauge`, `template_drift`) are refreshed every 5 minutes by exporter goroutines against the BYPASSRLS sys pool — a flat gauge plus a `gauge exporter query failed` log line means the exporter is broken, not that the count is stable. `trial_expiry_*`, `lapse_processed_total`, and `realm_export_total` are incremented correctly but only inside the one-shot reconciler CronJob process, which exits before a scrape lands — treat silence on those series as "no signal", not "no problem".
 
@@ -692,8 +701,8 @@ Nine workflow files, including a tag-triggered `release.yml` (`VERSIONING.md` §
 
 - **`ci.yml`** — orchestrator, matching `iam-org-membership`'s job graph. `validate-test.yml`, `validate-quality.yml`, and `build-image` (Hadolint → `.dockerignore` check → Buildx build, cache-only — no local load, no push) all run in parallel with no dependency on each other. `build-image`'s cache then feeds two jobs that run in parallel with each other, gated on `[validate-test, build-image]`: `trivy` (loads the cached image, CVE scan CRITICAL/HIGH/UNKNOWN `ignore-unfixed`, SARIF upload to the Security tab, CycloneDX SBOM artifact) and `smoke` (loads the cached image, runs `smoke-tests.sh` twice — once per binary/entrypoint). On `push` to `main`/`master`, `push` (needs `[validate-test, trivy, smoke, validate-quality]`) builds+pushes a `linux/amd64` image to GHCR with provenance+SBOM, signs it with Cosign keyless (Sigstore OIDC), and self-verifies the signature — its own success is the gate, no separate `push-gate` job. `pr-summary` (needs all five) posts/updates one PR comment via `.github/scripts/pr-summary.js`.
 - **`release.yml`** — tag-triggered (`vMAJOR.MINOR.PATCH[-pre]`) release pipeline, modeled on sibling `iam-authz-enrichment`'s release workflow: `validate-test`/`validate-quality` re-run at the tagged commit → `build` (verifies the tag matches HEAD and the CHANGELOG has an entry, cross-compiles **both** binaries for 5 platforms) → `docker` (build/push the semver-tagged image, Trivy CVE scan, CycloneDX SBOM, SLSA provenance, Cosign sign+verify, then smoke tests against **both** binaries via the same `smoke-tests.sh` `ci.yml` uses) → `deploy-gate` (skipped unless `vars.DEPLOY_GATE_ENABLED == 'true'` — live Helm deploy, digest verification, `http_requests_total{status_class="5xx"}` health check, automatic rollback) → `publish` (GitHub Release with the CHANGELOG section as notes, binaries/checksums/SBOM/provenance attached).
-- **`validate-test.yml`** (reusable) — `make test-ci` (unit + postgres/RLS + integration, `-race`, merged coverage) → `coverage-gate.sh` (`COVERAGE_THRESHOLD: '80'` pinned in this workflow) → uploads `coverage.out` as an artifact → `arch-lint.sh` (layering + RP-INV-1 + RLS-6) → `make test-e2e`.
-- **`validate-quality.yml`** (reusable) — `go mod verify` → a grep rejecting HTML-escaped operators (`&gt;`/`&lt;`/`&amp;`) in workflow/script files → the RLS-6-style `check-forbidden-set-guc.sh` gate → `gofmt` check → `go mod tidy` drift check → `go vet` → `golangci-lint` → `govulncheck` → a Dockerfile digest-pin check (rejects a floating `FROM` tag without `@sha256:...`). The AsyncAPI-vs-Glue drift gate (`platform-schemagov validate`) runs separately, in `schema-registry.yml`'s `pr-check` job (see below).
+- **`validate-test.yml`** (reusable) — `make test-ci` (unit + postgres/RLS + integration, `-race`, merged coverage) → `coverage-gate.sh` (`COVERAGE_THRESHOLD: '80'` pinned in this workflow) → uploads `coverage.out` as an artifact → `arch-lint.sh` (layering + RP-INV-1; RLS-6 is inline in `validate-quality.yml` instead) → `metrics-registry-lint.sh` (Enterprise Platform Observability Standard — no unratified `platform_*` metric may source a live alert/recording-rule/SLO) → `make test-e2e`.
+- **`validate-quality.yml`** (reusable) — `go mod verify` → a grep rejecting HTML-escaped operators (`&gt;`/`&lt;`/`&amp;`) in workflow/script files → an inline RLS-6 gate (reject non-transaction-local `SET app.tenant_id`, matching the sibling IAM services' convention of inlining this check directly in the workflow rather than a standalone script) → `check-metric-naming.sh` (Enterprise Platform Observability Standard naming/suffix/label/registry-compliance rules, mirroring the sibling IAM services' identically-named step) → `gofmt` check → `go mod tidy` drift check → `go vet` → `golangci-lint` → `govulncheck` → a Dockerfile digest-pin check (rejects a floating `FROM` tag without `@sha256:...`). The AsyncAPI-vs-Glue drift gate (`platform-schemagov validate`) runs separately, in `schema-registry.yml`'s `pr-check` job (see below).
 - **`changelog-check.yml`** — fails a PR that touches `internal/`, `api/`, `deploy/`, `cmd/`, or `pkg/` without also updating `CHANGELOG.md`.
 - **`schema-registry.yml`** — registers this service's 9 event schemas to the shared `iam-tenant-events` Glue registry: PR read-only validate+diff, push-to-`main`/release full validate→diff→register→changelog pipeline against staging/production. See `docs/runbook-schema-registry.md`.
 - **`schema-prune.yml`** — monthly dry-run orphan report plus an operator `workflow_dispatch` execute path (archives to `docs/schema-archive/` before `glue:DeleteSchema`); hard-blocks execute while `iam-org-membership`'s `TenantCreated`/`TrialStarted` are present in the shared registry.
@@ -883,7 +892,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, extending the serv
 | [`.claude/request-flows.md`](.claude/request-flows.md) | Keycloak-effect-first discipline, compensating teardown, every RP-*/RP-C* flow, idempotency mechanics, GDPR/data-lifecycle |
 | [`.claude/operations.md`](.claude/operations.md) | Security, observability, configuration, CI/CD, testing, GDPR, integration points, open items |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Detailed architecture narrative with Mermaid diagrams — layer model, write flow, RLS/GUC flow, threat model |
-| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD, v1.6 Approved — §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
+| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD, v1.8 Approved — §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
 | [`docs/runbook.md`](docs/runbook.md) | Full operator procedures for the headline incident scenarios |
 
 ---

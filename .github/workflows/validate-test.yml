@@ -114,6 +114,14 @@ jobs:
       - name: Architecture lint
         run: bash .github/scripts/arch-lint.sh
 
+      # Enforces the Enterprise Platform Observability Standard's
+      # governance rules 11/12: no unratified (Status: Proposed in
+      # internal/adapter/outbound/metrics/registry.go's PlatformRegistry)
+      # platform_* metric may source a live alert/recording-rule/SLO
+      # expression.
+      - name: Metrics registry compliance lint
+        run: bash .github/scripts/metrics-registry-lint.sh
+
       # End-to-end tests exercise the full HTTP router (RP-1..RP-16) against
       # real Postgres, plus the three SQS consumers and all four reconciler
       # jobs against local Testcontainers (§17). Not part of the coverage

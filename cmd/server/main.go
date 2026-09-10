@@ -77,7 +77,7 @@ func main() {
 	// same middleware slice to the Gin engine; gincommon's metrics.Init is sync.Once.
 	_ = gincommon.ObservabilityMiddlewares(cfg)
 
-	metrics.Register()
+	metrics.Register(appEnv)
 
 	// platform-events outbox/publish/consume metrics and platform-pgcommon
 	// query/pool metrics share gincommon's registerer so a single /metrics

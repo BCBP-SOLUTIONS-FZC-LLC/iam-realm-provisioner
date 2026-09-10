@@ -15,6 +15,6 @@ func TestMain(m *testing.M) {
 		ServiceName:  "iam-realm-provisioner",
 		BuildVersion: "test",
 	})
-	metrics.Register()
+	metrics.Register("test")
 	os.Exit(m.Run())
 }

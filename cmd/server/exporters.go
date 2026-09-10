@@ -91,6 +91,7 @@ func runBusinessExporters(ctx context.Context, gauges *pgadapter.GaugeRepository
 		for violationType, n := range counts {
 			if n > 0 {
 				metrics.RLSViolationsTotal.WithLabelValues(violationType).Add(float64(n))
+				metrics.RLSViolationsPlatformTotal.WithLabelValues(violationType).Add(float64(n))
 			}
 		}
 		return nil

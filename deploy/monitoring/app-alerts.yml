@@ -7,6 +7,26 @@
 # metrics (events_*, outbox_*, sqs_*) are emitted by platform-events with a
 # ConstLabel service="iam-realm-provisioner".
 #
+# Enterprise Platform Observability Standard (Tier 1/2/3 hierarchy): three
+# of this service's metrics also have a shadow-emitted Tier 1 platform_*
+# candidate (see internal/adapter/outbound/metrics/metrics.go's package doc
+# and registry.go's PlatformRegistry for the full classification/ratification
+# state) —
+#   iam_realm_provisioner_keycloak_call_failures_total/_duration_seconds
+#     ~ platform_dependency_request_seconds{dependency="keycloak",operation,outcome}  [Proposed]
+#   iam_realm_provisioner_processed_events_duplicates_total
+#     ~ platform_duplicate_messages_total{consumer}  [Proposed]
+#   iam_realm_provisioner_rls_violations_total
+#     ~ platform_rls_violations_total{violation_type}  [Proposed]
+# All three platform_* candidates are Status: Proposed in PlatformRegistry —
+# submitted to the Platform Observability Registry but NOT yet ratified. Per
+# the standard's governance rules (11/12), a Proposed metric MUST NOT source
+# production alerting until ratified, so every alert below intentionally
+# still reads the iam_realm_provisioner_* name. Once a candidate's status
+# flips to Canonical, follow the standard's Backward Compatibility migration
+# steps (this file next, then the SLO recording rules, then this service's
+# Helm-rendered twin) — do not cut an alert over unilaterally before that.
+#
 # This is a standalone reference copy of the same alerts the chart's own
 # templates/prometheusrule.yaml renders as a PrometheusRule CRD (enabled via
 # prometheusRule.enabled in values.yaml) — use this file directly (e.g. a
@@ -14,7 +34,7 @@
 # service via the Helm chart; keep both in sync when adding a new alert.
 #
 # The exact alert list and thresholds below are pinned in
-# docs/lld/IMPLEMENTATION_REFERENCE.md §11.5 — do not add an alert on a
+# docs/lld/iam-lld-realm-provisioner-service.md §11.5 — do not add an alert on a
 # metric that doesn't exist in the code (grep
 # internal/adapter/outbound/metrics/metrics.go first).
 #
@@ -23,6 +43,14 @@
 #   method   — HTTP method
 #   path     — route pattern (e.g. /tenants/:id/realm)
 #   status   — HTTP status code
+#
+# Labels on this service's Tier 1 platform_* metrics:
+#   domain       — "iam"
+#   service      — "realm-provisioner" (note: NOT "iam-realm-provisioner" —
+#                  this is the domain-relative slug the Platform
+#                  Observability Standard uses, distinct from the
+#                  gincommon `service` label above)
+#   environment  — APP_ENV (dev|staging|prod)
 
 groups:
   - name: iam_realm_provisioner_availability
@@ -99,7 +127,11 @@ groups:
             RP-INV-1's single Keycloak writer means every tenant realm
             operation funnels through this one service.
 
-      # ── Keycloak Admin API failure rate (§11.5) ────────────────────────────
+      # ── Keycloak Admin API failure rate (§11.5). The Tier 1
+      #    platform_dependency_request_seconds candidate (shadow-emitted
+      #    from the same call site) is Status: Proposed, not yet ratified
+      #    — this alert intentionally still reads the authoritative Tier 3
+      #    pair per this file's header. ─────────────────────────────────
       - alert: IAMRealmProvisionerKeycloakCallFailureRate
         expr: |
           sum(rate(iam_realm_provisioner_keycloak_call_failures_total[5m]))
@@ -295,7 +327,11 @@ groups:
   - name: iam_realm_provisioner_tenant_isolation
     rules:
 
-      # ── RLS-6 cross-tenant access (§17.5 Case 5) ────────────────────────
+      # ── RLS-6 cross-tenant access (§17.5 Case 5). The Tier 1
+      #    platform_rls_violations_total candidate (shadow-emitted from the
+      #    same exporter tick) is Status: Proposed, not yet ratified —
+      #    this alert intentionally still reads the authoritative Tier 3
+      #    metric per this file's header. ─────────────────────────────────
       - alert: IAMRealmProvisionerRLSCrossTenantAccess
         # cross_tenant_access means a valid app.tenant_id GUC pointed at a
         # row belonging to a different tenant — either a real attack or a

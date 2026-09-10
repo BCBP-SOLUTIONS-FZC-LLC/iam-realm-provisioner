@@ -90,7 +90,7 @@ iam-realm-provisioner/
 │   └── scripts/                        # arch-lint.sh, coverage-gate.sh, release/schema-gov helper scripts
 ├── .githooks/pre-commit                # tidy + fmt-check + vet + lint; installed via `make setup`/`make install-hooks`
 ├── test/{unit,postgres,integration,e2e,load}/
-├── docs/lld/                           # frozen LLD + IMPLEMENTATION_REFERENCE.md (condensed reference)
+├── docs/lld/                           # frozen LLD
 ├── docs/runbook-schema-registry.md     # schema-governance operator runbook (shared iam-tenant-events registry)
 ├── VERSIONING.md                       # SemVer policy + maintainer release process (release.yml)
 ├── Dockerfile  docker-compose.yml  docker-compose.pro.yml  Makefile  go.mod  .golangci.yml  .go-arch-lint.yml

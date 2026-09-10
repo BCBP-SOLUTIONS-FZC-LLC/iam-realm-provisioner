@@ -48,15 +48,31 @@ Checks every SAML/OIDC config field against a fixed list of AWS region substring
 
 ### 11.1 Metrics
 
-All `iam_realm_provisioner_`-prefixed (frozen §25 name inventory), registered in `internal/adapter/outbound/metrics/metrics.go`:
+Instruments follow the Enterprise Platform Observability Standard's three-tier hierarchy, all registered in `internal/adapter/outbound/metrics/metrics.go` (that file's package doc carries the full per-metric classification rationale) plus a registry manifest (`internal/adapter/outbound/metrics/registry.go`'s `PlatformRegistry` — the full ratification packet per metric: semantic definition, required/approved labels and their allowed values, cardinality justification, aggregation expectations):
+
+- **Tier 1 (`platform_*`)** — shared across domains, labeled `{domain="iam", service="realm-provisioner", environment}` (note: `service` here is the domain-relative slug, distinct from the gincommon `service` const label below, which is this binary's process name). The standard's governance rules (9-12) forbid unilaterally adopting a new `platform_*` metric into production alerting before it clears the **Platform Observability Registry**'s ratification process — see the Governance callout below.
+- **Tier 2 (`iam_*`, domain-shared)** — none currently apply. RP-INV-1 (this service is the sole Keycloak Admin API caller in the platform) means almost every metric here represents a behavior no other IAM service can perform, so it fails the "shared across IAM services" test and stays Tier 3.
+- **Tier 3 (`iam_realm_provisioner_*`, frozen §25 name inventory)** — everything else, this service's original and still-authoritative metric family. Nothing in it is renamed by the Tier 1 candidates below.
+
+> **Governance: Proposed vs. Canonical.** This service emits three Tier 1 `platform_*` candidates in shadow (parallel emission, per the standard's Backward Compatibility step 1), each `Status: Proposed` in `PlatformRegistry` — submitted for ratification, **not yet approved**. Per rules 11/12, a `Proposed` metric MUST NOT source a production alert, dashboard, recording rule, SLO, or HPA reference; every one of this repo's alerts/SLOs continues to read the Tier 3 metric until a candidate's status flips to `Canonical`. `.github/scripts/metrics-registry-lint.sh` (wired into `make ci`) enforces this mechanically — it fails if any `Proposed` `platform_*` name appears as a live query target in `deploy/monitoring/*.yml` or the Helm-rendered `prometheusrule.yaml`. Full ratification packets (semantic definition, labels, aggregation expectations) live in `internal/adapter/outbound/metrics/registry.go`'s `PlatformRegistry`.
+
+**Tier 1 — `platform_*` (all Status: Proposed, shadow-emitted only):**
+
+| Metric | Type | Labels | Description | Tier 3 predecessor (still authoritative) |
+|---|---|---|---|---|
+| `platform_dependency_request_seconds` | Histogram | `dependency` (`keycloak`), `operation`, `outcome` (`success`\|`failure`) | Outbound dependency-call latency; failure rate derives from `outcome="failure"` sample count, no separate counter. Named in the standard's own Registry-Proposed Examples. | `iam_realm_provisioner_keycloak_call_duration_seconds` + `_keycloak_call_failures_total` |
+| `platform_duplicate_messages_total` | Counter | `consumer` | SQS redeliveries filtered by a consumer's dedup store. Named in the standard's own Registry-Proposed Examples. | `iam_realm_provisioner_processed_events_duplicates_total` |
+| `platform_rls_violations_total` | Counter | `violation_type` | RLS-6 violations scraped from `rls_violation_log` (RLS is a platform-wide Postgres pattern, not IAM-specific). **Not** one of the standard's own named examples — this service's own additional proposal. | `iam_realm_provisioner_rls_violations_total` |
+
+**Tier 3 — `iam_realm_provisioner_*` (authoritative):**
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
 | `iam_realm_provisioner_provision_total` | Counter | `kind` (`trial`\|`direct`\|`convert`), `result` | Provisioning attempts |
 | `iam_realm_provisioner_users_migrated_total` | Counter | — | Users migrated across a conversion |
 | `iam_realm_provisioner_realm_active_gauge` | Gauge | `strategy` | Active realms by strategy |
-| `iam_realm_provisioner_keycloak_call_duration_seconds` | Histogram | `op` | Keycloak Admin API call latency |
-| `iam_realm_provisioner_keycloak_call_failures_total` | Counter | `op` | Keycloak Admin API call failures |
+| `iam_realm_provisioner_keycloak_call_duration_seconds` | Histogram | `op` | Keycloak Admin API call latency — every alert/SLO reads this (see Governance above) |
+| `iam_realm_provisioner_keycloak_call_failures_total` | Counter | `op` | Keycloak Admin API call failures — every alert/SLO reads this |
 | `iam_realm_provisioner_admin_token_refresh_total` | Counter | `trigger` (`proactive`\|`401`) | Admin token cache refresh — a `401`-triggered spike signals credential rotation, not an outage |
 | `iam_realm_provisioner_idp_validation_total` | Counter | `outcome` | §11.6 validation run outcomes |
 | `iam_realm_provisioner_mfa_role_sync_total` | Counter | `action` (`assign`\|`revoke`) | `membership-realm-q` MFA role reconciles |
@@ -68,9 +84,14 @@ All `iam_realm_provisioner_`-prefixed (frozen §25 name inventory), registered i
 | `iam_realm_provisioner_user_delete_total` | Counter | `result` | RP-15 |
 | `iam_realm_provisioner_session_revoke_total` | Counter | `result` | RP-16 |
 | `iam_realm_provisioner_mfa_reset_total` | Counter | `result` | RP-9 (fail-closed semantics) |
-| `iam_realm_provisioner_template_drift` | Gauge/Counter | `realm_version` | Report-only realm-template drift (RP-3) |
+| `iam_realm_provisioner_template_drift` | Gauge | `realm_version` | Report-only realm-template drift (RP-3) |
+| `iam_realm_provisioner_rls_violations_total` | Counter | `violation_type` | RLS-6 violations — every RLS alert reads this |
+| `iam_realm_provisioner_unknown_event_acknowledged_total` | Counter | `topic`, `event_type` | Inbound events silently ack'd because no handler is wired — the standard's own worked Tier 3 example, so not a candidate for promotion |
+| `iam_realm_provisioner_processed_events_duplicates_total` | Counter | `consumer` | SQS redeliveries filtered by dedup |
 
-Plus passthrough `http_*` (from `platform-gincommon`), `events_*`/`outbox_*`/`sqs_*` (from `platform-events`, including `outbox_dead_letters_total`), and `pgcommon_*` pool/query/retry instruments (from `platform-pgcommon`'s `pgmetrics.InitWithRegisterer`). All three land on the registry `gincommon.MetricsRegisterer()` returns — `cmd/server/main.go` primes `ObservabilityMiddlewares` first (gincommon's metrics-init API), then registers business / events / pg collectors onto it, rather than assuming `DefaultRegisterer`. No projection-lag metric — this service is a producer, not a projector.
+Plus passthrough `http_*` (from `platform-gincommon`), `events_*`/`outbox_*`/`sqs_*` (from `platform-events`, including `outbox_dead_letters_total`), and `pgcommon_*` pool/query/retry instruments (from `platform-pgcommon`'s `pgmetrics.InitWithRegisterer`). All land on the registry `gincommon.MetricsRegisterer()` returns — `cmd/server/main.go` primes `ObservabilityMiddlewares` first (gincommon's metrics-init API), then registers business / events / pg collectors onto it, rather than assuming `DefaultRegisterer`. No projection-lag metric — this service is a producer, not a projector.
+
+CI enforcement: `internal/adapter/outbound/metrics/metrics_test.go`'s `TestNamingConvention_ConformsToPlatformObservabilityStandard` (naming/suffix rules, required Tier 1 labels, registry-compliance — every `platform_*` name gathered must have a `PlatformRegistry` entry, label-vocabulary compliance) and `TestPlatformRegistry_EntriesAreWellFormed` (registry.go itself is well-formed), both run by `make test-unit`/`make ci` and explicitly re-run as their own `validate-quality.yml` step (`make metric-naming-lint` → `.github/scripts/check-metric-naming.sh`) — mirroring the sibling IAM services' "Metric naming convention check" step, though those run a static source-regex scan (their `check-metric-naming.sh`) rather than this service's dynamic gathered-registry test, since only this service has a Proposed/Canonical registry-ratification model (§25) for a static scan to have no equivalent for; `.github/scripts/metrics-registry-lint.sh` (`make metrics-registry-lint`, in `make ci` and `validate-test.yml`) enforces that no `Proposed` metric sources a live alert/recording-rule/SLO.
 
 > **DB-state gauges.** `realm_active_gauge`, `realm_config_pending_gauge`, and `template_drift` are refreshed every 5 minutes by exporter goroutines in `cmd/server` (`runBusinessExporters` → `pgadapter.GaugeRepository`, querying the BYPASSRLS sysPool), emitting once at startup so they are populated before the first scrape. A failing query logs `gauge exporter query failed` at WARN and keeps the previous value, so **a flat gauge plus that log line means the exporter is broken, not that the count is stable** — check the log before trusting a flat line. `template_drift` series disappear when a version stops drifting (the vec is reset each poll); `realm_active_gauge` reports an explicit `0` instead.
 >
@@ -88,6 +109,7 @@ Plus passthrough `http_*` (from `platform-gincommon`), `events_*`/`outbox_*`/`sq
 - `outbox_dead_letters_total` increase > 0 over 30m → warning
 - `{membership,billing,tenant}-realm-q` DLQ depth > 0 → warning
 - `admin_token_refresh_total{trigger="401"}` spike → possible credential-rotation issue, not necessarily an outage
+- RLS-6 cross-tenant access / missing-or-invalid-GUC → critical (no `for`) / warning (10m) — reads `iam_realm_provisioner_rls_violations_total{violation_type=...}` (Tier 3; the `platform_rls_violations_total` Tier 1 candidate is Status: Proposed, not yet wired into alerting, see §11.1)
 
 ### 11.2 Tracing
 
@@ -169,8 +191,8 @@ Every job is idempotent per tenant (safe to re-run) and batched (`RECONCILER_BAT
 
 ### 13.2 CI/CD (`.github/workflows/`)
 
-- **`validate-test.yml`** — unit + integration (`go test -race`), coverage gate (`.github/scripts/coverage-gate.sh`), Postgres + Keycloak testcontainers.
-- **`validate-quality.yml`** — `golangci-lint`, `.go-arch-lint.yml` check (`.github/scripts/arch-lint.sh`), the no-session-scoped-`SET`-GUC grep (RLS-6), the no-`gocloak`-outside-`adapter/keycloak` grep (RP-INV-1). It carries no schema step itself — the AsyncAPI-vs-Glue drift gate (pinned `platform-schemagov` validation of `api/asyncapi.yaml` against the `iam-tenant-events` Glue registry, failing the PR on drift) lives in `schema-registry.yml`'s `pr-check` job instead; see 13.2.1 below for the full schema-governance pipeline that same tool also drives.
+- **`validate-test.yml`** — unit + integration (`go test -race`), coverage gate (`.github/scripts/coverage-gate.sh`), Postgres + Keycloak testcontainers, `.go-arch-lint.yml` check plus the no-`gocloak`-outside-`adapter/keycloak` grep (RP-INV-1) (`.github/scripts/arch-lint.sh` — matching the sibling IAM services' `arch-lint.sh`, which does only the `go-arch-lint` check; RLS-6 is not duplicated here, see `validate-quality.yml` below), and the Enterprise Platform Observability Standard's registry-compliance check (`.github/scripts/metrics-registry-lint.sh` — no unratified `platform_*` metric may source a live alert/recording-rule/SLO, §11.1).
+- **`validate-quality.yml`** — `golangci-lint`, an inline no-transaction-local-`SET`-GUC check (RLS-6 — matching the sibling IAM services' convention of inlining this gate directly in the workflow rather than a standalone script), the Enterprise Platform Observability Standard's naming/suffix/label/registry-compliance check (`.github/scripts/check-metric-naming.sh`, §11.1), `gofmt`/`go mod tidy`/`go vet`/`govulncheck`, and a Dockerfile digest-pin check. It carries no schema step itself — the AsyncAPI-vs-Glue drift gate (pinned `platform-schemagov` validation of `api/asyncapi.yaml` against the `iam-tenant-events` Glue registry, failing the PR on drift) lives in `schema-registry.yml`'s `pr-check` job instead; see 13.2.1 below for the full schema-governance pipeline that same tool also drives.
 - **`ci.yml`** — orchestrates the above, plus `build-image` (multi-stage Dockerfile + provenance scripts), a Trivy scan, a smoke check (`/healthz` returns 200, `/asyncapi.yaml` serves a real spec), `pr-summary`, and pushes to GHCR on the default branch.
 - **`release.yml`** — semver tag → release binary + image.
 - **`changelog-check.yml`** — enforces a `CHANGELOG.md` `[Unreleased]` entry per PR.

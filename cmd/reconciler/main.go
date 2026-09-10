@@ -63,7 +63,8 @@ func run() int {
 		die("unknown job %q — valid: %v", jobName, registryNames())
 	}
 
-	rawLog, err := logger.NewLogger(envOr("APP_ENV", "dev"))
+	appEnv := envOr("APP_ENV", "dev")
+	rawLog, err := logger.NewLogger(appEnv)
 	if err != nil {
 		panic("init logger: " + err.Error())
 	}
@@ -87,7 +88,7 @@ func run() int {
 		ServiceName:  serviceName,
 		BuildVersion: envOr("BUILD_VERSION", "dev"),
 	})
-	metrics.Register()
+	metrics.Register(appEnv)
 
 	timeout := 5 * time.Minute
 	if s := os.Getenv("RECONCILER_TIMEOUT"); s != "" {
@@ -159,7 +160,6 @@ func run() int {
 	outboxPublisher := eventbusadapter.New("iam-realm-provisioner-reconciler", enqueueCodec).WithLogger(rawLog)
 	txRunner := pgadapter.NewTxRunner(sysPool, outboxPublisher)
 
-	appEnv := envOr("APP_ENV", "dev")
 	keycloakAdmin := keycloakadapter.New(keycloakadapter.Config{
 		BaseURL:      mustEnv("KEYCLOAK_BASE_URL", appEnv),
 		AdminRealm:   envOr("KEYCLOAK_ADMIN_REALM", "master"),

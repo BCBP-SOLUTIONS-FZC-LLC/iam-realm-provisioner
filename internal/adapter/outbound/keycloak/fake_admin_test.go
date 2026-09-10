@@ -33,7 +33,7 @@ func TestMain(m *testing.M) {
 		ServiceName:  "iam-realm-provisioner",
 		BuildVersion: "test",
 	})
-	metrics.Register()
+	metrics.Register("test")
 
 	code := m.Run()
 	retryMaxAttempts, retryBaseDelay, retryMaxDelay = origAttempts, origBase, origMax

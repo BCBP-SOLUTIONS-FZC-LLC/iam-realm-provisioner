@@ -5,6 +5,19 @@ alert name, expression, threshold, and duration identical between the two —
 only the job/service label's literal "iam-realm-provisioner" here becomes
 the chart's fullname template (they coincide under the default release
 name). If you add or change an alert, update BOTH files.
+
+Enterprise Platform Observability Standard: three of this service's
+metrics (Keycloak call latency/failures, RLS-6 violations) have a
+shadow-emitted Tier 1 platform_* candidate — see
+internal/adapter/outbound/metrics/registry.go's PlatformRegistry and
+deploy/monitoring/app-alerts.yml's header. All three are Status:
+Proposed (submitted, not yet ratified), so every alert below
+intentionally still reads the authoritative iam_realm_provisioner_*
+metric per the standard's governance rules (11/12: no unilateral
+adoption of an unratified shared metric into production alerting). Cut
+an alert over to its platform_* candidate only after PlatformRegistry
+flips that entry's Status to Canonical, updating both this file and
+deploy/monitoring/app-alerts.yml together.
 */ -}}
 {{- if .Values.serviceMonitor.enabled }}
 {{- $job := include "iam-realm-provisioner.fullname" . }}

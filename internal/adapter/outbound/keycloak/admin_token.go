@@ -73,7 +73,13 @@ func (c *tokenCache) Token(ctx context.Context) (string, error) {
 	metrics.AdminTokenRefreshTotal.WithLabelValues(trigger).Inc()
 	start := time.Now()
 	tok, expiresIn, err := c.refresh(ctx)
-	metrics.KeycloakCallDuration.WithLabelValues("token").Observe(time.Since(start).Seconds())
+	dur := time.Since(start).Seconds()
+	outcome := "success"
+	if err != nil {
+		outcome = "failure"
+	}
+	metrics.KeycloakCallDuration.WithLabelValues("token").Observe(dur)
+	metrics.DependencyRequestDuration.WithLabelValues("keycloak", "token", outcome).Observe(dur)
 	if err != nil {
 		metrics.KeycloakCallFailuresTotal.WithLabelValues("token").Inc()
 	}

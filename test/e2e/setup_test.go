@@ -223,7 +223,7 @@ func runE2ESuite(m *testing.M) (int, error) {
 	// any Keycloak call), so those counters are non-nil at first use rather
 	// than only once NewRouter primes them further down.
 	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{ServiceName: "iam-realm-provisioner-e2e", Logger: noopLogger{}})
-	metrics.Register()
+	metrics.Register("test")
 
 	if err := kcAdmin.Ready(ctx); err != nil {
 		return 0, fmt.Errorf("keycloak admin not ready: %w", err)

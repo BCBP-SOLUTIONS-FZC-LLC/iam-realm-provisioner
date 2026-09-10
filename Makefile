@@ -85,6 +85,8 @@ help:
 	@echo "  make vet              - go vet all packages"
 	@echo "  make lint             - run golangci-lint (via go tool)"
 	@echo "  make arch-lint        - run go-arch-lint (dependency-rule enforcement, §3.4)"
+	@echo "  make metrics-registry-lint - enforce no unratified platform_* metric sources an alert/SLO"
+	@echo "  make metric-naming-lint - enforce Platform Observability Standard naming/suffix/label/registry rules"
 	@echo "  make test             - unit + postgres + integration tests (requires Docker)"
 	@echo "  make test-ci          - test with race detector + coverage (used in CI)"
 	@echo "  make test-unit        - unit tests only (no Docker required)"
@@ -102,7 +104,7 @@ help:
 	@echo "  make build            - compile both binaries to bin/"
 	@echo "  make cover            - coverage HTML report"
 	@echo "  make cover-func       - coverage summary by function"
-	@echo "  make ci               - tidy + fmt-check + vet + lint + arch-lint + test-ci + build"
+	@echo "  make ci               - tidy + fmt-check + vet + lint + arch-lint + metrics-registry-lint + metric-naming-lint + test-ci + build"
 	@echo "  make docker-up        - start Postgres + LocalStack + Keycloak + OpenBao (community)"
 	@echo "  make docker-up-pro    - start Postgres + LocalStack Pro only (use with 'make mock')"
 	@echo "  make docker-down      - stop local containers"
@@ -172,6 +174,14 @@ lint:
 .PHONY: arch-lint
 arch-lint:
 	bash .github/scripts/arch-lint.sh
+
+.PHONY: metrics-registry-lint
+metrics-registry-lint:
+	bash .github/scripts/metrics-registry-lint.sh
+
+.PHONY: metric-naming-lint
+metric-naming-lint:
+	bash .github/scripts/check-metric-naming.sh
 
 # -----------------------------
 # TESTS
@@ -481,7 +491,7 @@ schema-prune:
 # -----------------------------
 
 .PHONY: ci
-ci: tidy fmt-check vet lint arch-lint test-ci build
+ci: tidy fmt-check vet lint arch-lint metrics-registry-lint metric-naming-lint test-ci build
 
 # -----------------------------
 # COVERAGE
