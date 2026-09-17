@@ -42,7 +42,7 @@ This is enforced structurally, not just by convention: `internal/adapter/outboun
 
 ## API overview
 
-All 16 endpoints (RP-1..RP-16) live under one mesh-internal prefix, `/api/v1/internal/*` — this service has almost no public surface. `/healthz`/`/readyz` and the `/asyncapi`/`/asyncapi.yaml` docs surface sit outside that group, unauthenticated. `/metrics` is served on its **own** port (`METRICS_PORT=9090`), never on the main router. Source of truth: `internal/adapter/inbound/http/router.go`.
+All 17 endpoints (RP-1..RP-17) live under one mesh-internal prefix, `/api/v1/internal/*` — this service has almost no public surface. `/healthz`/`/readyz` and the `/asyncapi`/`/asyncapi.yaml` docs surface sit outside that group, unauthenticated. `/metrics` is served on its **own** port (`METRICS_PORT=9090`), never on the main router. Source of truth: `internal/adapter/inbound/http/router.go`.
 
 **Middleware chain** (`registerInternalRoutes`): 1 MB body-size cap → `gincommon.TimeoutMiddleware(30s)` → `gincommon.ObservabilityMiddlewares` → `gincommon.ProtectedMiddlewares` (`RequireAuth` + `ContextMiddleware`) → `GUCBridgeMiddleware` (binds `app.tenant_id` transaction-locally, RLS-6) → `RequireJSONContentType` → `RequireSystemRole` (defense-in-depth — mesh mTLS + NetworkPolicy is primary) → per-route `RequireIdempotencyKey` / `RequireOperatorRole`.
 
@@ -135,7 +135,7 @@ iam-realm-provisioner/
 │   ├── eventschema/                   # Embedded JSON Schema draft-07, one per produced event + asyncapi_drift_test.go
 │   └── adapter/
 │       ├── inbound/
-│       │   ├── http/                  # Gin handlers (RP-1..RP-16), DTOs, middleware, router.go, /asyncapi
+│       │   ├── http/                  # Gin handlers (RP-1..RP-17), DTOs, middleware, router.go, /asyncapi
 │       │   └── consumer/              # 3 SQS consumers: membership-realm-q, tenant-realm-q, billing-realm-q
 │       └── outbound/
 │           ├── keycloak/              # gocloak-backed KeycloakAdmin — RP-INV-1's ONLY implementation
@@ -443,11 +443,11 @@ curl -i -X POST http://localhost:8080/api/v1/internal/tenants/$TENANT_ID/suspend
 
 ### Developer tools
 
-Two documentation surfaces, both wired in `registerDocsRoutes` (`internal/adapter/inbound/http/router.go`): a **Swagger UI** for the mesh-internal REST contract (RP-1..RP-16), and the **AsyncAPI event-contract viewer** — an interactive dashboard (searchable, dark/light theme, deep-linkable schema fields) ported from `iam-org-membership`'s equivalent viewer.
+Two documentation surfaces, both wired in `registerDocsRoutes` (`internal/adapter/inbound/http/router.go`): a **Swagger UI** for the mesh-internal REST contract (RP-1..RP-17), and the **AsyncAPI event-contract viewer** — an interactive dashboard (searchable, dark/light theme, deep-linkable schema fields) ported from `iam-org-membership`'s equivalent viewer.
 
 | Handler | Route | Gating | Purpose |
 |---|---|---|---|
-| `swaggerFiles`/`ginSwagger` | `GET /swagger/*any` | `DocsConfig.active()` | `swag`-generated OpenAPI 2.0 UI for all 16 RP-1..RP-16 handlers (custom-themed via `SwaggerThemeHandler`/`SwaggerInitializerHandler`) |
+| `swaggerFiles`/`ginSwagger` | `GET /swagger/*any` | `DocsConfig.active()` | `swag`-generated OpenAPI 2.0 UI for all 17 RP-1..RP-17 handlers (custom-themed via `SwaggerThemeHandler`/`SwaggerInitializerHandler`) |
 | `AsyncAPIHandler` | `GET /asyncapi` | `DocsConfig.active()` | Interactive server-side HTML dashboard for `api/asyncapi.yaml` |
 | `AsyncAPIYAMLHandler` | `GET /asyncapi.yaml` | `DocsConfig.active()` | Serves the raw embedded spec bytes |
 
@@ -888,7 +888,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, extending the serv
 | [`.claude/CLAUDE.md`](.claude/CLAUDE.md) | Top-level guidance for Claude Code working in this repo |
 | [`.claude/architecture.md`](.claude/architecture.md) | Clean Architecture directory tree, shared library integration, dep rules |
 | [`.claude/database-schema.md`](.claude/database-schema.md) | 9 tables (5 RLS-scoped + 3 exempt + 1 audit-only), enums, RLS invariants, triggers, migrations |
-| [`.claude/api-caching-events.md`](.claude/api-caching-events.md) | Full endpoint catalogue (RP-1..RP-16), error taxonomy, event catalogue, AsyncAPI/drift mechanics |
+| [`.claude/api-caching-events.md`](.claude/api-caching-events.md) | Full endpoint catalogue (RP-1..RP-17), error taxonomy, event catalogue, AsyncAPI/drift mechanics |
 | [`.claude/request-flows.md`](.claude/request-flows.md) | Keycloak-effect-first discipline, compensating teardown, every RP-*/RP-C* flow, idempotency mechanics, GDPR/data-lifecycle |
 | [`.claude/operations.md`](.claude/operations.md) | Security, observability, configuration, CI/CD, testing, GDPR, integration points, open items |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Detailed architecture narrative with Mermaid diagrams — layer model, write flow, RLS/GUC flow, threat model |

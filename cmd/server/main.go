@@ -32,6 +32,7 @@ import (
 	orgmembershipclient "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/orgmembership"
 	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
 	s3adapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/s3"
+	tokenserviceclient "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/tokenservice"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
@@ -231,6 +232,7 @@ func main() {
 	}, log)
 
 	orgMembershipClient := orgmembershipclient.New(mustEnv("ORG_MEMBERSHIP_BASE_URL", appEnv), log)
+	tokenServiceClient := tokenserviceclient.New(mustEnv("TOKEN_SERVICE_BASE_URL", appEnv), log)
 
 	objectStore := s3adapter.New(s3Client, s3adapter.Config{
 		Bucket: envOr("REALM_EXPORT_BUCKET", "iam-realm-exports"),
@@ -249,7 +251,7 @@ func main() {
 	// ── 8b. Core services ─────────────────────────────────────────────────
 	sharedRealm := envOr("SHARED_TRIAL_REALM", "trial")
 	provisioningSvc := service.NewProvisioningService(
-		tenantRealmRepo, idempotencyRepo, keycloakAdmin, txRunner, sharedRealm, nil,
+		tenantRealmRepo, idempotencyRepo, keycloakAdmin, tokenServiceClient, txRunner, sharedRealm, nil,
 	).WithLogger(log)
 	lifecycleSvc := service.NewLifecycleService(
 		tenantRealmRepo, idempotencyRepo, keycloakAdmin, txRunner, sharedRealm,
@@ -475,10 +477,16 @@ func mustEnv(key, appEnv string) string {
 // verbatim: every other check here only looks for *emptiness*, which such
 // a paste would never trigger, so the service would start and fail
 // confusingly at first real Keycloak/O&M call instead of at boot.
+// defaults (URLs and one obviously-fake dev secret), not real hardcoded
+// credentials; validateRequiredEnv's whole purpose is rejecting them
+// outside dev.
+//
+//nolint:gosec // G101 false positive — these are non-secret placeholder
 var devDefaultValues = map[string]string{
 	"KEYCLOAK_BASE_URL":            "http://localhost:8091",
 	"KEYCLOAK_ADMIN_CLIENT_SECRET": "dev-secret-change-me",
 	"ORG_MEMBERSHIP_BASE_URL":      "http://localhost:8082",
+	"TOKEN_SERVICE_BASE_URL":       "http://localhost:8083",
 }
 
 // validateRequiredEnv panics with every missing/misconfigured required env
@@ -493,6 +501,7 @@ func validateRequiredEnv(appEnv string) {
 		{"KEYCLOAK_BASE_URL", true, "Keycloak Admin API base URL — RP-INV-1's sole seam"},
 		{"KEYCLOAK_ADMIN_CLIENT_SECRET", true, "Keycloak admin service-account credential (OpenBao via ESO in prod)"},
 		{"ORG_MEMBERSHIP_BASE_URL", true, "Org & Membership base URL — I-8 residual-MFA check"},
+		{"TOKEN_SERVICE_BASE_URL", true, "Token Service base URL — TS-1/TS-4 mint/rotate handshake (§2.5, RP-17)"},
 		{"SNS_TOPIC_TENANT_ARN", true, "iam-tenant-events topic ARN; events queue in outbox but never publish without it"},
 		{"GLUE_REGISTRY_TENANT_NAME", true, "iam-tenant-events Glue registry name; NoopCodec (plain JSON) used without it"},
 	}

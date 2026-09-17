@@ -12,7 +12,8 @@ import (
 
 const tenantRealmColumns = `tenant_id, realm_name, strategy, keycloak_shard, status,
 	realm_template_version, trial_ends_at, converted_at, disabled_at, suspension_source, exported_at,
-	export_s3_key, record_version, created_at, updated_at, deleted_at`
+	export_s3_key, service_account_principal_id, service_account_keycloak_client_id,
+	record_version, created_at, updated_at, deleted_at`
 
 // TenantRealmRepository implements port.TenantRealmRepository (§4.2).
 type TenantRealmRepository struct {
@@ -29,7 +30,8 @@ func scanTenantRealm(row pgx.Row) (*domain.TenantRealm, error) {
 	var t domain.TenantRealm
 	err := row.Scan(&t.TenantID, &t.RealmName, &t.Strategy, &t.KeycloakShard, &t.Status,
 		&t.RealmTemplateVersion, &t.TrialEndsAt, &t.ConvertedAt, &t.DisabledAt, &t.SuspensionSource, &t.ExportedAt,
-		&t.ExportS3Key, &t.RecordVersion, &t.CreatedAt, &t.UpdatedAt, &t.DeletedAt)
+		&t.ExportS3Key, &t.ServiceAccountPrincipalID, &t.ServiceAccountKeycloakClientID,
+		&t.RecordVersion, &t.CreatedAt, &t.UpdatedAt, &t.DeletedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -64,8 +66,9 @@ func (r *TenantRealmRepository) Upsert(ctx context.Context, t *domain.TenantReal
 	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
 			INSERT INTO tenant_realms (tenant_id, realm_name, strategy, keycloak_shard, status,
-				realm_template_version, trial_ends_at, converted_at, disabled_at, suspension_source, exported_at, export_s3_key)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+				realm_template_version, trial_ends_at, converted_at, disabled_at, suspension_source, exported_at, export_s3_key,
+				service_account_principal_id, service_account_keycloak_client_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 			ON CONFLICT (tenant_id) DO UPDATE SET
 				realm_name = EXCLUDED.realm_name,
 				strategy = EXCLUDED.strategy,
@@ -78,10 +81,13 @@ func (r *TenantRealmRepository) Upsert(ctx context.Context, t *domain.TenantReal
 				suspension_source = EXCLUDED.suspension_source,
 				exported_at = EXCLUDED.exported_at,
 				export_s3_key = EXCLUDED.export_s3_key,
+				service_account_principal_id = EXCLUDED.service_account_principal_id,
+				service_account_keycloak_client_id = EXCLUDED.service_account_keycloak_client_id,
 				record_version = tenant_realms.record_version + 1,
 				updated_at = now()`,
 			t.TenantID, t.RealmName, t.Strategy, t.KeycloakShard, t.Status,
-			t.RealmTemplateVersion, t.TrialEndsAt, t.ConvertedAt, t.DisabledAt, t.SuspensionSource, t.ExportedAt, t.ExportS3Key)
+			t.RealmTemplateVersion, t.TrialEndsAt, t.ConvertedAt, t.DisabledAt, t.SuspensionSource, t.ExportedAt, t.ExportS3Key,
+			t.ServiceAccountPrincipalID, t.ServiceAccountKeycloakClientID)
 		return err
 	})
 }
@@ -96,11 +102,12 @@ func (r *TenantRealmRepository) Update(ctx context.Context, t *domain.TenantReal
 				realm_name = $2, strategy = $3, keycloak_shard = $4, status = $5,
 				realm_template_version = $6, trial_ends_at = $7, converted_at = $8,
 				disabled_at = $9, suspension_source = $10, exported_at = $11, export_s3_key = $12,
+				service_account_principal_id = $13, service_account_keycloak_client_id = $14,
 				record_version = record_version + 1, updated_at = now()
-			WHERE tenant_id = $1 AND record_version = $13`,
+			WHERE tenant_id = $1 AND record_version = $15`,
 			t.TenantID, t.RealmName, t.Strategy, t.KeycloakShard, t.Status,
 			t.RealmTemplateVersion, t.TrialEndsAt, t.ConvertedAt, t.DisabledAt, t.SuspensionSource, t.ExportedAt,
-			t.ExportS3Key, t.RecordVersion)
+			t.ExportS3Key, t.ServiceAccountPrincipalID, t.ServiceAccountKeycloakClientID, t.RecordVersion)
 		if err != nil {
 			return err
 		}

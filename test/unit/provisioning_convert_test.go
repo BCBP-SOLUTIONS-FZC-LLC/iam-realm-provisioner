@@ -294,6 +294,66 @@ func TestConvert_RegisterOIDCClientsFails_TeardownCalled(t *testing.T) {
 	assert.Equal(t, domain.OpStatusFailed, idem.rows["conv-key-6"].Status)
 }
 
+// §2.5/RP-17: the mint step runs right after RegisterOIDCClients succeeds,
+// before the user-migration loop — a failure there still tears down the
+// new dedicated realm (realmMayHaveMigratedUsers is still false).
+func TestConvert_MintPlatformAutomationFails_BeforeMigration_TeardownCalled(t *testing.T) {
+	svc, kc, realms, _, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	seedSharedRealm(realms, tenantID)
+	var deletedRealm string
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
+	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) {
+		return []string{"tender-web"}, nil
+	}
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID string) (uuid.UUID, error) {
+		return uuid.Nil, domain.NewError(domain.ErrKeycloakUnavailable, "boom")
+	}
+	kc.ListUsersByTenantFn = func(ctx context.Context, realmName string, tid uuid.UUID) ([]uuid.UUID, error) {
+		t.Fatal("mint failure must short-circuit before ListUsersByTenant/migration")
+		return nil, nil
+	}
+	kc.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error {
+		deletedRealm = realmName
+		return nil
+	}
+
+	_, err := svc.Convert(context.Background(), "conv-key-6b", tenantID, service.ConvertRequest{Plan: "pro"})
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrConversionFailed, de.Code)
+	assert.NotEmpty(t, deletedRealm)
+}
+
+// "Carry across RP-3": the same Token Service principal is re-registered
+// against the new dedicated-realm client — a new principal_sub, same
+// principal_id — and that principal_id lands on the Update'd local row.
+func TestConvert_MintPlatformAutomation_CarriesPrincipalAcrossRealms(t *testing.T) {
+	svc, kc, realms, _, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	seedSharedRealm(realms, tenantID)
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
+	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) { return nil, nil }
+	kc.ListUsersByTenantFn = func(ctx context.Context, realmName string, tid uuid.UUID) ([]uuid.UUID, error) { return nil, nil }
+	kc.ForceLogoutRealmFn = func(ctx context.Context, realmName string) error { return nil }
+	var gotClientID string
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID string) (uuid.UUID, error) {
+		gotClientID = clientID
+		return uuid.New(), nil
+	}
+
+	_, err := svc.Convert(context.Background(), "conv-key-6c", tenantID, service.ConvertRequest{Plan: "pro"})
+	require.NoError(t, err)
+	assert.Equal(t, "platform-automation", gotClientID, "the dedicated realm uses the literal base name, not the trial-realm tenant-scoped one")
+
+	row, err := realms.FindByTenantID(context.Background(), tenantID)
+	require.NoError(t, err)
+	require.NotNil(t, row.ServiceAccountPrincipalID)
+	require.NotNil(t, row.ServiceAccountKeycloakClientID)
+	assert.Equal(t, "platform-automation", *row.ServiceAccountKeycloakClientID)
+}
+
 // Compensating teardown: ListUsersByTenant failing (after the realm and
 // OIDC clients were created) also tears down the new dedicated realm.
 func TestConvert_ListUsersByTenantFails_TeardownCalled(t *testing.T) {
@@ -445,10 +505,11 @@ func TestConvert_FirstEventEnqueueFails(t *testing.T) {
 // still lands and the call still succeeds — just with no events enqueued.
 func TestConvert_NoEventPublisherInContext_StillCommitsLocally(t *testing.T) {
 	kc := &mockKeycloakAdmin{}
+	ts := wirePlatformAutomationHappyPath(kc)
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx := newMockTxRunnerNoPublisher()
-	svc := service.NewProvisioningService(realms, idem, kc, tx, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
 	tenantID := uuid.New()
 	seedSharedRealm(realms, tenantID)
 	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }

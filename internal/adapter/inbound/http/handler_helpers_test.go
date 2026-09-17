@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
 )
 
@@ -22,6 +24,7 @@ type serviceDeps struct {
 	realms          *fakeTenantRealmRepository
 	idempotency     *fakeIdempotencyStore
 	keycloak        *fakeKeycloakAdmin
+	tokenService    *fakeTokenServiceClient
 	tx              *fakeTxRunner
 	idpConfigs      *fakeIdpConfigRepository
 	idpValidations  *fakeIdpValidationRepository
@@ -31,10 +34,23 @@ type serviceDeps struct {
 }
 
 func newServiceDeps() *serviceDeps {
+	keycloak := &fakeKeycloakAdmin{
+		CreateServiceAccountClientFn: func(ctx context.Context, realmName, clientID string) (uuid.UUID, error) { return uuid.New(), nil },
+		SetClientSecretFn:            func(ctx context.Context, realmName, clientID, secret string) error { return nil },
+	}
+	tokenService := &fakeTokenServiceClient{
+		RegisterPrincipalFn: func(ctx context.Context, tenantID uuid.UUID, req port.RegisterPrincipalRequest) (*port.RegisterPrincipalResult, error) {
+			return &port.RegisterPrincipalResult{PrincipalID: uuid.New(), Created: true, RecordVersion: 1}, nil
+		},
+		IssueOrRotateCredentialFn: func(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
+			return &port.IssueCredentialResult{Version: 1, Secret: "test-secret", OpenBaoPath: "iam/serviceaccount/test/v1", RecordVersion: 1}, nil
+		},
+	}
 	return &serviceDeps{
 		realms:          &fakeTenantRealmRepository{rows: map[uuid.UUID]*domain.TenantRealm{}},
 		idempotency:     &fakeIdempotencyStore{rows: map[string]*domain.ProvisioningOperation{}},
-		keycloak:        &fakeKeycloakAdmin{},
+		keycloak:        keycloak,
+		tokenService:    tokenService,
 		tx:              &fakeTxRunner{pub: &fakeEventPublisher{}},
 		idpConfigs:      &fakeIdpConfigRepository{rows: map[idpConfigKey]*domain.IdpConfig{}},
 		idpValidations:  &fakeIdpValidationRepository{},
@@ -49,7 +65,7 @@ func newServiceDeps() *serviceDeps {
 // just with fakes standing in for adapters.
 func (d *serviceDeps) handler() Handlers {
 	return NewInternalHandler(
-		service.NewProvisioningService(d.realms, d.idempotency, d.keycloak, d.tx, "trial", []string{"kc-shard-1"}),
+		service.NewProvisioningService(d.realms, d.idempotency, d.keycloak, d.tokenService, d.tx, "trial", []string{"kc-shard-1"}),
 		service.NewLifecycleService(d.realms, d.idempotency, d.keycloak, d.tx, "trial"),
 		service.NewMfaService(d.realms, d.keycloak, d.orgMembership),
 		service.NewIdpService(d.realms, d.idpConfigs, d.idpValidations, d.idempotency, d.openbao, d.keycloak),

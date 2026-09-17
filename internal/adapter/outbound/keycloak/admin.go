@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Nerzal/gocloak/v13"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 
@@ -361,6 +362,113 @@ func (a *Admin) DeleteRealmIfExists(ctx context.Context, realmName string) (err 
 			return nil
 		}
 		return wrapErr("delete_realm_if_exists", err)
+	}
+	return nil
+}
+
+// findClientByID looks up realmName's client by its exact clientId
+// (gocloak's ClientID query param may substring-match server-side, so this
+// filters client-side for an exact match — the same defensive style
+// RegisterOIDCClients already uses to filter the builtin set).
+func (a *Admin) findClientByID(ctx context.Context, tok, realmName, clientID string) (*gocloak.Client, error) {
+	clients, err := a.client.GetClients(ctx, tok, realmName, gocloak.GetClientsParams{ClientID: gocloak.StringP(clientID)})
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range clients {
+		if c.ClientID != nil && *c.ClientID == clientID {
+			return c, nil
+		}
+	}
+	return nil, nil
+}
+
+// CreateServiceAccountClient idempotently mints a confidential,
+// service-account-enabled client (clientID) in realmName — the
+// platform-automation principal (§2.5, RP-17) — and returns the Keycloak
+// service-account user's sub.
+func (a *Admin) CreateServiceAccountClient(ctx context.Context, realmName, clientID string) (sub uuid.UUID, err error) {
+	ctx, done := a.begin(ctx, "create_service_account_client")
+	defer func() { done(err) }()
+
+	tok, err := a.token(ctx)
+	if err != nil {
+		return uuid.Nil, wrapErr("create_service_account_client: token", err)
+	}
+
+	existing, err := a.findClientByID(ctx, tok, realmName, clientID)
+	if err != nil {
+		return uuid.Nil, wrapErr("create_service_account_client: get_clients", err)
+	}
+
+	var internalID string
+	if existing != nil {
+		if existing.ID == nil {
+			return uuid.Nil, domain.NewError(domain.ErrKeycloakUnavailable, "existing service-account client has no internal id").
+				WithDetails(map[string]any{"realm": realmName, "client_id": clientID})
+		}
+		internalID = *existing.ID
+	} else {
+		internalID, err = a.client.CreateClient(ctx, tok, realmName, gocloak.Client{
+			ClientID:                  gocloak.StringP(clientID),
+			Protocol:                  gocloak.StringP("openid-connect"),
+			PublicClient:              gocloak.BoolP(false),
+			StandardFlowEnabled:       gocloak.BoolP(false),
+			DirectAccessGrantsEnabled: gocloak.BoolP(false),
+			ServiceAccountsEnabled:    gocloak.BoolP(true),
+			Enabled:                   gocloak.BoolP(true),
+		})
+		if err != nil {
+			if isConflict(err) {
+				// Lost-response retry of our own create — resume by
+				// looking the client back up rather than erroring.
+				resumed, findErr := a.findClientByID(ctx, tok, realmName, clientID)
+				if findErr != nil || resumed == nil || resumed.ID == nil {
+					return uuid.Nil, wrapErr("create_service_account_client: resume_after_conflict", err)
+				}
+				internalID = *resumed.ID
+			} else {
+				return uuid.Nil, wrapErr("create_service_account_client", err)
+			}
+		}
+	}
+
+	svcUser, err := a.client.GetClientServiceAccount(ctx, tok, realmName, internalID)
+	if err != nil {
+		return uuid.Nil, wrapErr("create_service_account_client: get_service_account", err)
+	}
+	if svcUser == nil || svcUser.ID == nil {
+		return uuid.Nil, domain.NewError(domain.ErrKeycloakUnavailable, "service-account client has no linked user").
+			WithDetails(map[string]any{"realm": realmName, "client_id": clientID})
+	}
+	subID, err := uuid.Parse(*svcUser.ID)
+	if err != nil {
+		return uuid.Nil, wrapErr("create_service_account_client: parse_sub", err)
+	}
+	return subID, nil
+}
+
+// SetClientSecret sets clientID's secret in realmName to secret — RP-17's
+// apply step (§2.5). secret is a caller-supplied value (Token Service's
+// TS-1 plaintext), never a Keycloak-generated one.
+func (a *Admin) SetClientSecret(ctx context.Context, realmName, clientID, secret string) (err error) {
+	ctx, done := a.begin(ctx, "set_client_secret")
+	defer func() { done(err) }()
+
+	tok, err := a.token(ctx)
+	if err != nil {
+		return wrapErr("set_client_secret: token", err)
+	}
+	existing, err := a.findClientByID(ctx, tok, realmName, clientID)
+	if err != nil {
+		return wrapErr("set_client_secret: get_clients", err)
+	}
+	if existing == nil || existing.ID == nil {
+		return domain.NewError(domain.ErrKeycloakUnavailable, "service-account client not found").
+			WithDetails(map[string]any{"realm": realmName, "client_id": clientID})
+	}
+	if err := a.client.UpdateClient(ctx, tok, realmName, gocloak.Client{ID: existing.ID, Secret: gocloak.StringP(secret)}); err != nil {
+		return wrapErr("set_client_secret", err)
 	}
 	return nil
 }

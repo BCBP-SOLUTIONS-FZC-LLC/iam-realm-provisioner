@@ -98,7 +98,7 @@ CI enforcement: `internal/adapter/outbound/metrics/metrics_test.go`'s `TestNamin
 > **Not-yet-armed instruments.** `trial_expiry_*`, `lapse_processed_total`, and `realm_export_total` are incremented correctly but only inside the reconciler CronJob, which exits before a scrape lands and exposes no `/metrics` listener; exporting them needs a Pushgateway or DB-backed state the server reads (the sibling `iam-user-profile` reconciler has the same limitation). Treat silence on these as "no signal", not "no problem". See LLD §11.2.
 
 **Alerts (`deploy/monitoring/app-alerts.yml`):**
-- `IAMRealmProvisionerDown` — no healthy instances for 2m → **critical** (blocks all 16 endpoints + all 3 SQS consumers; the reconciler CronJobs run as separate pods and are not covered)
+- `IAMRealmProvisionerDown` — no healthy instances for 2m → **critical** (blocks all 17 endpoints + all 3 SQS consumers; the reconciler CronJobs run as separate pods and are not covered)
 - `IAMRealmProvisionerReplicasMissing` — fewer than 2 healthy replicas for 5m → warning
 - `IAMRealmProvisionerHighErrorRate` — 5xx rate > 5% for 5m → warning
 - `IAMRealmProvisionerCriticalErrorRate` — 5xx rate > 20% for 2m → **critical** — escalate immediately, RP-INV-1's single Keycloak writer means every tenant realm operation funnels through this one service
@@ -148,13 +148,14 @@ Grafana "IAM — Realm Provisioner": provision throughput/success by kind, conve
 | `BAO_AUTH_ROLE` / `BAO_KV_MOUNT` / `BAO_IDP_PATH_PREFIX` / `BAO_KEYCLOAK_ADMIN_PATH` | `iam-realm-provisioner` / `secret` / `iam/realm-provisioner/idp` / `iam/realm-provisioner/keycloak-admin` | |
 | `SHARED_TRIAL_REALM` / `REALM_TEMPLATE_VERSION` | `trial` / `v1` | Shared trial realm name + active dedicated-realm template version |
 | `ORG_MEMBERSHIP_BASE_URL` | (required) | O&M client (I-8 residual-MFA check) — fail-fast on the dev default outside `APP_ENV=dev` |
+| `TOKEN_SERVICE_BASE_URL` | (required) | Token Service client (TS-1/TS-4 mint/rotate handshake, §2.5) — required for every RP-1/RP-2/RP-3 call and RP-17; fail-fast on the dev default outside `APP_ENV=dev` |
 | `REALM_EXPORT_BUCKET` / `REALM_EXPORT_KMS_KEY` | `iam-realm-exports` / `alias/iam-realm-export` | Offboarding export target |
 | `TRIAL_GRACE_DAYS` / `CANCELLED_GRACE_DAYS` / `RETENTION_DAYS` | `30` / `30` / `90` | Lifecycle timers |
 | `RECONCILER_BATCH_LIMIT` / `RECONCILER_TIMEOUT` / `RECONCILER_MAX_ATTEMPTS` | `100` / `5m` / `20` | Reconciler-job tunables — `RECONCILER_MAX_ATTEMPTS` is RP-C4's poison-pill cap (§13.1) |
 | `DOCS_ENABLED` / `DOCS_AUTH_TOKEN` | `true` / — | AsyncAPI viewer gating — mounted always outside `APP_ENV=production`; opt-in via `DOCS_ENABLED` in prod, optionally bearer-gated |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | (unset) | OTLP collector — provider always installed; export no-op until set |
 
-**Fail-fast:** startup panics if `KEYCLOAK_BASE_URL` / `KEYCLOAK_ADMIN_CLIENT_SECRET` / `ORG_MEMBERSHIP_BASE_URL` are empty or hold a dev-default value outside `APP_ENV=dev`.
+**Fail-fast:** startup panics if `KEYCLOAK_BASE_URL` / `KEYCLOAK_ADMIN_CLIENT_SECRET` / `ORG_MEMBERSHIP_BASE_URL` / `TOKEN_SERVICE_BASE_URL` are empty or hold a dev-default value outside `APP_ENV=dev`.
 
 **Realm template versioning:** the in-repo versioned `deploy/keycloak/realm-template.json` (IAM-Platform-owned, PR-reviewed) is embedded/mounted at deploy time, not fetched from S3 or another external source. `REALM_TEMPLATE_VERSION` selects the active version; promotion is CI/CD-gated (dev→staging→prod) by Keycloak import validation + realm-creation smoke tests. A version bump has **no retroactive application** — it only affects newly provisioned realms; there is no bulk re-template job. Drift detection is report-only (no auto-remediation): each realm's `tenant_realms.realm_template_version` is compared against the current `REALM_TEMPLATE_VERSION` and surfaced via `iam_realm_provisioner_template_drift{realm_version}`.
 

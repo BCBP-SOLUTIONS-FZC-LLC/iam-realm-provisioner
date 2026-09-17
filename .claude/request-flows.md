@@ -21,6 +21,21 @@ Multi-step Keycloak sequences (`ProvisionDirect`, `Convert`) call `bestEffortDel
 
 Teardown failures are logged, not escalated — an orphaned partially-created realm is caught by manual cleanup or a future reconciler pass, never by blocking the caller's error response.
 
+## §2.5: Platform-Automation Mint Sequence (RP-17, shared by RP-1/RP-2/RP-3)
+
+`mintPlatformAutomation(idempotencyKey, tenantID, realmName, clientID)` is one more Keycloak-effect step, always run before the caller's own `RunInTx`, under the same compensating-teardown rules as the steps around it in each flow:
+
+```
+Keycloak.CreateServiceAccountClient(realmName, clientID)          -> sub
+TokenService.RegisterPrincipal(tenant_id, sub, clientID)          -- TS-4 -> principal_id
+TokenService.IssueOrRotateCredential(tenant_id, principal_id, {
+  rotation_id: deterministic-from(idempotencyKey)                 -- so a retry of the same attempt
+})                                                                 -- TS-1 -> secret (once)
+Keycloak.SetClientSecret(realmName, clientID, secret)              -- lands on TS-1's own idempotent replay
+                                                                     path instead of a fresh rotation
+```
+`clientID` is the literal `"platform-automation"` for a dedicated realm (RP-2, RP-3 post-conversion) or `"platform-automation-" + tenant_id` for the shared trial realm (RP-1 — a shared realm cannot hold two clients named identically). The returned `principal_id`/`clientID` are set on the `tenant_realms` row written in that flow's own `RunInTx` (`service_account_principal_id`/`service_account_keycloak_client_id`). A failure anywhere in this sequence propagates through the caller's existing failure branch — RP-1's (no teardown, nothing else to undo), RP-2's (`bestEffortDeleteRealm`), or RP-3's (`bestEffortDeleteRealm` gated by `realmMayHaveMigratedUsers`, placed right after `RegisterOIDCClients` succeeds so it never runs after user migration begins).
+
 ## RP-1: Trial Provisioning
 
 ```
@@ -35,8 +50,11 @@ POST /tenants/provision-trial {tenant_id, tenant_name, tenant_slug, admin_email,
            existing.tenant_id == tenant_id -> resume with existing.id (idempotent success, no failure)
            else / lookup fails             -> failIdempotency, return the ORIGINAL 409 unchanged
     -> any other failure -> failIdempotency, return err
+  mintPlatformAutomation(key, tenant_id, "trial", "platform-automation-"+tenant_id)   -- §2.5, RP-17
+    -> fail -> failIdempotency, return err (nothing else to tear down)
   RunInTx:
-    tenant_realms.Upsert{tenant_id, realm_name:"trial", strategy:"shared", status:"active"}
+    tenant_realms.Upsert{tenant_id, realm_name:"trial", strategy:"shared", status:"active",
+      service_account_principal_id, service_account_keycloak_client_id}
     outbox.Enqueue(TrialTenantProvisioned{tenant_id, realm:"trial", keycloak_user_id})
   idempotency.Complete(key, marshaled result)
   -> 201 {tenant_id, realm:"trial", strategy:"shared", keycloak_user_id, email_verification_sent:true}
@@ -56,8 +74,11 @@ POST /tenants/provision-direct {..., billing_subscription_id}
          existing.tenant_id == tenant_id -> resume in place (realm/OIDC clients from this same attempt kept, no teardown)
          else / lookup fails             -> bestEffortDeleteRealm, failIdempotency, return the ORIGINAL 409 unchanged
     -- any other failure -> bestEffortDeleteRealm, failIdempotency, return err
+  mintPlatformAutomation(key, tenant_id, realmName, "platform-automation")   -- §2.5, RP-17
+    -- fail -> bestEffortDeleteRealm(realmName), failIdempotency, return err
   RunInTx:
-    tenant_realms.Upsert{tenant_id, realm_name:realmName, strategy:"dedicated", keycloak_shard:shard, status:"active", converted_at:now()}
+    tenant_realms.Upsert{tenant_id, realm_name:realmName, strategy:"dedicated", keycloak_shard:shard, status:"active", converted_at:now(),
+      service_account_principal_id, service_account_keycloak_client_id}
     outbox.Enqueue(TenantRealmReady{tenant_id, realm, keycloak_shard, oidc_clients})
     outbox.Enqueue(DirectPaidSignup{tenant_id, realm, direct_signup:true})
     outbox.Enqueue(TenantConverted{tenant_id, realm, plan, billing_subscription_id?, users_migrated:0, direct_signup:true})
@@ -89,6 +110,12 @@ POST /tenants/:id/convert {plan, billing_subscription_id, payment_method_id (acc
     any other failure -> failIdempotency, return err (nothing created yet, no teardown needed)
   Keycloak.RegisterOIDCClients(realmName, slug)
     fail -> if !realmMayHaveMigratedUsers: bestEffortDeleteRealm(realmName); 502 conversion_failed
+  mintPlatformAutomation(key, tenant_id, realmName, "platform-automation")   -- §2.5, RP-17 — "carries across":
+    fail -> if !realmMayHaveMigratedUsers: bestEffortDeleteRealm(realmName); 502 conversion_failed
+                                            re-registers the SAME Token Service principal (TS-4 carry-over
+                                            upsert) against the new dedicated-realm client's new sub — placed
+                                            here, before migration starts, so a failure can still safely
+                                            trigger teardown
   sourceUsers := Keycloak.ListUsersByTenant(current.RealmName, tenant_id)
     fail -> if !realmMayHaveMigratedUsers: bestEffortDeleteRealm(realmName); 502 conversion_failed
   for each uid in sourceUsers:
@@ -241,6 +268,17 @@ One endpoint reverses **both** a billing-lapse suspension and an RP-14 operator 
 ## RP-15/RP-16: Idempotent User Operations
 
 Both resolve the realm from `tenant_realms` then delegate straight to `KeycloakAdmin.DeleteUser`/`RevokeUserSessions` — no local state, no idempotency ledger entry (the underlying Keycloak operations are themselves naturally idempotent: deleting an absent user succeeds; revoking sessions for a user with none active succeeds).
+
+## RP-17: Apply Service-Account Secret (standalone, rotation/break-glass)
+
+```
+POST /tenants/:id/service-account/credentials/apply {secret}
+  realm := tenant_realms.FindByTenantID(tenant_id)   -- 404 tenant_realm_not_found if absent
+  realm.ServiceAccountKeycloakClientID == nil -> 422 service_account_not_provisioned
+  Keycloak.SetClientSecret(realm.RealmName, *realm.ServiceAccountKeycloakClientID, secret)
+  -> 204
+```
+No `RunInTx`/outbox (mutates no tracked local field) and no Idempotency-Key (applying the same secret twice is a no-op). Fail-closed on Keycloak-unreachable — unlike RP-8's local-intent-first pattern, a credential apply is security-sensitive enough that a delayed reconciler retry risks racing a subsequent rotation, and the caller already holds the plaintext to retry itself. The caller obtains `secret` by calling Token Service's own TS-1 directly first (Token Service LLD §8.2/§8.7) — this endpoint never calls TS-1.
 
 ## RP-C2: Trial Hard Delete
 

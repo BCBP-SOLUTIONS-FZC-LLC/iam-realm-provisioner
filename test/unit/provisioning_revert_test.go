@@ -274,7 +274,7 @@ func TestRevertConversion_NoEventPublisherInContext_StillCommitsLocally(t *testi
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx := newMockTxRunnerNoPublisher()
-	svc := service.NewProvisioningService(realms, idem, kc, tx, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, &mockTokenServiceClient{}, tx, "trial", nil)
 	tenantID := uuid.New()
 	convertedAt := time.Now().UTC().Add(-time.Hour)
 	seedDedicatedRealm(realms, tenantID, &convertedAt)

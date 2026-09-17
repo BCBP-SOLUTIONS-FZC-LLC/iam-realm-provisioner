@@ -17,10 +17,11 @@ import (
 func newProvisioningTestService(t *testing.T) (*service.ProvisioningService, *mockKeycloakAdmin, *mockTenantRealmRepository, *mockIdempotencyStore, *mockEventPublisher) {
 	t.Helper()
 	kc := &mockKeycloakAdmin{}
+	ts := wirePlatformAutomationHappyPath(kc)
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx, pub := newMockTxRunner()
-	svc := service.NewProvisioningService(realms, idem, kc, tx, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
 	return svc, kc, realms, idem, pub
 }
 
@@ -84,6 +85,55 @@ func TestProvisionTrial_KeycloakFailure_NoLocalCommit(t *testing.T) {
 	row := idem.rows["key-2"]
 	require.NotNil(t, row)
 	assert.Equal(t, domain.OpStatusFailed, row.Status)
+}
+
+// §2.5/RP-17: RP-1 mints into the SHARED trial realm using a tenant-scoped
+// clientId ("platform-automation-<tenant_id>"), never the literal base
+// name — a shared realm cannot hold two clients named identically.
+func TestProvisionTrial_MintPlatformAutomation_UsesTenantScopedClientID(t *testing.T) {
+	svc, kc, realms, _, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
+	var gotRealm, gotClientID string
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID string) (uuid.UUID, error) {
+		gotRealm, gotClientID = realmName, clientID
+		return uuid.New(), nil
+	}
+
+	_, err := svc.ProvisionTrial(context.Background(), "key-mint-1", service.ProvisionTrialRequest{
+		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "trial", gotRealm)
+	assert.Equal(t, "platform-automation-"+tenantID.String(), gotClientID)
+
+	row, err := realms.FindByTenantID(context.Background(), tenantID)
+	require.NoError(t, err)
+	require.NotNil(t, row.ServiceAccountPrincipalID)
+	require.NotNil(t, row.ServiceAccountKeycloakClientID)
+	assert.Equal(t, "platform-automation-"+tenantID.String(), *row.ServiceAccountKeycloakClientID)
+}
+
+// A mint failure at RP-1 has nothing to tear down (no realm was created,
+// only the shared trial user) — same no-teardown failure branch as a
+// CreateTrialUser failure.
+func TestProvisionTrial_MintPlatformAutomationFails_NoLocalCommit(t *testing.T) {
+	svc, kc, realms, idem, pub := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID string) (uuid.UUID, error) {
+		return uuid.Nil, domain.NewError(domain.ErrKeycloakUnavailable, "boom")
+	}
+
+	_, err := svc.ProvisionTrial(context.Background(), "key-mint-2", service.ProvisionTrialRequest{
+		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
+	})
+	require.Error(t, err)
+
+	_, findErr := realms.FindByTenantID(context.Background(), tenantID)
+	assert.Error(t, findErr, "no local row should exist after a mint failure")
+	assert.Empty(t, pub.events)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["key-mint-2"].Status)
 }
 
 // §9.2 lost-response-retry resolution: CreateTrialUser 409s (the original
@@ -322,10 +372,11 @@ func TestProvisionTrial_UpsertFails_MarksIdempotencyFailed(t *testing.T) {
 // lands and the call still succeeds — just with no event enqueued.
 func TestProvisionTrial_NoEventPublisherInContext_StillCommitsLocally(t *testing.T) {
 	kc := &mockKeycloakAdmin{}
+	ts := wirePlatformAutomationHappyPath(kc)
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx := newMockTxRunnerNoPublisher()
-	svc := service.NewProvisioningService(realms, idem, kc, tx, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
 	tenantID := uuid.New()
 	kcUserID := uuid.New()
 	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return kcUserID, nil }

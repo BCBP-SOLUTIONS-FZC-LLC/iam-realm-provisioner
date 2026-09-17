@@ -108,6 +108,12 @@ func (f *fakeJobsKeycloakAdmin) DeleteIdp(ctx context.Context, realmName, alias 
 func (f *fakeJobsKeycloakAdmin) ApplyRealmConfig(ctx context.Context, realmName, settingKey string, desiredValue any) error {
 	panic("not implemented")
 }
+func (f *fakeJobsKeycloakAdmin) CreateServiceAccountClient(ctx context.Context, realmName, clientID string) (uuid.UUID, error) {
+	panic("not implemented")
+}
+func (f *fakeJobsKeycloakAdmin) SetClientSecret(ctx context.Context, realmName, clientID, secret string) error {
+	panic("not implemented")
+}
 
 // noopLogger discards everything — these tests assert on DB state and
 // mock call counts, not log output.

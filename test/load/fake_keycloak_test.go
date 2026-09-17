@@ -145,8 +145,26 @@ func (f *fakeKeycloakServer) handle(w http.ResponseWriter, r *http.Request) {
 		f.handlePartialImport(w, r)
 		return
 
+	case strings.HasSuffix(path, "/service-account-user"):
+		// GetClientServiceAccount (CreateServiceAccountClient's sub lookup,
+		// §2.5/RP-17).
+		writeJSON(w, http.StatusOK, `{"id":"`+uuid.NewString()+`"}`)
+		return
+
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/clients"):
+		// CreateClient (CreateServiceAccountClient's mint call, §2.5/RP-17).
+		w.Header().Set("Location", strings.TrimSuffix(r.URL.String(), "/")+"/"+uuid.NewString())
+		writeJSON(w, http.StatusCreated, `{}`)
+		return
+
+	case r.Method == http.MethodPut && strings.Contains(path, "/clients/"):
+		// UpdateClient (SetClientSecret's apply call, §2.5/RP-17).
+		writeJSON(w, http.StatusOK, `{}`)
+		return
+
 	case strings.HasSuffix(path, "/clients"):
-		// RegisterOIDCClients — no non-builtin clients on the template.
+		// RegisterOIDCClients / CreateServiceAccountClient's existence-check
+		// GET — no non-builtin/pre-existing clients on the template.
 		writeJSON(w, http.StatusOK, `[]`)
 		return
 

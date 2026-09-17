@@ -146,6 +146,75 @@ func TestProvisionDirect_CreateInvitedUserFails_TeardownCalled(t *testing.T) {
 	assert.Equal(t, "tenant-acme", deletedRealm)
 }
 
+// §2.5/RP-17: the mint step runs after CreateInvitedUser succeeds — a
+// failure there triggers the same compensating teardown as the two
+// Keycloak-effect steps before it.
+func TestProvisionDirect_MintPlatformAutomationFails_TeardownCalled(t *testing.T) {
+	svc, kc, realms, idem, pub := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	var deletedRealm string
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
+	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) {
+		return []string{"tender-web"}, nil
+	}
+	kc.CreateInvitedUserFn = func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
+		return uuid.New(), nil
+	}
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID string) (uuid.UUID, error) {
+		return uuid.Nil, domain.NewError(domain.ErrKeycloakUnavailable, "boom")
+	}
+	kc.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error {
+		deletedRealm = realmName
+		return nil
+	}
+
+	_, err := svc.ProvisionDirect(context.Background(), "pd-6", service.ProvisionDirectRequest{
+		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
+	})
+	require.Error(t, err)
+	assert.Equal(t, "tenant-acme", deletedRealm)
+	_, findErr := realms.FindByTenantID(context.Background(), tenantID)
+	assert.Error(t, findErr, "no local row on a torn-down provisioning attempt")
+	assert.Empty(t, pub.events)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["pd-6"].Status)
+}
+
+// The mint step's result (principal_id, keycloak_client_id) lands on the
+// local row committed with the rest of RP-2's Upsert.
+func TestProvisionDirect_MintPlatformAutomation_PersistsPrincipalAndClientID(t *testing.T) {
+	svc, kc, realms, _, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
+	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) { return nil, nil }
+	kc.CreateInvitedUserFn = func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
+		return uuid.New(), nil
+	}
+	var gotClientID string
+	var gotSecretRealm, gotSecretClientID string
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID string) (uuid.UUID, error) {
+		gotClientID = clientID
+		return uuid.New(), nil
+	}
+	kc.SetClientSecretFn = func(ctx context.Context, realmName, clientID, secret string) error {
+		gotSecretRealm, gotSecretClientID = realmName, clientID
+		return nil
+	}
+
+	_, err := svc.ProvisionDirect(context.Background(), "pd-7", service.ProvisionDirectRequest{
+		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "platform-automation", gotClientID)
+	assert.Equal(t, "tenant-acme", gotSecretRealm)
+	assert.Equal(t, "platform-automation", gotSecretClientID)
+
+	row, err := realms.FindByTenantID(context.Background(), tenantID)
+	require.NoError(t, err)
+	require.NotNil(t, row.ServiceAccountPrincipalID)
+	require.NotNil(t, row.ServiceAccountKeycloakClientID)
+	assert.Equal(t, "platform-automation", *row.ServiceAccountKeycloakClientID)
+}
+
 // §9.2 lost-response-retry resolution: CreateInvitedUser 409s on a retry of
 // this same request (the realm + OIDC clients already exist from the
 // earlier attempt, and its user-create response was lost). FindUserByEmail
@@ -363,10 +432,11 @@ func TestProvisionDirect_SecondEventEnqueueFails(t *testing.T) {
 // still lands and the call still succeeds — just with no events enqueued.
 func TestProvisionDirect_NoEventPublisherInContext_StillCommitsLocally(t *testing.T) {
 	kc := &mockKeycloakAdmin{}
+	ts := wirePlatformAutomationHappyPath(kc)
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx := newMockTxRunnerNoPublisher()
-	svc := service.NewProvisioningService(realms, idem, kc, tx, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
 	tenantID := uuid.New()
 	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
 	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) { return nil, nil }

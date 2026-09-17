@@ -103,6 +103,22 @@ type KeycloakAdmin interface {
 	// ── Realm config (§8.10, RP-INV-6) ───────────────────────────────────
 
 	ApplyRealmConfig(ctx context.Context, realmName, settingKey string, desiredValue any) error
+
+	// ── Service-account clients (§2.5, RP-17) ────────────────────────────
+
+	// CreateServiceAccountClient idempotently mints a confidential,
+	// service-account-enabled client (clientID) in realmName, returning
+	// the Keycloak service-account user's sub (the RP-supplied
+	// `principal_sub` for TS-4). Resume-if-exists, mirroring
+	// CreateRealmFromTemplate's idempotent-create pattern — a repeat call
+	// against an already-minted client returns its existing sub rather
+	// than erroring.
+	CreateServiceAccountClient(ctx context.Context, realmName, clientID string) (sub uuid.UUID, err error)
+	// SetClientSecret sets clientID's secret in realmName to secret — a
+	// caller-supplied value (the plaintext returned once by Token
+	// Service's TS-1), not a Keycloak-generated one. RP-17's apply step;
+	// idempotent — setting the same value twice is a no-op.
+	SetClientSecret(ctx context.Context, realmName, clientID, secret string) error
 }
 
 // CreateUserRequest is the Keycloak-facing shape for creating a trial or

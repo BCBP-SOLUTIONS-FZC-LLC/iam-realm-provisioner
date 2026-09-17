@@ -55,12 +55,12 @@ iam-realm-provisioner/
 │   └── adapter/
 │       ├── inbound/
 │       │   ├── http/                   # Gin handlers — router.go is the single source of truth for the route table
-│       │   │   ├── router.go           # NewRouter: infra routes, docs routes, /api/v1/internal/* (RP-1..RP-16)
+│       │   │   ├── router.go           # NewRouter: infra routes, docs routes, /api/v1/internal/* (RP-1..RP-17)
 │       │   │   ├── handlers.go / lifecycle_handler.go / idp_handler.go / internal_handler.go
 │       │   │   ├── middleware.go       # GUCBridgeMiddleware, RequireIdempotencyKey, RequireSystemRole, RequireOperatorRole, RequireJSONContentType
 │       │   │   ├── errors.go           # domain.Error -> gincommon.ErrorResponse mapping
 │       │   │   ├── asyncapi.go         # interactive dashboard + raw-YAML serving for the embedded api/asyncapi.yaml, at /asyncapi, /asyncapi.yaml
-│       │   │   └── swagger_theme.go / swagger_initializer.go  # custom-themed assets for GET /swagger/*any (swag-generated OpenAPI 2.0 UI, all 16 RP-1..RP-16 handlers)
+│       │   │   └── swagger_theme.go / swagger_initializer.go  # custom-themed assets for GET /swagger/*any (swag-generated OpenAPI 2.0 UI, all 17 RP-1..RP-17 handlers)
 │       │   └── consumer/               # 3 SQS handlers: membership-realm-q, tenant-realm-q, billing-realm-q
 │       └── outbound/
 │           ├── postgres/               # repository impls + migrations/000000_initial_schema.{up,down}.sql + gauge_repository.go (§11.2 exporters) + otel_tracer.go (pgcommon.Config.Tracer)
@@ -68,6 +68,7 @@ iam-realm-provisioner/
 │           ├── eventbus/               # outbox publisher, Glue/Noop/Validating codecs
 │           ├── openbao/                # OpenBao KV v2 + Kubernetes-auth client
 │           ├── orgmembership/          # HTTP client for O&M's I-8 residual-MFA check + I-16 subscription-lapse poll (RP-C3, port.SubscriptionLapseReader)
+│           ├── tokenservice/           # HTTP client for Token Service's TS-1/TS-3/TS-4 credential-lifecycle API (§2.5, port.TokenServiceClient)
 │           ├── s3/                     # realm-export object store
 │           ├── httpx/                  # cross-cutting leaf: the one HTTP transport every outbound adapter builds on, injecting W3C traceparent (§11.3)
 │           └── metrics/                # cross-cutting Prometheus counters/histograms/gauges (iam_realm_provisioner_*) — the "observability" component
@@ -145,7 +146,7 @@ Single-topic publisher (not a `RoutingPublisher` like some siblings) — one SNS
 - **`observability`** — may depend on `domain` only.
 - **`httptransport`** (`internal/adapter/outbound/httpx`) — its own component, same rationale as `observability`: a cross-cutting leaf every outbound HTTP caller depends on (W3C traceparent injection, §11.3), not a "real" adapter. `anyVendorDeps: true` with no internal deps at all — not even `domain` (unlike `observability`, which depends on `domain`).
 - **`keycloak`** (`internal/adapter/outbound/keycloak`) — its own component, separate from `adapters_outbound`, specifically so the RP-INV-1 single-writer invariant can be verified structurally: no other `adapters_outbound` package needs to depend on it, and `.github/scripts/arch-lint.sh` additionally greps for stray `gocloak` imports outside this one package.
-- **`adapters_outbound`** (`postgres`, `eventbus`, `openbao`, `orgmembership`, `s3`) — may depend on `domain`, `port`, `service`, `eventschema`, `observability`, `httptransport`.
+- **`adapters_outbound`** (`postgres`, `eventbus`, `openbao`, `orgmembership`, `tokenservice`, `s3`) — may depend on `domain`, `port`, `service`, `eventschema`, `observability`, `httptransport`.
 - **`adapters_inbound`** (`http`, `consumer`) — may depend on `domain`, `port`, `service`, `requestctx`, `apispec`, `observability`.
 - **`reconciler_jobs`** (`cmd/reconciler/jobs`) — its own component (not merged into `cmd`) so it can be declared as a normal dependency of `cmd/reconciler`'s `main.go` without a false-positive self-cycle warning. May depend on `domain`, `port`, `observability`.
 - **`cmd`** (`cmd/server`, `cmd/reconciler`) — the composition root; may import everything, including `keycloak`, both adapter groups, and `reconciler_jobs`.

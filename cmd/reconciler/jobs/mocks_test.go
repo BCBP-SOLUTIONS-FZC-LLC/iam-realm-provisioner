@@ -18,32 +18,34 @@ import (
 // ── mockKeycloakAdmin ─────────────────────────────────────────────────────
 
 type mockKeycloakAdmin struct {
-	ReadyFn                   func(ctx context.Context) error
-	CreateRealmFromTemplateFn func(ctx context.Context, realmName, templateVersion string) error
-	RegisterOIDCClientsFn     func(ctx context.Context, realmName, tenantSlug string) ([]string, error)
-	DisableRealmFn            func(ctx context.Context, realmName string) error
-	EnableRealmFn             func(ctx context.Context, realmName string) error
-	ExportRealmFn             func(ctx context.Context, realmName string) ([]byte, error)
-	DeleteRealmFn             func(ctx context.Context, realmName string) error
-	DeleteRealmIfExistsFn     func(ctx context.Context, realmName string) error
-	CreateTrialUserFn         func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error)
-	CreateInvitedUserFn       func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error)
-	FindUserByEmailFn         func(ctx context.Context, realmName, email string) (*port.ExistingUser, error)
-	MigrateUserFn             func(ctx context.Context, sourceRealm, targetRealm string, keycloakUserID uuid.UUID) (bool, error)
-	ListUsersByTenantFn       func(ctx context.Context, realmName string, tenantID uuid.UUID) ([]uuid.UUID, error)
-	DisableUsersInRealmFn     func(ctx context.Context, realmName string, tenantID uuid.UUID) error
-	EnableUsersInRealmFn      func(ctx context.Context, realmName string, tenantID uuid.UUID) error
-	HardDeleteUsersInRealmFn  func(ctx context.Context, realmName string, tenantID uuid.UUID) error
-	DeleteUserFn              func(ctx context.Context, realmName string, keycloakUserID uuid.UUID) error
-	RevokeUserSessionsFn      func(ctx context.Context, realmName string, keycloakUserID uuid.UUID) error
-	ForceLogoutRealmFn        func(ctx context.Context, realmName string) error
-	AssignRequiresMFAFn       func(ctx context.Context, realmName string, userID uuid.UUID) error
-	RevokeRequiresMFAFn       func(ctx context.Context, realmName string, userID uuid.UUID) error
-	HasRequiresMFAFn          func(ctx context.Context, realmName string, userID uuid.UUID) (bool, error)
-	ResetMFAFn                func(ctx context.Context, realmName string, userID uuid.UUID, requiresMFA bool) error
-	CreateOrUpdateIdpFn       func(ctx context.Context, realmName string, idp port.IdpKeycloakConfig) error
-	DeleteIdpFn               func(ctx context.Context, realmName, alias string) error
-	ApplyRealmConfigFn        func(ctx context.Context, realmName, settingKey string, desiredValue any) error
+	ReadyFn                      func(ctx context.Context) error
+	CreateRealmFromTemplateFn    func(ctx context.Context, realmName, templateVersion string) error
+	RegisterOIDCClientsFn        func(ctx context.Context, realmName, tenantSlug string) ([]string, error)
+	DisableRealmFn               func(ctx context.Context, realmName string) error
+	EnableRealmFn                func(ctx context.Context, realmName string) error
+	ExportRealmFn                func(ctx context.Context, realmName string) ([]byte, error)
+	DeleteRealmFn                func(ctx context.Context, realmName string) error
+	DeleteRealmIfExistsFn        func(ctx context.Context, realmName string) error
+	CreateTrialUserFn            func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error)
+	CreateInvitedUserFn          func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error)
+	FindUserByEmailFn            func(ctx context.Context, realmName, email string) (*port.ExistingUser, error)
+	MigrateUserFn                func(ctx context.Context, sourceRealm, targetRealm string, keycloakUserID uuid.UUID) (bool, error)
+	ListUsersByTenantFn          func(ctx context.Context, realmName string, tenantID uuid.UUID) ([]uuid.UUID, error)
+	DisableUsersInRealmFn        func(ctx context.Context, realmName string, tenantID uuid.UUID) error
+	EnableUsersInRealmFn         func(ctx context.Context, realmName string, tenantID uuid.UUID) error
+	HardDeleteUsersInRealmFn     func(ctx context.Context, realmName string, tenantID uuid.UUID) error
+	DeleteUserFn                 func(ctx context.Context, realmName string, keycloakUserID uuid.UUID) error
+	RevokeUserSessionsFn         func(ctx context.Context, realmName string, keycloakUserID uuid.UUID) error
+	ForceLogoutRealmFn           func(ctx context.Context, realmName string) error
+	AssignRequiresMFAFn          func(ctx context.Context, realmName string, userID uuid.UUID) error
+	RevokeRequiresMFAFn          func(ctx context.Context, realmName string, userID uuid.UUID) error
+	HasRequiresMFAFn             func(ctx context.Context, realmName string, userID uuid.UUID) (bool, error)
+	ResetMFAFn                   func(ctx context.Context, realmName string, userID uuid.UUID, requiresMFA bool) error
+	CreateOrUpdateIdpFn          func(ctx context.Context, realmName string, idp port.IdpKeycloakConfig) error
+	DeleteIdpFn                  func(ctx context.Context, realmName, alias string) error
+	ApplyRealmConfigFn           func(ctx context.Context, realmName, settingKey string, desiredValue any) error
+	CreateServiceAccountClientFn func(ctx context.Context, realmName, clientID string) (uuid.UUID, error)
+	SetClientSecretFn            func(ctx context.Context, realmName, clientID, secret string) error
 }
 
 var _ port.KeycloakAdmin = (*mockKeycloakAdmin)(nil)
@@ -123,6 +125,12 @@ func (m *mockKeycloakAdmin) DeleteIdp(ctx context.Context, realmName, alias stri
 }
 func (m *mockKeycloakAdmin) ApplyRealmConfig(ctx context.Context, realmName, settingKey string, desiredValue any) error {
 	return m.ApplyRealmConfigFn(ctx, realmName, settingKey, desiredValue)
+}
+func (m *mockKeycloakAdmin) CreateServiceAccountClient(ctx context.Context, realmName, clientID string) (uuid.UUID, error) {
+	return m.CreateServiceAccountClientFn(ctx, realmName, clientID)
+}
+func (m *mockKeycloakAdmin) SetClientSecret(ctx context.Context, realmName, clientID, secret string) error {
+	return m.SetClientSecretFn(ctx, realmName, clientID, secret)
 }
 
 // ── mockTenantRealmRepository ─────────────────────────────────────────────

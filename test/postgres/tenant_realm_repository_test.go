@@ -67,6 +67,50 @@ func TestTenantRealmRepository(t *testing.T) {
 		assert.Nil(t, got.DeletedAt)
 	})
 
+	t.Run("Upsert_ServiceAccountColumnsRoundTrip", func(t *testing.T) {
+		// §2.5/RP-17: service_account_principal_id/keycloak_client_id are
+		// nil until minted, then round-trip through Upsert/Update like any
+		// other column.
+		t.Parallel()
+		tenantID := uuid.New()
+		tctx := withTenant(ctx, tenantID)
+
+		row := newSharedTrial(tenantID)
+		require.NoError(t, repo.Upsert(tctx, row))
+		got, err := repo.FindByTenantID(tctx, tenantID)
+		require.NoError(t, err)
+		assert.Nil(t, got.ServiceAccountPrincipalID)
+		assert.Nil(t, got.ServiceAccountKeycloakClientID)
+
+		principalID := uuid.New()
+		clientID := "platform-automation-" + tenantID.String()
+		row.ServiceAccountPrincipalID = &principalID
+		row.ServiceAccountKeycloakClientID = &clientID
+		require.NoError(t, repo.Upsert(tctx, row))
+
+		got, err = repo.FindByTenantID(tctx, tenantID)
+		require.NoError(t, err)
+		require.NotNil(t, got.ServiceAccountPrincipalID)
+		assert.Equal(t, principalID, *got.ServiceAccountPrincipalID)
+		require.NotNil(t, got.ServiceAccountKeycloakClientID)
+		assert.Equal(t, clientID, *got.ServiceAccountKeycloakClientID)
+
+		// Update (the RP-3 conversion path) carries the columns through too.
+		got.Strategy = domain.RealmStrategyDedicated
+		got.RealmName = "tenant-" + tenantID.String()
+		got.KeycloakShard = strPtr("kc-shard-1")
+		newClientID := "platform-automation"
+		got.ServiceAccountKeycloakClientID = &newClientID
+		require.NoError(t, repo.Update(tctx, got))
+
+		updated, err := repo.FindByTenantID(tctx, tenantID)
+		require.NoError(t, err)
+		require.NotNil(t, updated.ServiceAccountKeycloakClientID)
+		assert.Equal(t, "platform-automation", *updated.ServiceAccountKeycloakClientID)
+		require.NotNil(t, updated.ServiceAccountPrincipalID)
+		assert.Equal(t, principalID, *updated.ServiceAccountPrincipalID, "carry-over keeps the same principal_id")
+	})
+
 	t.Run("Upsert_OnConflictUpdatesAndAlwaysBumpsRecordVersion", func(t *testing.T) {
 		t.Parallel()
 		tenantID := uuid.New()

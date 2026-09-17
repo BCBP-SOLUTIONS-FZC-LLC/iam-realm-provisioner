@@ -2,7 +2,7 @@
 
 This document describes the internal structure, dependency rules, and runtime data flows of `iam-realm-provisioner`.
 
-`iam-realm-provisioner` is a **private Go service** (`github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.6) deployed as a containerised microservice (HPA 2–4 replicas), refining **IAM HLD v1.42 §5.2** (LLD v1.8, `docs/lld/iam-lld-realm-provisioner-service.md`; where LLD and HLD disagree, HLD is authoritative). It is the **single writer to the Keycloak Admin API** across the entire IAM subsystem (RP-INV-1, HLD §4.2/§5.2) and the system of record for the small amount of local state — realm identity, IdP config, reconciliation and idempotency ledgers — needed to make that writing safe, idempotent, and replayable. Org & Membership owns the application-side `tenants` row; this service owns Keycloak-side realm reality and its `tenant_realms` mirror (RP-D6) — neither writes the other's store. It ships as **two binaries from one image**: `cmd/server` (the mesh-only `/api/v1/internal` API, RP-1..RP-16, three inbound SQS consumers, and the transactional outbox runner) and `cmd/reconciler` (a single binary dispatched by `--job=<name>`, covering RP-C1..RP-C4 plus two operational prune jobs, each its own Kubernetes CronJob). The service sits on **neither of the platform's two hot paths** (HLD §4.3) — work is bursty, coarse-grained tenant-lifecycle operations, where correctness, auditability, and idempotency matter more than latency.
+`iam-realm-provisioner` is a **private Go service** (`github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.6) deployed as a containerised microservice (HPA 2–4 replicas), refining **IAM HLD v1.42 §5.2** (LLD v1.8, `docs/lld/iam-lld-realm-provisioner-service.md`; where LLD and HLD disagree, HLD is authoritative). It is the **single writer to the Keycloak Admin API** across the entire IAM subsystem (RP-INV-1, HLD §4.2/§5.2) and the system of record for the small amount of local state — realm identity, IdP config, reconciliation and idempotency ledgers — needed to make that writing safe, idempotent, and replayable. Org & Membership owns the application-side `tenants` row; this service owns Keycloak-side realm reality and its `tenant_realms` mirror (RP-D6) — neither writes the other's store. It ships as **two binaries from one image**: `cmd/server` (the mesh-only `/api/v1/internal` API, RP-1..RP-17, three inbound SQS consumers, and the transactional outbox runner) and `cmd/reconciler` (a single binary dispatched by `--job=<name>`, covering RP-C1..RP-C4 plus two operational prune jobs, each its own Kubernetes CronJob). The service sits on **neither of the platform's two hot paths** (HLD §4.3) — work is bursty, coarse-grained tenant-lifecycle operations, where correctness, auditability, and idempotency matter more than latency.
 
 **Does not own:** tenants-as-business-entities, memberships, roles, invitations (Org & Membership); JWT issuance / login (Keycloak itself); delegation, tender ACL, group-mapping, or the plan/department catalogues (sibling services extracted from Core); any per-user table (there is none — Keycloak is the sole store of user identity and credentials); secret material in Postgres (IdP secrets live only in OpenBao).
 
@@ -22,7 +22,7 @@ graph TD
     end
 
     subgraph adapters_in["Inbound Adapters  —  internal/adapter/inbound/"]
-        http_h["http/\nInternalHandler · router.go · middleware.go\nRP-1..RP-16 on /api/v1/internal"]
+        http_h["http/\nInternalHandler · router.go · middleware.go\nRP-1..RP-17 on /api/v1/internal"]
         consumer["consumer/\nMembershipConsumer ← membership-realm-q\nTenantConsumer     ← tenant-realm-q\nBillingConsumer    ← billing-realm-q"]
     end
 
@@ -1011,7 +1011,7 @@ A Swagger UI **is** mounted, alongside the AsyncAPI event-contract viewer — bo
 
 | Handler | Route | Gating | Purpose |
 |---|---|---|---|
-| `swaggerFiles`/`ginSwagger` | `GET /swagger/*any` | `DocsConfig.active()` | `swag`-generated OpenAPI 2.0 UI for the mesh-internal REST contract (all 16 RP-1..RP-16 handlers, custom-themed via `SwaggerThemeHandler`/`SwaggerInitializerHandler`) |
+| `swaggerFiles`/`ginSwagger` | `GET /swagger/*any` | `DocsConfig.active()` | `swag`-generated OpenAPI 2.0 UI for the mesh-internal REST contract (all 17 RP-1..RP-17 handlers, custom-themed via `SwaggerThemeHandler`/`SwaggerInitializerHandler`) |
 | `AsyncAPIHandler` | `GET /asyncapi` | `DocsConfig.active()` | Interactive server-side HTML dashboard for `api/asyncapi.yaml` (search, dark/light theme, deep-linkable schema fields — ported from `iam-org-membership`'s equivalent viewer) |
 | `AsyncAPIYAMLHandler` | `GET /asyncapi.yaml` | `DocsConfig.active()` | Serves the raw embedded spec bytes |
 
@@ -1045,7 +1045,7 @@ graph LR
         claude[".claude/CLAUDE.md + siblings\narchitecture.md · database-schema.md\napi-caching-events.md · request-flows.md · operations.md"]
         readme["README.md\nmental model · API/event overview · onboarding"]
         asyncapi_yaml["api/asyncapi.yaml\nAsyncAPI 3.0 — iam-tenant-events SNS contract\n(9 published + 6 consumed)"]
-        swag_annot["@Summary/@Router annotations\non all 16 RP-1..RP-16 handlers +\ncmd/server/swagger_info.go"]
+        swag_annot["@Summary/@Router annotations\non all 17 RP-1..RP-17 handlers +\ncmd/server/swagger_info.go"]
         lld["docs/lld/iam-lld-realm-provisioner-service.md\nfrozen LLD v1.8"]
     end
 
@@ -1072,7 +1072,7 @@ graph LR
 |----------|-------------|
 | [`.claude/architecture.md`](.claude/architecture.md) | Clean Architecture directory tree, shared library integration, dep rules |
 | [`.claude/database-schema.md`](.claude/database-schema.md) | Tables, enums, RLS/migration/trigger invariants |
-| [`.claude/api-caching-events.md`](.claude/api-caching-events.md) | Endpoint catalogue (RP-1..RP-16), cache keys, event catalogue |
+| [`.claude/api-caching-events.md`](.claude/api-caching-events.md) | Endpoint catalogue (RP-1..RP-17), cache keys, event catalogue |
 | [`.claude/request-flows.md`](.claude/request-flows.md) | Provisioning, conversion, IdP, MFA, lapse, GDPR ordering |
 | [`.claude/operations.md`](.claude/operations.md) | Security, observability, configuration, deployment, CI/CD, dependency degradation matrix |
 | [`docs/architecture/README.md`](docs/architecture/README.md) | Standalone Mermaid diagram set index (the 9 `.mmd` files embedded above) |

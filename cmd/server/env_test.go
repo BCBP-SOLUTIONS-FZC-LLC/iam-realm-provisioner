@@ -14,7 +14,7 @@ import (
 func clearRequiredEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
-		"KEYCLOAK_BASE_URL", "KEYCLOAK_ADMIN_CLIENT_SECRET", "ORG_MEMBERSHIP_BASE_URL",
+		"KEYCLOAK_BASE_URL", "KEYCLOAK_ADMIN_CLIENT_SECRET", "ORG_MEMBERSHIP_BASE_URL", "TOKEN_SERVICE_BASE_URL",
 		"SNS_TOPIC_TENANT_ARN", "GLUE_REGISTRY_TENANT_NAME",
 		"DATABASE_URL", "PG_HOST", "PG_USER", "PG_PASSWORD",
 		"MIGRATION_DATABASE_URL", "PG_BOUNCER_MODE",
@@ -28,6 +28,7 @@ func setAllRequiredEnv(t *testing.T) {
 	t.Setenv("KEYCLOAK_BASE_URL", "https://keycloak.iam.svc.cluster.local")
 	t.Setenv("KEYCLOAK_ADMIN_CLIENT_SECRET", "a-real-secret")
 	t.Setenv("ORG_MEMBERSHIP_BASE_URL", "https://org-membership.iam.svc.cluster.local")
+	t.Setenv("TOKEN_SERVICE_BASE_URL", "https://token-service.iam.svc.cluster.local")
 	t.Setenv("SNS_TOPIC_TENANT_ARN", "arn:aws:sns:ap-south-1:111111111111:iam-tenant-events")
 	t.Setenv("GLUE_REGISTRY_TENANT_NAME", "iam-tenant-events")
 	t.Setenv("DATABASE_URL", "postgres://user:pass@host/db")
