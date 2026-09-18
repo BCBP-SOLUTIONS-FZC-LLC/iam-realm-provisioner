@@ -5,7 +5,7 @@ This is an internal IAM microservice for the XpertPMS platform. This guide cover
 ## Prerequisites
 
 - Go 1.26.6+ (matches `go.mod`)
-- Docker (required for PostgreSQL + LocalStack (SNS/SQS) + Keycloak integration tests via `testcontainers-go`, and for local dev via `make docker-up`)
+- Docker (required for PostgreSQL + Floci (SNS/SQS/S3/Glue) + Keycloak integration tests via `testcontainers-go`, and for local dev via `make docker-up`)
 - `golangci-lint` is managed as a Go tool (`go tool golangci-lint`) — no separate install needed
 - `GOPRIVATE=github.com/BCBP-SOLUTIONS-FZC-LLC/*` (private module access; also `GONOSUMDB` for the same prefix)
 - SSH key registered with the BCBP org so `go mod download` can fetch `platform-events`, `platform-gincommon`, `platform-pgcommon`
@@ -17,7 +17,7 @@ git clone https://github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner
 cd iam-realm-provisioner
 make setup       # copies .env-example → .env; installs .githooks/pre-commit
 make tidy        # go mod tidy
-make docker-up   # start PostgreSQL + LocalStack + Keycloak
+make docker-up   # start PostgreSQL + Floci + Floci UI + Keycloak
 make migrate-up  # apply pending migrations (the server also self-migrates at startup)
 make lint        # verify linter passes
 make test        # run all tests (requires Docker)
@@ -30,7 +30,7 @@ To run only unit tests (no Docker required):
 make test-unit
 ```
 
-Host ports are deliberately non-default so this stack can run alongside sibling IAM services: Postgres `5544`, LocalStack `4571`, Keycloak `8091` (see `docker-compose.yml`).
+Host ports are deliberately non-default so this stack can run alongside sibling IAM services: Postgres `5544`, Floci `4572`, Floci UI `4504`, Keycloak `8091` (see `docker-compose.yml`).
 
 `make setup` installs `.githooks/pre-commit`, which runs `make tidy`, `fmt-check`, `vet`, and `lint` before every commit. Re-run `make install-hooks` any time `.githooks/pre-commit` changes.
 

@@ -344,7 +344,7 @@ Every job is idempotent per tenant (safe to re-run) and batched (`RECONCILER_BAT
 ### Prerequisites
 
 - Go 1.26.6+
-- Docker (Postgres, LocalStack, Keycloak, OpenBao — `make docker-up`)
+- Docker (Postgres, Floci, Keycloak, OpenBao — `make docker-up`)
 - `GOPRIVATE=github.com/BCBP-SOLUTIONS-FZC-LLC/*` (`GONOSUMDB` too) and an SSH key registered with the BCBP org
 
 ### Setup
@@ -354,7 +354,7 @@ git clone https://github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner
 cd iam-realm-provisioner
 make setup       # copies .env-example → .env; installs .githooks/pre-commit (run once before anything else)
 make tidy        # go mod tidy
-make docker-up   # start Postgres + LocalStack + Keycloak + OpenBao
+make docker-up   # start Postgres + Floci + Floci UI + Keycloak + OpenBao
 make migrate-up  # apply pending migrations (the server also self-migrates at startup)
 make run         # start the server on :8080 (metrics on :9090)
 ```
@@ -388,8 +388,7 @@ make run         # start the server on :8080 (metrics on :9090)
 | `make build` | Compile both binaries to `bin/` |
 | `make cover` / `make cover-func` | Coverage HTML report / per-function summary |
 | `make ci` | `tidy` + `fmt-check` + `vet` + `lint` + `arch-lint` + `metrics-registry-lint` + `metric-naming-lint` + `test-ci` + `build` |
-| `make docker-up` / `make docker-down` | Start/stop Postgres + LocalStack + Keycloak + OpenBao |
-| `make docker-up-pro` | Start the standalone `docker-compose.pro.yml` stack instead (LocalStack **Pro** — Glue Schema Registry + KMS — plus the same Postgres/Keycloak/OpenBao; requires `LOCALSTACK_AUTH_TOKEN` in `.env`) |
+| `make docker-up` / `make docker-down` | Start/stop Postgres + Floci + Floci UI + Keycloak + OpenBao |
 | `make migrate-up` / `make migrate-down` / `make migrate-create NAME=<x>` | Migration helpers (standalone `golang-migrate` CLI; the server self-migrates at startup) |
 | `make clean` | Remove `bin/` and coverage artefacts |
 | `make schema-pull` | Pull the `platform-schemagov` Docker image (`0.4`) |
@@ -475,20 +474,22 @@ service layer  ──(same tx)──▶  outbox_events (Postgres)
                                outbox runner (OUTBOX_POLL_INTERVAL, 500 ms)
                                       │
                                       ▼
-                               SNS topic: iam-tenant-events        (LocalStack)
+                               SNS topic: iam-tenant-events        (Floci)
                                       │
-                    SNS fan-out to: membership-realm-q, tenant-realm-q, billing-realm-q  (LocalStack, local dev only)
+                    SNS fan-out to: membership-realm-q, tenant-realm-q, billing-realm-q  (Floci, local dev only)
 ```
 
 An outbox insert is atomic with the business write — a `2xx` HTTP response guarantees an `outbox_events` row exists.
 
+`make docker-up` starts **Floci** — an open-source (MIT), always-free LocalStack-compatible emulator — instead of LocalStack; unlike LocalStack Community, Floci includes Glue Schema Registry in its free tier, so `scripts/init-floci.sh` provisions the real Glue wire format alongside SNS/SQS/S3, and the former `docker-compose.pro.yml`/`LOCALSTACK_AUTH_TOKEN` Pro-tier split is retired.
+
 ### Step 1 — Start infrastructure
 
 ```bash
-make docker-up
+make docker-up   # Postgres + Floci (4572) + Floci UI (4504) + Keycloak + OpenBao
 ```
 
-`scripts/init-localstack.sh` runs automatically (`SERVICES=sns,sqs,s3` in `docker-compose.yml`'s `localstack` block) and creates:
+`scripts/init-floci.sh` runs automatically and creates:
 
 | Resource | Type |
 |---|---|
@@ -500,23 +501,32 @@ make docker-up
 | `tenant-audit-q` (+ `-dlq`) | SQS queue, **unfiltered** — dev-only fan-out for Audit's LLD §7.4 subscription (all 9 produced events) |
 | `tenant-notif-q` (+ `-dlq`) | SQS queue, dev-only fan-out for Notification's LLD §7.4 subscription, filtered `EventType IN [TenantConverted, DirectPaidSignup, TrialExpired, TenantSuspended, TenantReactivated]` |
 | `tenant-authz-q` (+ `-dlq`) | SQS queue, dev-only fan-out for AuthZ Enrichment's LLD §7.4 subscription, filtered `EventType IN [TenantConverted]` |
+| `iam-realm-exports` | S3 bucket (`REALM_EXPORT_BUCKET`, RP-EVT-4 offboarding target) |
+| `iam-tenant-events` | Glue registry, 9 schemas — one per produced event, real `GlueCodec` wire format locally (no `NoopCodec` fallback needed) |
 
-The last four queues mirror LLD §7.4's "Outbound — `iam.tenant.events` via the outbox" consumer mapping exactly — in production each belongs to its real consumer (O&M, Audit, Notification, AuthZ Enrichment), which is why this service never owns one itself; provisioning them locally (the same approach `iam-org-membership`'s `init-localstack.sh` takes for its own topics) lets a developer observe the full fan-out for any of this service's 9 produced events without standing up those services.
+The four fan-out queues mirror LLD §7.4's "Outbound — `iam.tenant.events` via the outbox" consumer mapping exactly — in production each belongs to its real consumer (O&M, Audit, Notification, AuthZ Enrichment), which is why this service never owns one itself; provisioning them locally (the same approach `iam-org-membership`'s `init-floci.sh` takes for its own topics) lets a developer observe the full fan-out for any of this service's 9 produced events without standing up those services.
 
 In production the three inbound queues above subscribe to **three different upstream topics** (O&M's `iam.membership.events`, O&M's `iam.tenant.events`, Billing's `billing.events`); in local dev, without those services running, the script subscribes all three to this service's own `iam-tenant-events` topic so a developer can hand-publish test events to any of them. Each SNS→SQS subscription sets `RawMessageDelivery=true`.
 
-### Step 2 — Verify SNS/SQS exist
+### Step 2 — Verify SNS/SQS/S3/Glue exist
 
 ```bash
-docker compose exec localstack awslocal sns list-topics --region ap-south-1
-docker compose exec localstack awslocal sqs list-queues --region ap-south-1
+docker compose exec floci aws --region ap-south-1 sns list-topics
+docker compose exec floci aws --region ap-south-1 sqs list-queues
+docker compose exec floci aws --region ap-south-1 s3 ls
+docker compose exec floci aws --region ap-south-1 glue list-schemas --registry-id RegistryName=iam-tenant-events
 ```
+
+#### Step 2b — Verify event delivery in the browser (floci-ui)
+
+`make docker-up` also starts **floci-ui**, a web console for Floci, at **http://localhost:4504**. It's a faster way to confirm an event landed on the right queue than shelling into the CLI each time: sidebar → **Integration → SQS** shows all 7 queues `init-floci.sh` provisioned, each with a live **Messages** count. It does not (yet) show message bodies or SNS topics/subscriptions — see Step 5 and the troubleshooting table below for the CLI equivalents.
 
 ### Step 3 — Point the server at the created resources
 
-Copy the ARNs/URLs `init-localstack.sh` printed into `.env` (`SNS_TOPIC_TENANT_ARN`, `SQS_MEMBERSHIP_REALM_QUEUE_URL`, `SQS_TENANT_REALM_QUEUE_URL`, `SQS_BILLING_REALM_QUEUE_URL`), leave `GLUE_REGISTRY_TENANT_NAME` unset (falls back to `NoopCodec` — plain JSON, no Glue header), then:
+`.env-example`'s `SNS_TOPIC_TENANT_ARN`/`GLUE_REGISTRY_TENANT_NAME`/`SQS_*_QUEUE_URL`/`AWS_ENDPOINT_URL` already ship as real working defaults — Floci deterministically provisions them at a fixed account id (`000000000000`) and port (`4572`), so no copy-pasting from script output is needed:
 
 ```bash
+cp .env-example .env   # if you haven't already
 make run
 ```
 
@@ -536,9 +546,9 @@ A `201` means the row and the `TrialTenantProvisioned` outbox event committed at
 ### Step 5 — Read messages from SQS
 
 ```bash
-docker compose exec localstack awslocal sqs receive-message \
-  --queue-url http://localhost:4566/000000000000/tenant-orgm-q \
-  --max-number-of-messages 10 --region ap-south-1 | jq '.Messages[].Body | fromjson'
+docker compose exec floci aws --region ap-south-1 sqs receive-message \
+  --queue-url http://floci:4566/000000000000/tenant-orgm-q \
+  --max-number-of-messages 10 | jq '.Messages[].Body | fromjson'
 ```
 
 Swap in `tenant-audit-q` for the same result (both are unfiltered), or `tenant-notif-q`/`tenant-authz-q` to see only the subset of events each actually subscribes to (§7.4) — e.g. converting a trial tenant (RP-3) produces `TenantConverted`, which lands in all four.
@@ -557,8 +567,8 @@ docker compose exec postgres psql -U postgres -d provisioner -c \
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Queue is empty after a successful write | SNS topic/subscription not created, or `.env`'s `SNS_TOPIC_TENANT_ARN` doesn't match | Re-check `docker compose logs localstack`; re-run Step 2 |
-| `outbox_events` row has `last_error` containing `404 NotFound` | Topic ARN mismatch | Verify against `awslocal sns list-topics` output |
+| Queue is empty after a successful write | SNS topic/subscription not created, or `.env`'s `SNS_TOPIC_TENANT_ARN` doesn't match | Re-check `docker compose logs floci` (or floci-ui at http://localhost:4504); re-run Step 2 |
+| `outbox_events` row has `last_error` containing `404 NotFound` | Topic ARN mismatch | Verify against `aws sns list-topics` output |
 | `outbox_events` empty after a write | Row was published and pruned, or the write never committed | Re-check the HTTP response code — a `2xx` guarantees the row was committed |
 | Messages keep reappearing after `receive-message` | Normal — visibility timeout, not deletion | Use `delete-message` |
 | RP-6/RP-7 (IdP configure/remove) return `500` locally | OpenBao's Kubernetes-auth login has no real Kubernetes cluster to call out to in `docker-compose.yml` | Expected in local dev — seed OpenBao manually (`bao login <root token from docker compose logs openbao>`), or rely on `test/integration/openbao_test.go`, which exercises the real login flow with a stubbed TokenReview response |
@@ -598,8 +608,8 @@ Coverage is measured over `./cmd/...`, `./internal/...`, `./pkg/...` (`COVER_PKG
 | `SYSTEM_DATABASE_URL` | `postgres://realm_provisioner_migrator:...@localhost:5544/provisioner?sslmode=disable` | — | **Required, even in dev.** BYPASSRLS pool for reconciler cross-tenant sweeps — must target `realm_provisioner_migrator` in production, never the app role |
 | `MIGRATION_DATABASE_URL` | `postgres://realm_provisioner_migrator:...@localhost:5544/provisioner?sslmode=disable` | — | **Required, even outside `PG_BOUNCER_MODE`.** Direct (non-PgBouncer) DSN — only the migrator role can run `outbox.ApplySchema` / the domain migration |
 | `AWS_REGION` | `ap-south-1` | `ap-south-1` | AWS region |
-| `AWS_ENDPOINT_URL` | `http://localhost:4571` | — | LocalStack endpoint override (leave unset in production) |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | `test` / `test` | — | LocalStack dev credentials (IRSA in production) |
+| `AWS_ENDPOINT_URL` | `http://localhost:4572` | — | Floci endpoint override (leave unset in production) |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | `test` / `test` | — | Floci dev credentials (IRSA in production) |
 | `SNS_TOPIC_TENANT_ARN` | `arn:aws:sns:...` | — | **Required outside dev.** `iam-tenant-events` topic ARN — events queue in the outbox but never publish without it |
 | `GLUE_REGISTRY_TENANT_NAME` | `iam-tenant-events` | — | **Required outside dev.** Unset → `NoopCodec` (plain JSON) |
 | `SQS_MEMBERSHIP_REALM_QUEUE_URL` / `SQS_TENANT_REALM_QUEUE_URL` / `SQS_BILLING_REALM_QUEUE_URL` | `https://sqs.../membership-realm-q` | — | The 3 inbound queues — an unset URL disables that one consumer with a `WARN`, not a startup failure |
@@ -723,27 +733,18 @@ See the [Deployment](#deployment) section above — `/iam-realm-provisioner-serv
 
 ### What the bundled `docker-compose.yml` starts
 
-Unlike a compose file that starts infra-only, this repo's `docker-compose.yml` includes an `app` service too (built from the local `Dockerfile`, needs the `go_private_token` build secret) alongside its four infrastructure dependencies:
+Unlike a compose file that starts infra-only, this repo's `docker-compose.yml` includes an `app` service too (built from the local `Dockerfile`, needs the `go_private_token` build secret) alongside its five infrastructure dependencies:
 
 | Container | Image | Host port(s) | Purpose |
 |---|---|---|---|
 | `app` | built from local `Dockerfile` | `8080`, `9090` | This service itself, when run via `docker compose up` rather than `make run` |
 | `postgres` | `postgres:16-alpine` | `5544 → 5432` | Primary store, seeded by `scripts/init-db.sql` |
-| `localstack` | `localstack/localstack:4.4.0` | `4571 → 4566` | SNS/SQS/S3 (`SERVICES: sns,sqs,s3`) |
+| `floci` | `floci/floci:2.1.0-compat` | `4572 → 4566` | SNS/SQS/S3/Glue Schema Registry (all free — no Pro tier needed) |
+| `floci-ui` | `floci/floci-ui:0.5.0` | `4504 → 4500` | Web console for `floci` — http://localhost:4504 |
 | `keycloak` | `quay.io/keycloak/keycloak:26.0` | `8091 → 8080` | `start-dev` mode, admin/admin — **not for production use** |
 | `openbao` | `openbao/openbao:latest` | `8210 → 8200` | `server -dev` mode, in-memory, auto-unsealed — **not for production use**; prints its dev root token to `docker compose logs openbao` |
 
-`make docker-up` only starts `postgres`, `localstack`, `keycloak`, and `openbao` — not `app` — so local dev typically still runs the service itself via `make run` for fast rebuilds.
-
-### LocalStack Pro (`docker-compose.pro.yml`)
-
-A separate, fully standalone compose file — not an override of `docker-compose.yml` — for local dev against LocalStack **Pro** (Glue Schema Registry + KMS): `postgres`/`keycloak`/`openbao` are identical to the community stack, `localstack` runs the Pro image with `SERVICES: sns,sqs,s3,glue,kms`. Run it with `make docker-up-pro` or directly:
-
-```bash
-LOCALSTACK_AUTH_TOKEN=<your-token> docker compose -f docker-compose.pro.yml up -d postgres localstack keycloak openbao
-```
-
-Both compose files carry a cross-reference comment on their `keycloak`/`openbao` blocks — since they're duplicated (not shared via `extends`/override), an edit to one must be mirrored in the other.
+`make docker-up` only starts `postgres`, `floci`, `floci-ui`, `keycloak`, and `openbao` — not `app` — so local dev typically still runs the service itself via `make run` for fast rebuilds.
 
 ### Building the service image
 
@@ -767,7 +768,8 @@ The `Dockerfile` requires the `go_private_token` build secret to fetch the three
 | This service's API | `app` | `localhost:8080` |
 | This service's `/metrics` | `app` | `localhost:9090` |
 | PostgreSQL | `postgres:5432` | `localhost:5544` |
-| LocalStack | `localstack:4566` | `localhost:4571` |
+| Floci | `floci:4566` | `localhost:4572` |
+| Floci UI | `floci-ui:4500` | `localhost:4504` |
 | Keycloak | `keycloak:8080` | `localhost:8091` |
 | OpenBao | `openbao:8200` | `localhost:8210` |
 
@@ -805,7 +807,7 @@ services:
       KEYCLOAK_ADMIN_CLIENT_SECRET: dev-secret-change-me
       ORG_MEMBERSHIP_BASE_URL: http://iam-org-membership:8080
       AWS_REGION: ap-south-1
-      AWS_ENDPOINT_URL: http://iam-localstack:4566
+      AWS_ENDPOINT_URL: http://iam-floci:4566
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
       BAO_ADDR: http://iam-openbao:8200

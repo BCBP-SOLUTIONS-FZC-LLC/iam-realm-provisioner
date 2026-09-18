@@ -53,8 +53,7 @@ make build              # Compile both binaries to bin/ (iam-realm-provisioner-s
 make cover              # Coverage HTML report
 make cover-func         # Coverage summary by function
 make ci                 # tidy + fmt-check + vet + lint + arch-lint + metrics-registry-lint + metric-naming-lint + test-ci + build (full CI pipeline)
-make docker-up          # Start Postgres + LocalStack + Keycloak + OpenBao (Docker required)
-make docker-up-pro      # Standalone LocalStack Pro stack instead (docker-compose.pro.yml — Glue + KMS, same Postgres/Keycloak/OpenBao; requires LOCALSTACK_AUTH_TOKEN)
+make docker-up          # Start Postgres + Floci + Floci UI + Keycloak + OpenBao (Docker required)
 make docker-down        # Stop containers
 make migrate-up         # Apply pending domain migrations against DATABASE_MIGRATION_URL (server also self-migrates at startup)
 make migrate-down       # Roll back one domain migration

@@ -133,7 +133,7 @@ Grafana "IAM — Realm Provisioner": provision throughput/success by kind, conve
 | `PG_MAX_CONNS`, `PG_BOUNCER_MODE`, `PG_STATEMENT_TIMEOUT`, `PG_SLOW_QUERY_THRESHOLD` | `10` / `false` / `5s` / `200ms` | `pgcommon` pool tuning |
 | `SYSTEM_DATABASE_URL` | (required) | `realm_provisioner_migrator` (`BYPASSRLS`) DSN — the reconciler's cross-tenant sweeps use this, never the app role. Required even in dev. |
 | `MIGRATION_DATABASE_URL` | (required) | Direct (non-PgBouncer) DSN — only `realm_provisioner_migrator` can run `outbox.ApplySchema` / the domain migration; `realm_provisioner_app` has no `CREATE` on schema `public` |
-| `AWS_REGION`, `AWS_ENDPOINT_URL` | `ap-south-1` / — | Region + LocalStack endpoint override for local dev |
+| `AWS_REGION`, `AWS_ENDPOINT_URL` | `ap-south-1` / — | Region + Floci endpoint override for local dev |
 | `SNS_TOPIC_TENANT_ARN` | (required in prod) | Single outbound topic, `iam-tenant-events` |
 | `GLUE_REGISTRY_TENANT_NAME` | (required in prod) | Unset → `NoopCodec` (plain JSON, local dev) |
 | `SQS_MEMBERSHIP_REALM_QUEUE_URL` / `SQS_TENANT_REALM_QUEUE_URL` / `SQS_BILLING_REALM_QUEUE_URL` | (required in prod) | The 3 inbound queues |

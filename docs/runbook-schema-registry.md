@@ -132,19 +132,17 @@ duration. `NoopCodec` is a local-dev/test fallback only.
 
 ## Local development
 
-Unlike some sibling services, `scripts/init-localstack.sh` does **not**
-register any Glue schemas — it only provisions this service's SNS
-topic/SQS-queue/DLQ messaging topology (see the script's own header
-comment). AWS Glue Schema Registry requires **LocalStack Pro**; the script
-never attempts it, so a plain `make docker-up` always leaves
-`GLUE_REGISTRY_TENANT_NAME` effectively unusable locally and the app runs on
-`NoopCodec` (plain JSON, no Glue wire-format header) unless you additionally:
-
-```bash
-export AWS_ENDPOINT_URL=http://localhost:4566   # LocalStack Pro only
-export GLUE_REGISTRY_TENANT_NAME=iam-tenant-events
-make schema-register     # registers this service's 9 schemas into LocalStack's Glue mock
-```
+`scripts/init-floci.sh` registers all 9 of this service's Glue schemas
+automatically, alongside its SNS topic/SQS-queue/DLQ messaging topology
+(see the script's own header comment) — a plain `make docker-up` is enough;
+no extra setup is needed. This works because **Floci** (the local AWS
+emulator `docker-compose.yml`'s `floci` service runs, replacing LocalStack)
+includes Glue Schema Registry in its free tier, unlike LocalStack Community
+which gated it behind a paid Pro tier — the former LocalStack-Pro-only split
+(`docker-compose.pro.yml`, `LOCALSTACK_AUTH_TOKEN`) is retired. `.env-example`
+ships `GLUE_REGISTRY_TENANT_NAME=iam-tenant-events` and
+`AWS_ENDPOINT_URL=http://localhost:4572` as real working defaults, so the app
+runs with the real Glue wire-format codec out of the box, not `NoopCodec`.
 
 This does not create O&M's `TenantCreated`/`TrialStarted` — those are not
 this service's concern even in local dev; a developer testing full-topology
@@ -242,7 +240,7 @@ Set in `deploy/helm/values.yaml` (per environment) or
 
 | Variable | Purpose | Notes |
 |---|---|---|
-| `GLUE_REGISTRY_TENANT_NAME` | Glue registry name | `iam-tenant-events` in every environment that shares it with O&M. Leave empty in dev (`NoopCodec`) — see "Local development" above |
+| `GLUE_REGISTRY_TENANT_NAME` | Glue registry name | `iam-tenant-events` in every environment that shares it with O&M, and by default in local dev too (Floci provisions it for free) — see "Local development" above. Leave empty to force `NoopCodec` |
 | `SCHEMA_GOV_IMAGE` | `platform-schemagov` Docker image tag used by `make schema-*` and `.github/workflows/schema-*.yml` | Currently `ghcr.io/bcbp-solutions-fzc-llc/platform-schemagov:0.4` |
 | `PROMETHEUS_URL` | Event-usage data source for the usage-check/enforce-lifecycle CI steps | Deliberately unset — this service is pre-production with no live Prometheus, and its 9 events are frozen at LLD v1.0; auto-deprecating a never-fired-in-pre-production event would be wrong. Leaving it unset runs usage-check with `--source disabled`, which makes lifecycle enforcement a deliberate no-op, not a deleted capability |
 | `AWS_REGION` | Primary region | `ap-south-1` |

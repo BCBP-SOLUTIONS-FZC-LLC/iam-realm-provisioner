@@ -105,8 +105,7 @@ help:
 	@echo "  make cover            - coverage HTML report"
 	@echo "  make cover-func       - coverage summary by function"
 	@echo "  make ci               - tidy + fmt-check + vet + lint + arch-lint + metrics-registry-lint + metric-naming-lint + test-ci + build"
-	@echo "  make docker-up        - start Postgres + LocalStack + Keycloak + OpenBao (community)"
-	@echo "  make docker-up-pro    - start Postgres + LocalStack Pro only (use with 'make mock')"
+	@echo "  make docker-up        - start Postgres + Floci + Floci UI + Keycloak + OpenBao"
 	@echo "  make docker-down      - stop local containers"
 	@echo "  make migrate-up       - apply pending domain migrations against DATABASE_MIGRATION_URL"
 	@echo "  make migrate-down     - roll back one domain migration"
@@ -120,7 +119,7 @@ help:
 	@echo "  make extract-schemas  - derive internal/eventschema/*.json from api/asyncapi.yaml"
 	@echo "  make schema-validate  - validate AsyncAPI + event schemas — 8 passes (no AWS required)"
 	@echo "  make schema-diff      - diff two schema files: CURRENT=<path> PROPOSED=<path>"
-	@echo "  make schema-register  - register this service's 9 event schemas to Glue (requires AWS/LocalStack)"
+	@echo "  make schema-register  - register this service's 9 event schemas to Glue (requires AWS, or Floci for local dev)"
 	@echo "  make schema-verify    - pre-deploy check: fail if any of RP's 9 schemas is missing (requires AWS)"
 	@echo "  make schema-prune     - dry-run: list orphaned Glue schemas (requires AWS; excludes O&M's TenantCreated/TrialStarted)"
 	@echo ""
@@ -338,14 +337,8 @@ migrate-create:
 
 .PHONY: docker-up
 docker-up:
-	@echo "Starting local PostgreSQL + LocalStack + Keycloak + OpenBao (community)..."
-	docker compose up -d postgres localstack keycloak openbao
-
-.PHONY: docker-up-pro
-docker-up-pro:
-	@echo "Starting Postgres + LocalStack Pro (Glue + KMS) + Keycloak + OpenBao..."
-	@grep -q '^LOCALSTACK_AUTH_TOKEN=.\+' .env 2>/dev/null || { echo "ERROR: LOCALSTACK_AUTH_TOKEN not set in .env"; exit 1; }
-	docker compose -f docker-compose.pro.yml up -d postgres localstack keycloak openbao
+	@echo "Starting local PostgreSQL + Floci + Floci UI + Keycloak + OpenBao..."
+	docker compose up -d postgres floci floci-ui keycloak openbao
 
 .PHONY: docker-down
 docker-down:
@@ -412,10 +405,11 @@ schema-diff:
 	  --schema-name "$(or $(SCHEMA_NAME),$(notdir $(basename $(PROPOSED))))"
 
 # schema-register: register this service's 9 event schemas to Glue (requires
-# AWS credentials or LocalStack). Only ever registers the files present under
+# AWS credentials, or Floci for local dev — already registered automatically
+# by scripts/init-floci.sh on `make docker-up`, so this target is mainly for
+# CI/real-AWS use). Only ever registers the files present under
 # internal/eventschema/ — never touches O&M's TenantCreated/TrialStarted,
 # which have no file here and are therefore never submitted.
-# Set AWS_ENDPOINT_URL=http://localhost:4566 in .env for LocalStack.
 .PHONY: schema-register
 schema-register:
 	@test -n "$(GLUE_REGISTRY_TENANT_NAME)" || { \

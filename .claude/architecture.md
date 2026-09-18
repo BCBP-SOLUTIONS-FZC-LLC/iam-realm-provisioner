@@ -94,9 +94,10 @@ iam-realm-provisioner/
 ├── docs/lld/                           # frozen LLD
 ├── docs/runbook-schema-registry.md     # schema-governance operator runbook (shared iam-tenant-events registry)
 ├── VERSIONING.md                       # SemVer policy + maintainer release process (release.yml)
-├── Dockerfile  docker-compose.yml  docker-compose.pro.yml  Makefile  go.mod  .golangci.yml  .go-arch-lint.yml
-    # docker-compose.pro.yml is standalone (Postgres/Keycloak/OpenBao duplicated, LocalStack swapped
-    # for the Pro image), not an override of docker-compose.yml — keep both in sync by hand
+├── Dockerfile  docker-compose.yml  Makefile  go.mod  .golangci.yml  .go-arch-lint.yml
+    # docker-compose.yml's `floci`/`floci-ui` services replace LocalStack —
+    # Floci's free tier covers SNS/SQS/S3/Glue, so the former Pro-tier
+    # split (docker-compose.pro.yml, retired) is no longer needed
 ```
 
 **`internal/eventschema/` is the local half of schema governance** — `internal/eventschema/asyncapi_drift_test.go` is a fast, no-AWS CI check: it asserts `api/asyncapi.yaml`'s `iamTenantEvents` channel message list and `eventschema.ByEventType`'s map keys name exactly the same 9 events. The live-registry half is `platform-schemagov` (`schema-gov` CLI, Docker image, zero Go-code presence): `.github/workflows/schema-registry.yml` validates/diffs/registers this service's 9 schemas against the shared `iam-tenant-events` Glue registry (O&M's `TenantCreated`/`TrialStarted` share the registry but are never touched — no exclusion flag exists upstream, so `schema-prune.yml` hard-blocks `--execute` while either name is present), `schema-prune.yml` and `schema-health-quarterly.yml` cover pruning and quarterly lint. `make schema-*` runs the same checks locally. See `docs/runbook-schema-registry.md`.
