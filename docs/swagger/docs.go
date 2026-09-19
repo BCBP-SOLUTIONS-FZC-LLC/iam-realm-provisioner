@@ -743,7 +743,7 @@ const docTemplate = `{
                 }
             }
         },
-        "/tenants/{id}/service-account/credentials/apply": {
+        "/tenants/{id}/service-account/keys/refresh": {
             "post": {
                 "security": [
                     {
@@ -753,17 +753,14 @@ const docTemplate = `{
                         "TenantID": []
                     }
                 ],
-                "description": "Applies a caller-supplied secret (already issued/rotated via Token Service's TS-1) to the tenant's platform-automation Keycloak client. Used for rotation and break-glass — mint-time application happens automatically inside RP-1/RP-2/RP-3. No Idempotency-Key: applying the same secret twice is a no-op. Fail-closed on Keycloak-unreachable.",
-                "consumes": [
-                    "application/json"
-                ],
+                "description": "Clears the tenant's realm-scoped Keycloak keys cache so a just-issued/rotated credential is recognized and a just-revoked one stops authenticating (EXT-6, §2.5) — Keycloak's jwks.url client-jwt authenticator does not self-refresh. No Keycloak-side apply happens at mint time (RP-1/RP-2/RP-3): Keycloak fetches the JWKS lazily on first use. No Idempotency-Key: clearing an already-fresh cache is a harmless no-op. Fail-closed on Keycloak-unreachable.",
                 "produces": [
                     "application/json"
                 ],
                 "tags": [
                     "ServiceAccount"
                 ],
-                "summary": "RP-17 — Apply a service-account secret",
+                "summary": "RP-17 — Refresh a service-account's Keycloak key cache",
                 "parameters": [
                     {
                         "type": "string",
@@ -772,26 +769,11 @@ const docTemplate = `{
                         "name": "id",
                         "in": "path",
                         "required": true
-                    },
-                    {
-                        "description": "The already-issued plaintext secret",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/http.applyServiceAccountSecretRequest"
-                        }
                     }
                 ],
                 "responses": {
                     "204": {
                         "description": "No Content"
-                    },
-                    "400": {
-                        "description": "invalid_request",
-                        "schema": {
-                            "$ref": "#/definitions/http.ErrorResponse"
-                        }
                     },
                     "404": {
                         "description": "tenant_realm_not_found",
@@ -1188,17 +1170,6 @@ const docTemplate = `{
             "properties": {
                 "desired_value": {},
                 "setting_key": {
-                    "type": "string"
-                }
-            }
-        },
-        "http.applyServiceAccountSecretRequest": {
-            "type": "object",
-            "required": [
-                "secret"
-            ],
-            "properties": {
-                "secret": {
                     "type": "string"
                 }
             }

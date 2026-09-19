@@ -5,7 +5,7 @@ graph TD
     end
 
     subgraph adapters_in["Inbound Adapters  —  internal/adapter/inbound/"]
-        http_h["http/\nInternalHandler · router.go · middleware.go\nRP-1..RP-16 on /api/v1/internal"]
+        http_h["http/\nInternalHandler · router.go · middleware.go\nRP-1..RP-17 on /api/v1/internal"]
         consumer["consumer/\nMembershipConsumer ← membership-realm-q\nTenantConsumer     ← tenant-realm-q\nBillingConsumer    ← billing-realm-q"]
     end
 
@@ -14,9 +14,10 @@ graph TD
         keycloak["keycloak/\nKeycloakAdmin — RP-INV-1's SOLE seam\nNerzal/gocloak · admin-token cache · rate limiter"]
         openbao["openbao/\nKV v2 + Kubernetes-auth client\nIdP secrets at frozen path — never Postgres"]
         orgmembership["orgmembership/\nHTTPClient — I-8 residual-MFA check + I-16 subscription-lapse poll"]
+        tokenservice["tokenservice/\nHTTPClient — TS-1/TS-3/TS-4 platform-automation\ncredential handshake (§2.5, RP-17/RP-18)"]
         s3["s3/\nObjectStore — realm export (RP-EVT-4)"]
         eventbus["eventbus/\nValidatingCodec (enqueue) · GlueCodec (SNS)\nOutbox Runner · single topic iam.tenant.events"]
-        metrics["metrics/\niam_realm_provisioner_* business instruments"]
+        metrics["metrics/\niam_realm_provisioner_* (Tier 3, authoritative) +\nplatform_* (Tier 1, Status: Proposed) instruments"]
     end
 
     subgraph eventschema_grp["Embedded Schemas  —  internal/eventschema/"]
@@ -25,7 +26,7 @@ graph TD
 
     subgraph core["Core  —  internal/core/"]
         service["service/\nProvisioningService · LifecycleService\nIdpService · RealmConfigService · MfaService"]
-        port["port/\nKeycloakAdmin · TenantRealmRepository · IdpConfigRepository\nIdpValidationRepository · ReconciliationRepository\nIdempotencyStore · ProcessedEventsStore · EventPublisher · TxRunner\nOpenBaoClient · OrgMembershipClient · ObjectStore\nSubscriptionLapseReader (RP-C3)"]
+        port["port/\nKeycloakAdmin · TenantRealmRepository · IdpConfigRepository\nIdpValidationRepository · ReconciliationRepository\nIdempotencyStore · ProcessedEventsStore · EventPublisher · TxRunner\nOpenBaoClient · OrgMembershipClient · ObjectStore\nSubscriptionLapseReader (RP-C3) · TokenServiceClient (§2.5)"]
         domain["domain/\nTenantRealm · IdpConfig · IdpConfigValidation\nProvisioningOperation · RealmConfigReconciliation\nErrorCode catalogue · 9 event payload types"]
     end
 
@@ -39,6 +40,7 @@ graph TD
     main        --> keycloak
     main        --> openbao
     main        --> orgmembership
+    main        --> tokenservice
     main        --> s3
     main        --> eventbus
     main        --> metrics
@@ -61,6 +63,7 @@ graph TD
     keycloak    --> port
     openbao     --> port
     orgmembership --> port
+    tokenservice --> port
     s3          --> port
     eventbus    --> port
     eventbus    --> eventschema

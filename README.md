@@ -4,7 +4,7 @@ The Realm Provisioner Service — the **single writer to the Keycloak Admin API*
 
 **Repository:** `github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`
 **Module:** Go 1.26.6 · private module · deployed as two binaries from one image (`cmd/server`, `cmd/reconciler`)
-**Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.8 Approved** — names frozen at v1.0 sign-off (`docs/lld/iam-lld-realm-provisioner-service.md`)
+**Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.14 Approved** — names frozen at v1.0 sign-off (`docs/lld/iam-lld-realm-provisioner-service.md`)
 
 ---
 
@@ -48,14 +48,14 @@ All 17 endpoints (RP-1..RP-17) live under one mesh-internal prefix, `/api/v1/int
 
 Every mutating endpoint below marked "required" enforces `RequireIdempotencyKey`: a missing header is `400 missing_idempotency_key`; a reused key against an in-flight/failed operation is `409 operation_in_progress`; a reused key against a `succeeded` operation replays the stored JSON result rather than re-executing.
 
-### Internal routes (system-authenticated, 14)
+### Internal routes (system-authenticated, 15)
 
 | # | Method & Path | Idempotency-Key | Purpose |
 |---|---|---|---|
 | RP-1 | `POST /tenants/provision-trial` | required | Create a trial user in the shared `trial` realm, stamp `tenant_id`, trigger `VERIFY_EMAIL`. Emits `TrialTenantProvisioned`. |
 | RP-2 | `POST /tenants/provision-direct` | required | Provision a **dedicated** realm straight away: create realm from template, register OIDC clients, create admin user. Emits `TenantRealmReady` + `DirectPaidSignup` + `TenantConverted{direct_signup:true}`. |
 | RP-3 | `POST /tenants/:id/convert` | required | Trial → dedicated conversion: create dedicated realm, migrate every trial user (`sub`-preserving, TOTP copied, WebAuthn re-enrollment flagged), force-logout the shared realm. Emits `TenantRealmReady` + `TenantConverted{direct_signup:false}`. |
-| RP-4 | `POST /tenants/:id/revert-conversion` | required | Undo Convert within a fixed reversal window. `409 revert_window_expired` past the window. Emits `TrialReactivated`. |
+| RP-4 | `POST /tenants/:id/revert-conversion` | required | Undo Convert within a fixed reversal window: migrate users back, tear down the dedicated realm, and re-mint the tenant's `platform-automation` client back in the shared realm (§2.5 — the dedicated realm's client died with the realm). `409 revert_window_expired` past the window. Emits `TrialReactivated`. |
 | RP-5 | `POST /tenants/:id/users` | required | Create an invited user in the tenant's current realm with `required_actions` applied verbatim. No local persistence. |
 | RP-6 | `PUT /tenants/:id/idp` | required | Configure a SAML/OIDC IdP behind the §11.6 region-portability gate. Requires a `dedicated` realm (`409 idp_requires_dedicated_realm` otherwise). |
 | RP-7 | `DELETE /tenants/:id/idp/:alias` | — | Remove an IdP — Keycloak, then the OpenBao secret, then the local row. Idempotent. |
@@ -66,6 +66,7 @@ Every mutating endpoint below marked "required" enforces `RequireIdempotencyKey`
 | RP-12 | `POST /tenants/:id/expire-trial` | required | Idempotent per-tenant trial-expiry effect; called once per row by RP-C1, also directly callable. |
 | RP-15 | `DELETE /tenants/:id/users/:keycloak_user_id` | — | Idempotent Keycloak user delete — deleting an absent user is a success. |
 | RP-16 | `POST /tenants/:id/users/:keycloak_user_id/revoke-sessions` | — | Idempotent, best-effort/fail-open session/token revocation. |
+| RP-17 | `POST /tenants/:id/service-account/keys/refresh` | — | Refresh Keycloak's cached JWKS keys for the tenant's realm (`ClearServiceAccountKeysCache`) — required after Token Service rotates (TS-1) or revokes (TS-2) a `platform-automation` credential, since Keycloak does not self-refresh a `jwks.url` client's keys (§2.5, EXT-6). Empty body; fail-closed on Keycloak-unreachable. `422 service_account_not_provisioned` if never minted. |
 
 ### Operator routes (2)
 
@@ -130,7 +131,7 @@ iam-realm-provisioner/
 ├── internal/
 │   ├── core/
 │   │   ├── domain/                    # Entities, value objects, ErrorCode taxonomy (§17), event payload structs — no deps beyond google/uuid
-│   │   ├── port/                      # KeycloakAdmin (RP-INV-1's sole seam), repositories, IdempotencyStore, ProcessedEventsStore, OpenBaoClient, OrgMembershipClient, ObjectStore, SubscriptionLapseReader
+│   │   ├── port/                      # KeycloakAdmin (RP-INV-1's sole seam, incl. §2.5 service-account methods), repositories, IdempotencyStore, ProcessedEventsStore, OpenBaoClient, OrgMembershipClient, ObjectStore, SubscriptionLapseReader, TokenServiceClient
 │   │   └── service/                   # ProvisioningService, LifecycleService, IdpService, RealmConfigService, MfaService
 │   ├── eventschema/                   # Embedded JSON Schema draft-07, one per produced event + asyncapi_drift_test.go
 │   └── adapter/
@@ -143,8 +144,9 @@ iam-realm-provisioner/
 │           ├── eventbus/              # Outbox publisher (single topic iam-tenant-events) + Glue/Noop/Validating codecs
 │           ├── openbao/               # KV v2 client, Kubernetes-auth (pod ServiceAccount → OpenBao role → policy)
 │           ├── orgmembership/         # HTTP client for O&M's I-8 residual-MFA check + I-16 subscription-lapse poll (RP-C3)
+│           ├── tokenservice/          # HTTP client for Token Service's TS-1/TS-3/TS-4 handshake (§2.5, RP-17/RP-18)
 │           ├── s3/                    # Realm-export object store (offboarding, RP-EVT-4)
-│           ├── httpx/                 # Shared instrumented http.RoundTripper (traceparent injection)
+│           ├── httpx/                 # Shared instrumented http.RoundTripper (traceparent injection) + CloseBody helper
 │           └── metrics/               # iam_realm_provisioner_* (Tier 3) + platform_* (Tier 1) Prometheus counters/histograms/gauges
 ├── pkg/requestctx/                    # Typed RequestContext{UserID, TenantID, Roles}
 ├── api/
@@ -308,9 +310,13 @@ _ = json.NewDecoder(resp.Body).Decode(&errResp)
 | `idp_region_portability_failed` | 400 | RP-6 — one or more §11.6 CRITICAL checks failed |
 | `idp_warnings_unacknowledged` | 422 | RP-6 — WARN check(s) lack a recorded acknowledgement |
 | `tenant_realm_not_found` / `idp_config_not_found` | 404 | Resource missing (RP-15/RP-16 treat a missing Keycloak user as **204**, not 404) |
-| `idp_requires_dedicated_realm` / `realm_already_dedicated` / `revert_window_expired` / `tenant_offboarded` / `operation_in_progress` / `optimistic_lock_conflict` | 409 | State-machine / idempotency conflict |
+| `keycloak_user_not_found` | 404 | Additive — internal-only signal from `FindUserByEmail`, absorbed before reaching a caller (§9.2) |
+| `idp_requires_dedicated_realm` / `realm_already_dedicated` / `revert_window_expired` / `tenant_offboarded` / `operation_in_progress` / `optimistic_lock_conflict` | 409 | State-machine / idempotency conflict — `optimistic_lock_conflict` also surfaces from Token Service TS-1's disambiguated 409 (§2.5) |
+| `user_email_conflict` | 409 | Additive — RP-1/RP-2/RP-5 create-user 409 that couldn't be resolved as the caller's own lost-response retry (§9.2) |
+| `service_account_rotation_in_flight` | 409 | Additive — Token Service TS-1 rejected a concurrent issue/rotate for the same `platform-automation` principal (§2.5) |
+| `service_account_not_provisioned` | 422 | Additive — RP-17 called before the tenant's `platform-automation` principal was ever minted |
 | `keycloak_unavailable` / `conversion_failed` | 502 | Keycloak transport failure or partial-migration failure — retryable, no local commit |
-| `org_membership_unavailable` / `object_store_unavailable` | 503 | O&M I-8 check or S3 export unreachable |
+| `org_membership_unavailable` / `object_store_unavailable` / `db_unavailable` / `token_service_unavailable` | 503 | O&M I-8 check, S3 export, Postgres, or Token Service (§2.5) unreachable |
 
 ### 9. Optimistic locking
 
@@ -586,7 +592,9 @@ docker compose exec postgres psql -U postgres -d provisioner -c \
 
 ### Coverage
 
-`.github/scripts/coverage-gate.sh` reads `go tool cover -func=coverage.out`'s total and fails if it's below `${COVERAGE_THRESHOLD:-90}` — its own default and stated ratchet target is **90%**. The currently checked-in `validate-test.yml` explicitly pins `COVERAGE_THRESHOLD: '80'` for the reusable workflow, so **80% is the threshold actually enforced by CI today**; the gate script's comment documents the intent to ratchet to 90% once every package is as thoroughly covered as the two below. Measured coverage: core service `internal/core/service/...` and HTTP handlers `internal/adapter/inbound/http/...` both at **~100%**, the Keycloak adapter at **~99.6%**, `cmd/reconciler/jobs` (once 0%) now at **~90.9%**, merged total coverage **~84.8%** — comfortably above the enforced floor, with real headroom still open before the 90% aspiration.
+`.github/scripts/coverage-gate.sh` reads `go tool cover -func=coverage.out`'s total and fails if it's below `${COVERAGE_THRESHOLD:-90}` — its own default and stated ratchet target is **90%**, now met (see below). The currently checked-in `validate-test.yml` explicitly pins `COVERAGE_THRESHOLD: '80'` for the reusable workflow, so **80% is the threshold actually enforced by CI today** — a deliberately conservative floor, not automatically raised just because measured coverage cleared the 90% aspiration. Measured coverage (rev 1.15 of the LLD): core service `internal/core/service/...` and HTTP handlers `internal/adapter/inbound/http/...` both at **100%**, `internal/adapter/outbound/tokenservice/...` at **100%**, the Keycloak adapter at **~99.6%**, `internal/adapter/outbound/postgres/...` at **~98.2%**, `cmd/reconciler/jobs` at **~97.6%**, merged total coverage **91.8%** (up from 83.3% before rev 1.15's hardening pass) — comfortably above both the enforced 80% floor and the script's own 90% ratchet target. Remaining gaps are deliberate: composition-root bodies (`main()` in both binaries, `cmd/server/exporters.go`'s `runBusinessExporters`) that build real DB pools/HTTP servers/background goroutines against live infra inline, not meaningfully unit-testable short of the `test/e2e` harness; and a handful of single-branch slivers (a `rows.Err()` mid-iteration-error path repeated across a few `postgres` `List*` methods, and two defensive branches verified dead against the vendored `gocloak`/`resty` source).
+
+**A package instrumented for coverage is not necessarily exercised** — a lesson from rev 1.15. The Makefile has two independent package lists: `TEST_INTERNAL_PKGS` (what `make test-ci` actually runs) and `COVER_PKG_LIST` (derived via `go list ./cmd/... ./internal/... ./pkg/...`, what `-coverpkg` instruments). Adding a new `internal/adapter/outbound/<name>` package updates the latter automatically but not the former — its own `_test.go` file keeps passing when run directly, but silently stops contributing to `make test-ci`'s merged number, showing 0% instead. This is exactly what happened to `internal/adapter/outbound/tokenservice/` for a time; check `TEST_INTERNAL_PKGS` whenever a new adapter package is added.
 
 Coverage is measured over `./cmd/...`, `./internal/...`, `./pkg/...` (`COVER_PKG_LIST` in the Makefile), merged across the unit/postgres/integration suites via `scripts/merge_coverage.py` (max-count strategy).
 
@@ -625,13 +633,14 @@ Coverage is measured over `./cmd/...`, `./internal/...`, `./pkg/...` (`COVER_PKG
 | `BAO_ADDR` | `http://localhost:8210` | — | OpenBao address — Kubernetes auth (pod ServiceAccount token) |
 | `BAO_AUTH_ROLE` / `BAO_KV_MOUNT` / `BAO_IDP_PATH_PREFIX` / `BAO_KEYCLOAK_ADMIN_PATH` | `iam-realm-provisioner` / `secret` / `iam/realm-provisioner/idp` / `iam/realm-provisioner/keycloak-admin` | same | OpenBao path/mount wiring |
 | `ORG_MEMBERSHIP_BASE_URL` | `http://localhost:8082` | — | **Required outside dev.** O&M client — I-8 residual-MFA check |
+| `TOKEN_SERVICE_BASE_URL` | `http://localhost:8083` | — | **Required outside dev.** Token Service client — TS-1/TS-4 mint/rotate handshake (§2.5), required for every RP-1/RP-2/RP-3/RP-4 call and RP-17; no optional-degrade path (unlike `ORG_MEMBERSHIP_BASE_URL`'s reconciler-only usage) |
 | `REALM_EXPORT_BUCKET` / `REALM_EXPORT_KMS_KEY` | `iam-realm-exports` / — | `iam-realm-exports` / — | Offboarding export target |
 | `TRIAL_GRACE_DAYS` / `CANCELLED_GRACE_DAYS` / `RETENTION_DAYS` | `30` / `30` / `90` | same | Lifecycle timers |
 | `RECONCILER_BATCH_LIMIT` / `RECONCILER_TIMEOUT` / `RECONCILER_MAX_ATTEMPTS` | `100` / `5m` / `20` | same | Reconciler-job tunables — `RECONCILER_MAX_ATTEMPTS` is RP-C4's poison-pill cap |
 | `DOCS_ENABLED` / `DOCS_AUTH_TOKEN` | `true` / — | `true` / — | AsyncAPI viewer gating — always mounted outside production; opt-in via `DOCS_ENABLED` in prod, optionally bearer-gated |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | (unset) | OTLP/gRPC collector — provider is always installed; export is a no-op until this is set |
 
-**Fail-fast:** `cmd/server/main.go`'s `validateRequiredEnv` panics at startup, listing **every** missing/misconfigured required var at once, if `KEYCLOAK_BASE_URL`, `KEYCLOAK_ADMIN_CLIENT_SECRET`, `ORG_MEMBERSHIP_BASE_URL`, `SNS_TOPIC_TENANT_ARN`, or `GLUE_REGISTRY_TENANT_NAME` is empty outside `APP_ENV ∈ {dev, development, local, test}` — plus a Postgres DSN check (`DATABASE_URL` or `PG_HOST`+`PG_USER`+`PG_PASSWORD`) and a `MIGRATION_DATABASE_URL` check when `PG_BOUNCER_MODE=true`.
+**Fail-fast:** `cmd/server/main.go`'s `validateRequiredEnv` panics at startup, listing **every** missing/misconfigured required var at once, if `KEYCLOAK_BASE_URL`, `KEYCLOAK_ADMIN_CLIENT_SECRET`, `ORG_MEMBERSHIP_BASE_URL`, `TOKEN_SERVICE_BASE_URL`, `SNS_TOPIC_TENANT_ARN`, or `GLUE_REGISTRY_TENANT_NAME` is empty outside `APP_ENV ∈ {dev, development, local, test}` — plus a Postgres DSN check (`DATABASE_URL` or `PG_HOST`+`PG_USER`+`PG_PASSWORD`) and a `MIGRATION_DATABASE_URL` check when `PG_BOUNCER_MODE=true`.
 
 ---
 
@@ -644,7 +653,7 @@ Coverage is measured over `./cmd/...`, `./internal/...`, `./pkg/...` (`COVER_PKG
 | **Per-tenant IdP secrets** | OpenBao KV v2 at `secret/data/iam/realm-provisioner/idp/<tenant_id>/<idp_alias>`, fully derivable from the `keycloak_idp_configs` row — no reference/pointer is ever stored in Postgres. RP-7 (remove IdP) deletes both the Keycloak IdP config and the OpenBao KV entry. |
 | **Network isolation** | Every route under `/api/v1/internal/*` except `/healthz`/`/readyz`/`/asyncapi`/`/asyncapi.yaml` is mesh-only mTLS. `RequireSystemRole` is defense-in-depth — NetworkPolicy + mesh mTLS is primary. `/metrics` on its own dedicated port, monitoring-namespace-only. |
 | **Input validation** | Fail-fast single-error (not collect-all); `strategy ∈ {shared, dedicated}`, `protocol ∈ {saml, oidc}`; `Idempotency-Key` non-empty ≤ 256 chars; IdP `config` validated by the §11.6 checklist **before** any Keycloak write; `setting_key` allow-listed. No secret material is ever accepted into or stored in Postgres. |
-| **Authorization matrix** | RP-1..RP-10/12/15/16: internal system principal only (mesh peer). RP-11: internal system principal, incl. O&M/operator tooling. RP-13/RP-14: `platform_operator` only. RP makes no end-user authorization decision — that's AuthZ Enrichment's job. |
+| **Authorization matrix** | RP-1..RP-10/12/15/16/17: internal system principal only (mesh peer). RP-11: internal system principal, incl. O&M/operator tooling. RP-13/RP-14: `platform_operator` only. RP makes no end-user authorization decision — that's AuthZ Enrichment's job. |
 | **RLS** | `FORCE ROW LEVEL SECURITY` + `REVOKE ALL FROM PUBLIC` on the 5 tenant-scoped tables; only the `BYPASSRLS` role `realm_provisioner_migrator` can bypass, and the app role is actively stripped of `BYPASSRLS` if ever found set. |
 | **§11.6 IdP region-portability checklist** | CRITICAL checks block with `400`; WARN checks require a recorded acknowledgement (admin `user_id` + timestamp) or `422`. Exists specifically so a customer-supplied IdP configuration can never pin the platform to a region ahead of a future cross-region migration. |
 | **Cross-tenant admin access** | Requires `realm_provisioner_migrator` (`BYPASSRLS`), never the app role. A third role, `admin_readonly` (`NOLOGIN BYPASSRLS`), exists purely for compliance/support `SELECT`s and is never used by application code. |
@@ -853,6 +862,7 @@ This service sits on **no synchronous request-path dependency for any other serv
 |---|---|---|---|
 | RP-1 / RP-2 provision | Keycloak Admin API | fail-closed | `502 keycloak_unavailable`; no local commit; retry with the same `Idempotency-Key` |
 | RP-3 / RP-4 convert / revert | Keycloak Admin API | fail-closed | Compensating `DeleteRealmIfExists`; no local dedicated row |
+| RP-1 / RP-2 / RP-3 / RP-4 platform-automation mint | Token Service (TS-4 register, TS-1 issue, §2.5) | fail-closed | `502 token_service_unavailable`/`409` (rotation-in-flight or optimistic-lock); a freshly-minted Keycloak client is best-effort deleted, never a resumed one; no local commit |
 | Invite (O&M → RP-5) | Keycloak Admin API | fail-closed | `502` → O&M `503`; no invitation |
 | MFA reset (O&M → RP-9) | Keycloak Admin API | fail-closed | `502` → O&M `503`; no `MFAReset` — no reconciler |
 | Realm-config (O&M → RP-8) | Keycloak Admin API | fail-open + durable reconcile | `pending` row, RP-C4 converges (RP-INV-6) |
@@ -894,7 +904,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, extending the serv
 | [`.claude/request-flows.md`](.claude/request-flows.md) | Keycloak-effect-first discipline, compensating teardown, every RP-*/RP-C* flow, idempotency mechanics, GDPR/data-lifecycle |
 | [`.claude/operations.md`](.claude/operations.md) | Security, observability, configuration, CI/CD, testing, GDPR, integration points, open items |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Detailed architecture narrative with Mermaid diagrams — layer model, write flow, RLS/GUC flow, threat model |
-| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD, v1.8 Approved — §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
+| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD, v1.14 Approved — §2.5 platform-automation principal, §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
 | [`docs/runbook.md`](docs/runbook.md) | Full operator procedures for the headline incident scenarios |
 
 ---

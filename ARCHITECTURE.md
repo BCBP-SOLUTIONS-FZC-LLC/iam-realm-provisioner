@@ -2,7 +2,7 @@
 
 This document describes the internal structure, dependency rules, and runtime data flows of `iam-realm-provisioner`.
 
-`iam-realm-provisioner` is a **private Go service** (`github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.6) deployed as a containerised microservice (HPA 2–4 replicas), refining **IAM HLD v1.42 §5.2** (LLD v1.8, `docs/lld/iam-lld-realm-provisioner-service.md`; where LLD and HLD disagree, HLD is authoritative). It is the **single writer to the Keycloak Admin API** across the entire IAM subsystem (RP-INV-1, HLD §4.2/§5.2) and the system of record for the small amount of local state — realm identity, IdP config, reconciliation and idempotency ledgers — needed to make that writing safe, idempotent, and replayable. Org & Membership owns the application-side `tenants` row; this service owns Keycloak-side realm reality and its `tenant_realms` mirror (RP-D6) — neither writes the other's store. It ships as **two binaries from one image**: `cmd/server` (the mesh-only `/api/v1/internal` API, RP-1..RP-17, three inbound SQS consumers, and the transactional outbox runner) and `cmd/reconciler` (a single binary dispatched by `--job=<name>`, covering RP-C1..RP-C4 plus two operational prune jobs, each its own Kubernetes CronJob). The service sits on **neither of the platform's two hot paths** (HLD §4.3) — work is bursty, coarse-grained tenant-lifecycle operations, where correctness, auditability, and idempotency matter more than latency.
+`iam-realm-provisioner` is a **private Go service** (`github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.6) deployed as a containerised microservice (HPA 2–4 replicas), refining **IAM HLD v1.42 §5.2** (LLD v1.14, `docs/lld/iam-lld-realm-provisioner-service.md`; where LLD and HLD disagree, HLD is authoritative). It is the **single writer to the Keycloak Admin API** across the entire IAM subsystem (RP-INV-1, HLD §4.2/§5.2) and the system of record for the small amount of local state — realm identity, IdP config, reconciliation and idempotency ledgers — needed to make that writing safe, idempotent, and replayable. Org & Membership owns the application-side `tenants` row; this service owns Keycloak-side realm reality and its `tenant_realms` mirror (RP-D6) — neither writes the other's store. It ships as **two binaries from one image**: `cmd/server` (the mesh-only `/api/v1/internal` API, RP-1..RP-17, three inbound SQS consumers, and the transactional outbox runner) and `cmd/reconciler` (a single binary dispatched by `--job=<name>`, covering RP-C1..RP-C4 plus two operational prune jobs, each its own Kubernetes CronJob). The service sits on **neither of the platform's two hot paths** (HLD §4.3) — work is bursty, coarse-grained tenant-lifecycle operations, where correctness, auditability, and idempotency matter more than latency.
 
 **Does not own:** tenants-as-business-entities, memberships, roles, invitations (Org & Membership); JWT issuance / login (Keycloak itself); delegation, tender ACL, group-mapping, or the plan/department catalogues (sibling services extracted from Core); any per-user table (there is none — Keycloak is the sole store of user identity and credentials); secret material in Postgres (IdP secrets live only in OpenBao).
 
@@ -31,6 +31,7 @@ graph TD
         keycloak["keycloak/\nKeycloakAdmin — RP-INV-1's SOLE seam\nNerzal/gocloak · admin-token cache · rate limiter"]
         openbao["openbao/\nKV v2 + Kubernetes-auth client\nIdP secrets at frozen path — never Postgres"]
         orgmembership["orgmembership/\nHTTPClient — I-8 residual-MFA check + I-16 subscription-lapse poll"]
+        tokenservice["tokenservice/\nHTTPClient — TS-1/TS-3/TS-4 platform-automation\ncredential handshake (§2.5, RP-17/RP-18)"]
         s3["s3/\nObjectStore — realm export (RP-EVT-4)"]
         eventbus["eventbus/\nValidatingCodec (enqueue) · GlueCodec (SNS)\nOutbox Runner · single topic iam.tenant.events"]
         metrics["metrics/\niam_realm_provisioner_* (Tier 3, authoritative) +\nplatform_* (Tier 1, Status: Proposed) instruments"]
@@ -42,7 +43,7 @@ graph TD
 
     subgraph core["Core  —  internal/core/"]
         service["service/\nProvisioningService · LifecycleService\nIdpService · RealmConfigService · MfaService"]
-        port["port/\nKeycloakAdmin · TenantRealmRepository · IdpConfigRepository\nIdpValidationRepository · ReconciliationRepository\nIdempotencyStore · ProcessedEventsStore · EventPublisher · TxRunner\nOpenBaoClient · OrgMembershipClient · ObjectStore\nSubscriptionLapseReader (RP-C3)"]
+        port["port/\nKeycloakAdmin · TenantRealmRepository · IdpConfigRepository\nIdpValidationRepository · ReconciliationRepository\nIdempotencyStore · ProcessedEventsStore · EventPublisher · TxRunner\nOpenBaoClient · OrgMembershipClient · ObjectStore\nSubscriptionLapseReader (RP-C3) · TokenServiceClient (§2.5)"]
         domain["domain/\nTenantRealm · IdpConfig · IdpConfigValidation\nProvisioningOperation · RealmConfigReconciliation\nErrorCode catalogue · 9 event payload types"]
     end
 
@@ -56,6 +57,7 @@ graph TD
     main        --> keycloak
     main        --> openbao
     main        --> orgmembership
+    main        --> tokenservice
     main        --> s3
     main        --> eventbus
     main        --> metrics
@@ -78,6 +80,7 @@ graph TD
     keycloak    --> port
     openbao     --> port
     orgmembership --> port
+    tokenservice --> port
     s3          --> port
     eventbus    --> port
     eventbus    --> eventschema
@@ -86,7 +89,7 @@ graph TD
 
 **Rule:** `domain` ← `port` ← `service` ← `adapter` ← `cmd`. `core/service` may also import `pkg/requestctx` and `internal/adapter/outbound/metrics` (observability leaf — documented exception, matching sibling convention: `mfa_service.go`, `idp_service.go`, `realm_config_service.go` import it directly to record business-outcome counters at the point of the outcome). Nothing else in `core/` imports `adapter/`. Tests import service and domain packages but are not part of the production dependency chain. Enforced in CI by `go-arch-lint` (`.go-arch-lint.yml`) plus two extra greps in `.github/scripts/arch-lint.sh`: **RP-INV-1** (`grep -rl "Nerzal/gocloak" --include="*.go" .` outside `internal/adapter/outbound/keycloak/` must be empty) and **RLS-6** (`grep -rn "SET app\.tenant_id"` across `*.go`/`*.sql` must only ever appear as `SET LOCAL`).
 
-The `keycloak` adapter is its **own** arch-lint component, separate from the rest of `adapters_outbound`, so nothing else can compile against gocloak types without declaring a forbidden dependency — RP-INV-1 (this service is the *only* holder of a Keycloak admin credential in the entire platform) is thereby verified both structurally (component boundary) and textually (the grep). `Nerzal/gocloak` v13.9.0 is not a dependency of any sibling IAM service. Every mutating and read operation against Keycloak's Admin API is one method on `port.KeycloakAdmin` (`internal/core/port/keycloak_admin.go`, ~20 methods: `CreateRealmFromTemplate`, `RegisterOIDCClients`, `MigrateUser`, `CreateTrialUser`, `CreateInvitedUser`, `CreateOrUpdateIdp`, `AssignRequiresMFA`, `RevokeUserSessions`, `ExportRealm`, `DeleteRealmIfExists`, `Ready`, and the rest); exactly one adapter implements it.
+The `keycloak` adapter is its **own** arch-lint component, separate from the rest of `adapters_outbound`, so nothing else can compile against gocloak types without declaring a forbidden dependency — RP-INV-1 (this service is the *only* holder of a Keycloak admin credential in the entire platform) is thereby verified both structurally (component boundary) and textually (the grep). `Nerzal/gocloak` v13.9.0 is not a dependency of any sibling IAM service. Every mutating and read operation against Keycloak's Admin API is one method on `port.KeycloakAdmin` (`internal/core/port/keycloak_admin.go`, 29 methods: `CreateRealmFromTemplate`, `RegisterOIDCClients`, `MigrateUser`, `CreateTrialUser`, `CreateInvitedUser`, `CreateOrUpdateIdp`, `AssignRequiresMFA`, `RevokeUserSessions`, `ExportRealm`, `DeleteRealmIfExists`, `Ready`, the platform-automation service-account trio `CreateServiceAccountClient(realmName, clientID, jwksURL) (sub uuid.UUID, created bool, err error)` / `ClearServiceAccountKeysCache` / `DeleteServiceAccountClientIfExists` (§2.5, RP-17/RP-18), and the rest); exactly one adapter implements it.
 
 ---
 
@@ -106,10 +109,11 @@ graph LR
     httptransport(["adapter/outbound/httpx\n(cross-cutting leaf — traceparent injection)"])
     eventschema(["internal/eventschema\n(embedded JSON Schema draft-07)"])
     apispec(["api\n(embedded api/asyncapi.yaml)"])
+    swaggerdocs(["docs/swagger\n(generated OpenAPI spec, blank-imported by cmd/server)"])
 
     keycloak(["adapter/outbound/keycloak\n(own component — RP-INV-1 sole gocloak import,\nCI-grepped by .github/scripts/arch-lint.sh)"])
     postgres(["adapter/outbound/postgres\n(own component — TxFromContext for eventbus)"])
-    adapters_outbound(["adapters_outbound:\nadapter/outbound/eventbus\nadapter/outbound/openbao\nadapter/outbound/orgmembership\nadapter/outbound/s3"])
+    adapters_outbound(["adapters_outbound:\nadapter/outbound/eventbus\nadapter/outbound/openbao\nadapter/outbound/orgmembership\nadapter/outbound/s3\nadapter/outbound/tokenservice"])
     adapters_inbound(["adapters_inbound:\nadapter/inbound/http\nadapter/inbound/consumer"])
     reconciler_jobs(["cmd/reconciler/jobs\n(own component)"])
     cmd(["cmd:\ncmd/server\ncmd/reconciler"])
@@ -165,6 +169,7 @@ graph LR
     cmd -->|mayDependOn| requestctx
     cmd -->|mayDependOn| eventschema
     cmd -->|mayDependOn| apispec
+    cmd -->|mayDependOn| swaggerdocs
     cmd -->|mayDependOn| observability
     cmd -->|mayDependOn| keycloak
     cmd -->|mayDependOn| postgres
@@ -177,7 +182,7 @@ graph LR
     excluded -.->|"imports (unchecked)"| service
 ```
 
-`core/domain` is the dependency sink — `anyVendorDeps: true` (covers only `google/uuid`), no internal imports. `core/port` may depend on `domain` only. `requestctx`, `eventschema`, and `apispec` (the `api/` package, `api/embed.go`'s `AsyncAPISpec []byte`) are standalone leaves with `anyVendorDeps: true`. `reconciler_jobs` (`cmd/reconciler/jobs`) is its own component — not merged into `cmd` — specifically so it can be declared as a normal dependency of `cmd/reconciler`'s `main.go` without a false-positive self-cycle warning. Enforced via `deepScan: false` (import-level checks only) and `exclude: [test, scripts, deploy]` / `excludeFiles: ['.*_test\.go$']` — a composition root wiring an adapter into a service constructor in `main.go` is how Clean Architecture is supposed to work, not a violation.
+`core/domain` is the dependency sink — `anyVendorDeps: true` (covers only `google/uuid`), no internal imports. `core/port` may depend on `domain` only. `requestctx`, `eventschema`, `apispec` (the `api/` package, `api/embed.go`'s `AsyncAPISpec []byte`), and `swaggerdocs` (`docs/swagger`, generated `make swag` output, blank-imported by `cmd/server/main.go` to self-register at init) are standalone leaves with `anyVendorDeps: true`. `reconciler_jobs` (`cmd/reconciler/jobs`) is its own component — not merged into `cmd` — specifically so it can be declared as a normal dependency of `cmd/reconciler`'s `main.go` without a false-positive self-cycle warning. Enforced via `deepScan: false` (import-level checks only) and `exclude: [test, scripts, deploy]` / `excludeFiles: ['.*_test\.go$']` — a composition root wiring an adapter into a service constructor in `main.go` is how Clean Architecture is supposed to work, not a violation.
 
 ---
 
@@ -417,7 +422,9 @@ sequenceDiagram
     Note over RP,OM: If the process crashes after the Keycloak user is created but before<br/>RunInTx commits, a retry with the same Idempotency-Key re-enters this flow —<br/>CreateTrialUser reconciles to a no-op (user already exists), then the local<br/>commit + outbox enqueue land — see write-flow.mmd for the general pattern.
 ```
 
-**Other provisioning flows share the same discipline.** `ProvisionDirect` (RP-2) places the tenant on the least-loaded shard (§9.5, from the **local** `tenant_realms` mirror), clones `realm-template.json`, registers OIDC clients, creates the admin user, then commits `tenant_realms{strategy=dedicated}` + `TenantRealmReady` + `DirectPaidSignup` + `TenantConverted{direct_signup=true}` — with compensating teardown (`DeleteRealmIfExists`, itself idempotent) if any Keycloak step in the sequence fails (§9.3). `Convert` (RP-3) creates the dedicated realm (named deterministically from the tenant's full UUID), registers OIDC clients, lists every user on the shared realm and calls `MigrateUser` per user (preserving `sub`, copying TOTP, flagging WebAuthn for re-enrollment), best-effort force-logs-out the shared realm, and only then commits `strategy=dedicated` + `TenantRealmReady` + `TenantConverted`. Compensating teardown (`DeleteRealmIfExists`) only runs while the dedicated realm is still empty — `MigrateUser` deletes each user from the shared realm before recreating them in the dedicated one, so once a single user has actually been migrated, the dedicated realm holds a user that exists nowhere else; tearing it down at that point would be permanent data loss, not a rollback. A retry with the same `Idempotency-Key` resumes instead: the deterministic realm name means a `CreateRealmFromTemplate` conflict on retry can only be this tenant's own earlier attempt, and a fresh listing of the shared realm naturally picks up only whatever users remain unmigrated. `RevertConversion` (RP-4) reverses a conversion within a fixed window. `CreateInvitedUser` (RP-5) applies Org & Membership's `required_actions` verbatim (F5) and persists nothing locally. Every one of these entry points opens with `idempotency.Begin` and closes with `Complete`/`Fail` — never left `in_progress`.
+**Other provisioning flows share the same discipline.** `ProvisionDirect` (RP-2) places the tenant on the least-loaded shard (§9.5, from the **local** `tenant_realms` mirror), clones `realm-template.json`, registers OIDC clients, creates the admin user, then commits `tenant_realms{strategy=dedicated}` + `TenantRealmReady` + `DirectPaidSignup` + `TenantConverted{direct_signup=true}` — with compensating teardown (`DeleteRealmIfExists`, itself idempotent) if any Keycloak step in the sequence fails (§9.3). `Convert` (RP-3) creates the dedicated realm (named deterministically from the tenant's full UUID), registers OIDC clients, lists every user on the shared realm and calls `MigrateUser` per user (preserving `sub`, copying TOTP, flagging WebAuthn for re-enrollment), best-effort force-logs-out the shared realm, and only then commits `strategy=dedicated` + `TenantRealmReady` + `TenantConverted`. Compensating teardown (`DeleteRealmIfExists`) only runs while the dedicated realm is still empty — `MigrateUser` deletes each user from the shared realm before recreating them in the dedicated one, so once a single user has actually been migrated, the dedicated realm holds a user that exists nowhere else; tearing it down at that point would be permanent data loss, not a rollback. A retry with the same `Idempotency-Key` resumes instead: the deterministic realm name means a `CreateRealmFromTemplate` conflict on retry can only be this tenant's own earlier attempt, and a fresh listing of the shared realm naturally picks up only whatever users remain unmigrated. `RevertConversion` (RP-4) reverses a conversion within a fixed window: migrates users back to the shared realm, tears down the dedicated realm, and re-mints the tenant's `platform-automation` client back in the shared realm (the dedicated realm's client died with the realm it lived in) before committing. `CreateInvitedUser` (RP-5) applies Org & Membership's `required_actions` verbatim (F5) and persists nothing locally. Every one of these entry points opens with `idempotency.Begin` and closes with `Complete`/`Fail` — never left `in_progress`.
+
+**Platform-automation mint (§2.5, RP-1/RP-2/RP-3/RP-4, RP-17/RP-18).** RP-1/RP-2/RP-3 (and RP-4 on revert) each call a shared `mintPlatformAutomation` helper before their own `RunInTx`: `KeycloakAdmin.CreateServiceAccountClient(realm, clientID, jwksURL)` mints (or resumes) a `client-jwt`/JWKS-authenticated service-account client — returning `(sub, created, err)` — then `TokenServiceClient.RegisterPrincipal` (TS-4) and `IssueOrRotateCredential` (TS-1) register it and issue its first credential with Token Service (`iam-token-service`). If either Token Service call fails after a **freshly-minted** client (`created=true`), that client is best-effort deleted (`DeleteServiceAccountClientIfExists`) so a caller with no realm-level teardown (RP-1's shared realm is never deleted) isn't left with an orphan; a **resumed** client (`created=false`) is never deleted this way, since it may already be serving live traffic from an earlier attempt. `Convert` (RP-3) additionally retires the tenant's now-stale shared-realm client once conversion commits. RP-17 (`POST .../service-account/keys/refresh`) calls `ClearServiceAccountKeysCache` so Keycloak notices a rotated/revoked key — it does not self-refresh a `jwks.url` client's cached keys. RP-18 is this service **calling** Token Service's TS-3 (`ReadPrincipal`), not a hosted endpoint.
 
 ---
 
@@ -930,7 +937,7 @@ Rolling deploy, 2 replicas. `migrate.Runner` `lock_timeout=30s`. Additive change
 
 - **Smoke** (`make test-smoke`, CI only, `.github/scripts/smoke-tests.sh`) checks the CI-built image (`/healthz` 200, `/asyncapi.yaml` serves the real spec) and fail-fast on missing required env.
 
-Coverage is measured over `./internal/...` and `./pkg/...` only. See [CONTRIBUTING.md](CONTRIBUTING.md) for the coverage gate.
+Coverage is measured over `./cmd/...`, `./internal/...`, and `./pkg/...` (`COVER_PKG_LIST` in the Makefile — `cmd/...` is included so composition-root helpers like the gauge exporters and reconciler jobs are counted too), merged across the unit/postgres/integration suites (`scripts/merge_coverage.py`). Currently **91.8%**, up from 83.3% before a rev-1.15 hardening pass that also fixed a real Makefile bug: `TEST_INTERNAL_PKGS` (what `make test-ci` actually runs) and `COVER_PKG_LIST` (what `-coverpkg` instruments) are two independently-maintained lists — a new outbound adapter package lands in the latter automatically but not the former, so its own passing tests can silently stop contributing to the merged number (this happened to `internal/adapter/outbound/tokenservice/`). See [CONTRIBUTING.md](CONTRIBUTING.md) for the coverage gate.
 
 ---
 
@@ -1046,7 +1053,7 @@ graph LR
         readme["README.md\nmental model · API/event overview · onboarding"]
         asyncapi_yaml["api/asyncapi.yaml\nAsyncAPI 3.0 — iam-tenant-events SNS contract\n(9 published + 6 consumed)"]
         swag_annot["@Summary/@Router annotations\non all 17 RP-1..RP-17 handlers +\ncmd/server/swagger_info.go"]
-        lld["docs/lld/iam-lld-realm-provisioner-service.md\nfrozen LLD v1.8"]
+        lld["docs/lld/iam-lld-realm-provisioner-service.md\nfrozen LLD v1.14"]
     end
 
     subgraph rendered["Rendered by"]
@@ -1076,6 +1083,6 @@ graph LR
 | [`.claude/request-flows.md`](.claude/request-flows.md) | Provisioning, conversion, IdP, MFA, lapse, GDPR ordering |
 | [`.claude/operations.md`](.claude/operations.md) | Security, observability, configuration, deployment, CI/CD, dependency degradation matrix |
 | [`docs/architecture/README.md`](docs/architecture/README.md) | Standalone Mermaid diagram set index (the 9 `.mmd` files embedded above) |
-| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD (v1.8) — §16 open-question register, §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
+| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD (v1.14) — §16 open-question register, §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
 
 Render a diagram locally: open any `.mmd` file in a Mermaid-aware IDE (VS Code + Mermaid Preview, IntelliJ + Mermaid plugin) or paste into [mermaid.live](https://mermaid.live).

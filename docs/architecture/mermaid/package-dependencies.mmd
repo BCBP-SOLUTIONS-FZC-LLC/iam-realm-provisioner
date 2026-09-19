@@ -7,10 +7,11 @@ graph LR
     httptransport(["adapter/outbound/httpx\n(cross-cutting leaf — traceparent injection)"])
     eventschema(["internal/eventschema\n(embedded JSON Schema draft-07)"])
     apispec(["api\n(embedded api/asyncapi.yaml)"])
+    swaggerdocs(["docs/swagger\n(generated OpenAPI spec, blank-imported by cmd/server)"])
 
     keycloak(["adapter/outbound/keycloak\n(own component — RP-INV-1 sole gocloak import,\nCI-grepped by .github/scripts/arch-lint.sh)"])
     postgres(["adapter/outbound/postgres\n(own component — TxFromContext for eventbus)"])
-    adapters_outbound(["adapters_outbound:\nadapter/outbound/eventbus\nadapter/outbound/openbao\nadapter/outbound/orgmembership\nadapter/outbound/s3"])
+    adapters_outbound(["adapters_outbound:\nadapter/outbound/eventbus\nadapter/outbound/openbao\nadapter/outbound/orgmembership\nadapter/outbound/s3\nadapter/outbound/tokenservice"])
     adapters_inbound(["adapters_inbound:\nadapter/inbound/http\nadapter/inbound/consumer"])
     reconciler_jobs(["cmd/reconciler/jobs\n(own component)"])
     cmd(["cmd:\ncmd/server\ncmd/reconciler"])
@@ -66,6 +67,7 @@ graph LR
     cmd -->|mayDependOn| requestctx
     cmd -->|mayDependOn| eventschema
     cmd -->|mayDependOn| apispec
+    cmd -->|mayDependOn| swaggerdocs
     cmd -->|mayDependOn| observability
     cmd -->|mayDependOn| keycloak
     cmd -->|mayDependOn| postgres

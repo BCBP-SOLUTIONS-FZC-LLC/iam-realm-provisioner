@@ -22,13 +22,6 @@ definitions:
     required:
     - setting_key
     type: object
-  http.applyServiceAccountSecretRequest:
-    properties:
-      secret:
-        type: string
-    required:
-    - secret
-    type: object
   http.configureIdpRequest:
     properties:
       ack:
@@ -694,15 +687,14 @@ paths:
       summary: RP-4 — Revert trial-to-dedicated conversion
       tags:
       - Provisioning
-  /tenants/{id}/service-account/credentials/apply:
+  /tenants/{id}/service-account/keys/refresh:
     post:
-      consumes:
-      - application/json
-      description: 'Applies a caller-supplied secret (already issued/rotated via Token
-        Service''s TS-1) to the tenant''s platform-automation Keycloak client. Used
-        for rotation and break-glass — mint-time application happens automatically
-        inside RP-1/RP-2/RP-3. No Idempotency-Key: applying the same secret twice
-        is a no-op. Fail-closed on Keycloak-unreachable.'
+      description: 'Clears the tenant''s realm-scoped Keycloak keys cache so a just-issued/rotated
+        credential is recognized and a just-revoked one stops authenticating (EXT-6,
+        §2.5) — Keycloak''s jwks.url client-jwt authenticator does not self-refresh.
+        No Keycloak-side apply happens at mint time (RP-1/RP-2/RP-3): Keycloak fetches
+        the JWKS lazily on first use. No Idempotency-Key: clearing an already-fresh
+        cache is a harmless no-op. Fail-closed on Keycloak-unreachable.'
       parameters:
       - description: Tenant UUID
         format: uuid
@@ -710,21 +702,11 @@ paths:
         name: id
         required: true
         type: string
-      - description: The already-issued plaintext secret
-        in: body
-        name: request
-        required: true
-        schema:
-          $ref: '#/definitions/http.applyServiceAccountSecretRequest'
       produces:
       - application/json
       responses:
         "204":
           description: No Content
-        "400":
-          description: invalid_request
-          schema:
-            $ref: '#/definitions/http.ErrorResponse'
         "404":
           description: tenant_realm_not_found
           schema:
@@ -740,7 +722,7 @@ paths:
       security:
       - SystemRole: []
       - TenantID: []
-      summary: RP-17 — Apply a service-account secret
+      summary: RP-17 — Refresh a service-account's Keycloak key cache
       tags:
       - ServiceAccount
   /tenants/{id}/suspend:
