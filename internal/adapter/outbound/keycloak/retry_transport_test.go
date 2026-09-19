@@ -257,3 +257,61 @@ func TestRetryDelay_OversizedRetryAfterClampsToMaxDelay(t *testing.T) {
 	d := retryDelay(1, resp)
 	assert.Equal(t, retryMaxDelay, d, "an oversized Retry-After must be capped at retryMaxDelay by the caller, not fire an immediate retry")
 }
+
+// An attempt number far beyond what the retry loop itself ever produces
+// (retryMaxAttempts is always small) still can't overflow the
+// shift-then-convert backoff math — retryDelay is called directly here,
+// bypassing the loop, since production never drives attempt this high.
+func TestRetryDelay_HugeAttemptClampsShiftAndStaysWithinMaxDelay(t *testing.T) {
+	origBase, origMax := retryBaseDelay, retryMaxDelay
+	retryBaseDelay, retryMaxDelay = 100*time.Millisecond, time.Second
+	t.Cleanup(func() { retryBaseDelay, retryMaxDelay = origBase, origMax })
+
+	d := retryDelay(1000, nil)
+	assert.GreaterOrEqual(t, d, time.Duration(0))
+	assert.LessOrEqual(t, d, retryMaxDelay)
+}
+
+// erroringBody is a hand-rolled request body for exercising RoundTrip's own
+// buffering step directly (bypassing the fake-admin/gocloak plumbing,
+// which never hands RoundTrip a body that fails to read or close).
+type erroringBody struct {
+	readErr  error
+	closeErr error
+}
+
+func (b erroringBody) Read(p []byte) (int, error) {
+	if b.readErr != nil {
+		return 0, b.readErr
+	}
+	return 0, io.EOF
+}
+func (b erroringBody) Close() error { return b.closeErr }
+
+func TestRetryTransport_BodyReadErrorPropagatesWithoutCallingBase(t *testing.T) {
+	rt := retryTransport{base: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("must not reach the base transport when buffering the body fails")
+		return nil, nil
+	})}
+	req, err := http.NewRequest(http.MethodPost, "http://example.com", nil)
+	require.NoError(t, err)
+	req.Body = erroringBody{readErr: errors.New("read boom")}
+
+	_, err = rt.RoundTrip(req) //nolint:bodyclose // buffering the request body fails before any response exists — RoundTrip returns (nil, err), nothing to close
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read boom")
+}
+
+func TestRetryTransport_BodyCloseErrorPropagatesWhenReadSucceeds(t *testing.T) {
+	rt := retryTransport{base: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("must not reach the base transport when closing the body fails")
+		return nil, nil
+	})}
+	req, err := http.NewRequest(http.MethodPost, "http://example.com", nil)
+	require.NoError(t, err)
+	req.Body = erroringBody{closeErr: errors.New("close boom")}
+
+	_, err = rt.RoundTrip(req) //nolint:bodyclose // buffering the request body fails before any response exists — RoundTrip returns (nil, err), nothing to close
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "close boom")
+}

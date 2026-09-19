@@ -18,7 +18,11 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 )
 
-const exporterInterval = 5 * time.Minute
+// exporterInterval is a var, not a const, purely so a test can shrink it
+// for the duration of one case (t.Cleanup restores it) to make tick's
+// periodic re-fire branch exercisable in well under 5 minutes — production
+// behavior is unaffected, nothing else in this file ever reassigns it.
+var exporterInterval = 5 * time.Minute
 
 // runBusinessExporters starts the goroutines that keep the three DB-state
 // gauges in §11.2, plus the rls_violations_total counter (RLS-6, §17.5 Case

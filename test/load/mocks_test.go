@@ -173,6 +173,9 @@ func (loadTokenServiceClient) IssueOrRotateCredential(context.Context, uuid.UUID
 func (loadTokenServiceClient) ReadPrincipal(context.Context, uuid.UUID, uuid.UUID) (*port.ReadPrincipalResult, error) {
 	return nil, nil
 }
+func (loadTokenServiceClient) JWKSURLFor(tenantID uuid.UUID) string {
+	return "http://token-service.load-test/api/v1/internal/tenants/" + tenantID.String() + "/service-accounts/platform-automation/jwks.json"
+}
 
 // noopLogger implements port.Logger without emitting anything — the
 // per-call WARN paths Convert exercises on non-fatal Keycloak errors

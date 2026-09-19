@@ -24,7 +24,51 @@ func (noopLogger) Info(string, map[string]any)  {}
 func (noopLogger) Warn(string, map[string]any)  {}
 func (noopLogger) Error(string, map[string]any) {}
 
+// ── JWKSURLFor ────────────────────────────────────────────────────────────
+
+func TestJWKSURLFor(t *testing.T) {
+	tenantID := uuid.New()
+	c := New("http://token-service.iam.svc.cluster.local", noopLogger{})
+	got := c.JWKSURLFor(tenantID)
+	want := fmt.Sprintf("http://token-service.iam.svc.cluster.local/api/v1/internal/tenants/%s/service-accounts/platform-automation/jwks.json", tenantID)
+	assert.Equal(t, want, got)
+}
+
+// ── newRequest ────────────────────────────────────────────────────────────
+
+func TestNewRequest_MarshalErrorPropagates(t *testing.T) {
+	c := New("http://example.com", noopLogger{})
+	// A channel value cannot be JSON-marshaled.
+	_, err := c.newRequest(context.Background(), http.MethodPost, "http://example.com", make(chan int))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "encode request body")
+}
+
+func TestNewRequest_InvalidRequestPropagatesError(t *testing.T) {
+	c := New("http://example.com", noopLogger{})
+	_, err := c.newRequest(context.Background(), "IN VALID", "http://example.com", nil)
+	require.Error(t, err)
+}
+
+func TestNewRequest_NilBodySetsNoContentType(t *testing.T) {
+	c := New("http://example.com", noopLogger{})
+	req, err := c.newRequest(context.Background(), http.MethodGet, "http://example.com", nil)
+	require.NoError(t, err)
+	assert.Empty(t, req.Header.Get("Content-Type"))
+}
+
 // ── RegisterPrincipal (TS-4) ─────────────────────────────────────────────
+
+// A malformed baseURL makes newRequest's own http.NewRequestWithContext
+// call fail — the one newRequest-error branch RegisterPrincipal/
+// IssueOrRotateCredential/ReadPrincipal each propagate unchanged.
+func TestRegisterPrincipal_InvalidURLPropagatesNewRequestError(t *testing.T) {
+	c := New("http://exa\x7fmple.com", noopLogger{})
+	_, err := c.RegisterPrincipal(context.Background(), uuid.New(), port.RegisterPrincipalRequest{
+		PrincipalSub: uuid.New(), KeycloakClientID: "platform-automation",
+	})
+	require.Error(t, err)
+}
 
 func TestRegisterPrincipal_RequestShapeAndHeaders(t *testing.T) {
 	tenantID, principalSub := uuid.New(), uuid.New()
@@ -195,7 +239,9 @@ func TestIssueOrRotateCredential_ExpiresPriorAtMalformedErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "expires_prior_at")
 }
 
-func TestIssueOrRotateCredential_ConflictMapsToRotationInFlight(t *testing.T) {
+// An empty/unparseable 409 body falls back to the safe default —
+// rotation-in-flight, not a hard failure.
+func TestIssueOrRotateCredential_ConflictWithNoBody_DefaultsToRotationInFlight(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)
 	}))
@@ -207,6 +253,41 @@ func TestIssueOrRotateCredential_ConflictMapsToRotationInFlight(t *testing.T) {
 	var derr *domain.Error
 	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrServiceAccountRotationInFlight, derr.Code)
+}
+
+func TestIssueOrRotateCredential_ConflictWithRotationInFlightBody_MapsToRotationInFlight(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"rotation_in_flight","status":409}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, noopLogger{})
+	_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
+	require.Error(t, err)
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrServiceAccountRotationInFlight, derr.Code)
+}
+
+// TS-1's own second 409 cause (§17 of the Token Service LLD) — a
+// record_version mismatch on the principal/credential row, unrelated to a
+// concurrent rotation — must surface as the distinct
+// domain.ErrOptimisticLockConflict, not be flattened into
+// ErrServiceAccountRotationInFlight.
+func TestIssueOrRotateCredential_ConflictWithOptimisticLockBody_MapsToOptimisticLockConflict(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"optimistic_lock_conflict","status":409}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, noopLogger{})
+	_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
+	require.Error(t, err)
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrOptimisticLockConflict, derr.Code)
 }
 
 func TestIssueOrRotateCredential_ServerErrorMapsToTokenServiceUnavailable(t *testing.T) {
@@ -221,6 +302,34 @@ func TestIssueOrRotateCredential_ServerErrorMapsToTokenServiceUnavailable(t *tes
 	var derr *domain.Error
 	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrTokenServiceUnavailable, derr.Code)
+}
+
+func TestIssueOrRotateCredential_InvalidURLPropagatesNewRequestError(t *testing.T) {
+	c := New("http://exa\x7fmple.com", noopLogger{})
+	_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
+	require.Error(t, err)
+}
+
+func TestIssueOrRotateCredential_TransportErrorMapsToTokenServiceUnavailable(t *testing.T) {
+	c := New("http://127.0.0.1:0", noopLogger{})
+	_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
+	require.Error(t, err)
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrTokenServiceUnavailable, derr.Code)
+}
+
+func TestIssueOrRotateCredential_DecodeErrorPropagates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`not json`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, noopLogger{})
+	_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode TS-1 response")
 }
 
 func TestIssueOrRotateCredential_OverlapSecondsOmittedWhenNil(t *testing.T) {
@@ -279,6 +388,36 @@ func TestReadPrincipal_IssuedAtMalformedErrors(t *testing.T) {
 	_, err := c.ReadPrincipal(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "issued_at")
+}
+
+func TestReadPrincipal_InvalidURLPropagatesNewRequestError(t *testing.T) {
+	c := New("http://exa\x7fmple.com", noopLogger{})
+	_, err := c.ReadPrincipal(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err)
+}
+
+func TestReadPrincipal_TransportErrorMapsToTokenServiceUnavailable(t *testing.T) {
+	c := New("http://127.0.0.1:0", noopLogger{})
+	_, err := c.ReadPrincipal(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err)
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrTokenServiceUnavailable, derr.Code)
+}
+
+func TestReadPrincipal_ExpiresAtMalformedErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"principal_id":"`+uuid.New().String()+`","tenant_id":"`+uuid.New().String()+`","keycloak_client_id":"platform-automation",
+			"principal_type":"platform_automation","status":"active","record_version":1,
+			"credentials":[{"version":1,"status":"active","openbao_path":"x","issued_at":"2026-09-01T00:00:00Z","expires_at":"not-a-date"}]}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, noopLogger{})
+	_, err := c.ReadPrincipal(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expires_at")
 }
 
 func TestReadPrincipal_ServerErrorMapsToTokenServiceUnavailable(t *testing.T) {

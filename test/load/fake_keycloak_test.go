@@ -158,7 +158,9 @@ func (f *fakeKeycloakServer) handle(w http.ResponseWriter, r *http.Request) {
 		return
 
 	case r.Method == http.MethodPut && strings.Contains(path, "/clients/"):
-		// UpdateClient (SetClientSecret's apply call, §2.5/RP-17).
+		// UpdateClient — unused by the mint path since EXT-6 (client-jwt/
+		// jwks.url needs no apply-a-secret step), kept for any other
+		// UpdateClient caller this fake server may pick up.
 		writeJSON(w, http.StatusOK, `{}`)
 		return
 

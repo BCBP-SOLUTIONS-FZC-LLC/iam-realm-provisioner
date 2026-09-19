@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -129,4 +132,48 @@ func TestMustEnv_UnsetOutsideDev_Panics(t *testing.T) {
 func TestMustEnv_UnsetInDev_ReturnsFallback(t *testing.T) {
 	t.Setenv("MUST_ENV_TEST_KEY", "")
 	assert.Equal(t, "http://localhost:8081", mustEnv("MUST_ENV_TEST_KEY", "dev"))
+}
+
+func TestEnvOr(t *testing.T) {
+	t.Setenv("SRV_TEST_ENVOR", "")
+	assert.Equal(t, "default", envOr("SRV_TEST_ENVOR", "default"))
+	t.Setenv("SRV_TEST_ENVOR", "custom")
+	assert.Equal(t, "custom", envOr("SRV_TEST_ENVOR", "default"))
+}
+
+func TestEnvInt(t *testing.T) {
+	t.Setenv("SRV_TEST_ENVINT", "")
+	assert.Equal(t, 5, envInt("SRV_TEST_ENVINT", 5))
+	t.Setenv("SRV_TEST_ENVINT", "42")
+	assert.Equal(t, 42, envInt("SRV_TEST_ENVINT", 5))
+	t.Setenv("SRV_TEST_ENVINT", "not-a-number")
+	assert.Equal(t, 5, envInt("SRV_TEST_ENVINT", 5), "unparseable falls back to default")
+	t.Setenv("SRV_TEST_ENVINT", "-3")
+	assert.Equal(t, 5, envInt("SRV_TEST_ENVINT", 5), "non-positive falls back to default")
+}
+
+func TestEnvDuration(t *testing.T) {
+	defaultDur := 10 * time.Second
+	t.Setenv("SRV_TEST_ENVDUR", "")
+	assert.Equal(t, defaultDur, envDuration("SRV_TEST_ENVDUR", defaultDur))
+	t.Setenv("SRV_TEST_ENVDUR", "30s")
+	assert.Equal(t, 30*time.Second, envDuration("SRV_TEST_ENVDUR", defaultDur))
+	t.Setenv("SRV_TEST_ENVDUR", "not-a-duration")
+	assert.Equal(t, defaultDur, envDuration("SRV_TEST_ENVDUR", defaultDur), "unparseable falls back to default")
+	t.Setenv("SRV_TEST_ENVDUR", "-5s")
+	assert.Equal(t, defaultDur, envDuration("SRV_TEST_ENVDUR", defaultDur), "non-positive falls back to default")
+}
+
+func TestPingerFunc_Health(t *testing.T) {
+	called := false
+	pf := pingerFunc(func(ctx context.Context) error {
+		called = true
+		return nil
+	})
+	assert.NoError(t, pf.Health(context.Background()))
+	assert.True(t, called)
+
+	boom := errors.New("boom")
+	pf2 := pingerFunc(func(ctx context.Context) error { return boom })
+	assert.Same(t, boom, pf2.Health(context.Background()))
 }

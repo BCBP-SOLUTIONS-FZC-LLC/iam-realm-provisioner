@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/pkg/requestctx"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 	pgdomain "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/domain"
@@ -62,7 +63,7 @@ func TestParseBridgedIdentity(t *testing.T) {
 	}{
 		{"valid user and tenant", bridgedIdentity{UserIDStr: validUser, TenantIDStr: validTenant}, false, false},
 		{"system principal literal", bridgedIdentity{UserIDStr: "iam-system", TenantIDStr: validTenant}, false, true},
-		{"system principal reserved uuid", bridgedIdentity{UserIDStr: systemPrincipalUserID, TenantIDStr: validTenant}, false, true},
+		{"system principal reserved uuid", bridgedIdentity{UserIDStr: domain.SystemActorID, TenantIDStr: validTenant}, false, true},
 		{"invalid user id", bridgedIdentity{UserIDStr: "not-a-uuid", TenantIDStr: validTenant}, true, false},
 		{"invalid tenant id", bridgedIdentity{UserIDStr: validUser, TenantIDStr: "not-a-uuid"}, true, false},
 	}

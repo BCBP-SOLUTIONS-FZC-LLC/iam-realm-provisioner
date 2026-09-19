@@ -160,8 +160,8 @@ func TestProvisionDirect_MintPlatformAutomationFails_TeardownCalled(t *testing.T
 	kc.CreateInvitedUserFn = func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
 		return uuid.New(), nil
 	}
-	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID string) (uuid.UUID, error) {
-		return uuid.Nil, domain.NewError(domain.ErrKeycloakUnavailable, "boom")
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID, jwksURL string) (uuid.UUID, bool, error) {
+		return uuid.Nil, false, domain.NewError(domain.ErrKeycloakUnavailable, "boom")
 	}
 	kc.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error {
 		deletedRealm = realmName
@@ -189,15 +189,10 @@ func TestProvisionDirect_MintPlatformAutomation_PersistsPrincipalAndClientID(t *
 	kc.CreateInvitedUserFn = func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
 		return uuid.New(), nil
 	}
-	var gotClientID string
-	var gotSecretRealm, gotSecretClientID string
-	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID string) (uuid.UUID, error) {
-		gotClientID = clientID
-		return uuid.New(), nil
-	}
-	kc.SetClientSecretFn = func(ctx context.Context, realmName, clientID, secret string) error {
-		gotSecretRealm, gotSecretClientID = realmName, clientID
-		return nil
+	var gotClientID, gotJWKSURL string
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID, jwksURL string) (uuid.UUID, bool, error) {
+		gotClientID, gotJWKSURL = clientID, jwksURL
+		return uuid.New(), true, nil
 	}
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-7", service.ProvisionDirectRequest{
@@ -205,8 +200,7 @@ func TestProvisionDirect_MintPlatformAutomation_PersistsPrincipalAndClientID(t *
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "platform-automation", gotClientID)
-	assert.Equal(t, "tenant-acme", gotSecretRealm)
-	assert.Equal(t, "platform-automation", gotSecretClientID)
+	assert.NotEmpty(t, gotJWKSURL, "the client must be minted with a JWKS URL, not a plain client-secret authenticator (EXT-6)")
 
 	row, err := realms.FindByTenantID(context.Background(), tenantID)
 	require.NoError(t, err)
@@ -426,6 +420,53 @@ func TestProvisionDirect_SecondEventEnqueueFails(t *testing.T) {
 	require.Len(t, pub.events, 1, "the first event enqueued before the failure is still recorded by the mock")
 	assert.Equal(t, domain.EventTenantRealmReady, pub.events[0].Type)
 	assert.Equal(t, domain.OpStatusFailed, idem.rows["pd-12"].Status)
+}
+
+// The TenantConverted enqueue (the third of three) failing propagates, even
+// though the first two (TenantRealmReady, DirectPaidSignup) succeeded.
+func TestProvisionDirect_ThirdEventEnqueueFails(t *testing.T) {
+	svc, kc, _, idem, pub := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
+	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) { return nil, nil }
+	kc.CreateInvitedUserFn = func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
+		return uuid.New(), nil
+	}
+	pub.EnqueueErr = errors.New("outbox unavailable")
+	pub.FailFromCall = 3
+
+	_, err := svc.ProvisionDirect(context.Background(), "pd-third-enqueue", service.ProvisionDirectRequest{
+		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A", BillingSubscriptionID: "sub_1",
+	})
+	require.Error(t, err)
+	require.Len(t, pub.events, 2, "the first two events enqueued before the failure are still recorded by the mock")
+	assert.Equal(t, domain.EventTenantRealmReady, pub.events[0].Type)
+	assert.Equal(t, domain.EventDirectPaidSignup, pub.events[1].Type)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["pd-third-enqueue"].Status)
+}
+
+// RP-2, §8.2: a tenant already offboarded (exported/deleted) must be
+// rejected before any Keycloak call is made.
+func TestProvisionDirect_Offboarded_Returns409(t *testing.T) {
+	svc, kc, realms, idem, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	realms.rows[tenantID] = &domain.TenantRealm{
+		TenantID: tenantID, RealmName: "tenant-acme", Strategy: domain.RealmStrategyDedicated,
+		Status: domain.RealmStatusDeleted,
+	}
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error {
+		t.Fatal("must not call Keycloak for an already-offboarded tenant")
+		return nil
+	}
+
+	_, err := svc.ProvisionDirect(context.Background(), "pd-offboarded", service.ProvisionDirectRequest{
+		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
+	})
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrTenantOffboarded, de.Code)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["pd-offboarded"].Status)
 }
 
 // When the tx runner wires no event publisher into ctx, the local commit

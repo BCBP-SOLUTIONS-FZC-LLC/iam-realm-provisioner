@@ -240,14 +240,14 @@ func registerInternalRoutes(r *gin.Engine, cfg RouterConfig) {
 	// an internal routing detail, not part of the wire contract (callers
 	// substitute the actual Keycloak user id either way), so this is a
 	// non-breaking rename.
-	internal.POST("/tenants/:id/users/:keycloak_user_id/mfa-reset", h.ResetMFA)                  // RP-9
-	internal.POST("/tenants/:id/reactivate", idem, h.Reactivate)                                 // RP-10
-	internal.GET("/tenants/:id/realm", h.GetRealm)                                               // RP-11
-	internal.POST("/tenants/:id/expire-trial", idem, h.ExpireTrial)                              // RP-12
-	internal.POST("/tenants/:id/suspend", idem, RequireOperatorRole(), h.Suspend)                // RP-14
-	internal.DELETE("/tenants/:id/users/:keycloak_user_id", h.DeleteUser)                        // RP-15
-	internal.POST("/tenants/:id/users/:keycloak_user_id/revoke-sessions", h.RevokeSessions)      // RP-16
-	internal.POST("/tenants/:id/service-account/credentials/apply", h.ApplyServiceAccountSecret) // RP-17
+	internal.POST("/tenants/:id/users/:keycloak_user_id/mfa-reset", h.ResetMFA)             // RP-9
+	internal.POST("/tenants/:id/reactivate", idem, h.Reactivate)                            // RP-10
+	internal.GET("/tenants/:id/realm", h.GetRealm)                                          // RP-11
+	internal.POST("/tenants/:id/expire-trial", idem, h.ExpireTrial)                         // RP-12
+	internal.POST("/tenants/:id/suspend", idem, RequireOperatorRole(), h.Suspend)           // RP-14
+	internal.DELETE("/tenants/:id/users/:keycloak_user_id", h.DeleteUser)                   // RP-15
+	internal.POST("/tenants/:id/users/:keycloak_user_id/revoke-sessions", h.RevokeSessions) // RP-16
+	internal.POST("/tenants/:id/service-account/keys/refresh", h.RefreshServiceAccountKeys) // RP-17
 
 	// Operator-only, whole-estate scan — not tenant-scoped (§5.1).
 	internal.POST("/audit/idp-region-portability", RequireOperatorRole(), h.PortabilityAudit) // RP-13

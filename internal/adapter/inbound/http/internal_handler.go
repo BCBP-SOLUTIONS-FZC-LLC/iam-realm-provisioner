@@ -337,36 +337,31 @@ func (h *InternalHandler) ResetMFA(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// ── RP-17: standalone rotate/break-glass-apply (§2.5) ────────────────────
+// ── RP-17: standalone rotate/revoke/break-glass key-cache refresh (§2.5) ──
 
-type applyServiceAccountSecretRequest struct {
-	Secret string `json:"secret" binding:"required"`
-}
-
-// ApplyServiceAccountSecret handles RP-17
-// (POST /tenants/:id/service-account/credentials/apply). The caller has
-// already obtained the plaintext from Token Service's own TS-1 call
-// (issue or rotate) and hands it here to be applied to the tenant's
-// already-minted platform-automation Keycloak client.
+// RefreshServiceAccountKeys handles RP-17
+// (POST /tenants/:id/service-account/keys/refresh), empty body. The caller
+// has already issued, rotated, or revoked a credential directly against
+// Token Service's own TS-1/TS-2 and calls this so the tenant's realm
+// actually notices — Keycloak does not self-refresh a jwks.url client's
+// cached keys (EXT-6, verified empirically), so neither a newly-rotated key
+// nor a revoked one takes effect at Keycloak without this call.
 //
-// @Summary      RP-17 — Apply a service-account secret
-// @Description  Applies a caller-supplied secret (already issued/rotated via Token Service's TS-1) to the tenant's platform-automation Keycloak client. Used for rotation and break-glass — mint-time application happens automatically inside RP-1/RP-2/RP-3. No Idempotency-Key: applying the same secret twice is a no-op. Fail-closed on Keycloak-unreachable.
+// @Summary      RP-17 — Refresh a service-account's Keycloak key cache
+// @Description  Clears the tenant's realm-scoped Keycloak keys cache so a just-issued/rotated credential is recognized and a just-revoked one stops authenticating (EXT-6, §2.5) — Keycloak's jwks.url client-jwt authenticator does not self-refresh. No Keycloak-side apply happens at mint time (RP-1/RP-2/RP-3): Keycloak fetches the JWKS lazily on first use. No Idempotency-Key: clearing an already-fresh cache is a harmless no-op. Fail-closed on Keycloak-unreachable.
 // @Tags         ServiceAccount
-// @Accept       json
 // @Produce      json
-// @Param        id       path  string                             true  "Tenant UUID"  format(uuid)
-// @Param        request  body  applyServiceAccountSecretRequest  true  "The already-issued plaintext secret"
-// @Success      204      "No Content"
-// @Failure      400      {object}  ErrorResponse  "invalid_request"
-// @Failure      404      {object}  ErrorResponse  "tenant_realm_not_found"
-// @Failure      422      {object}  ErrorResponse  "service_account_not_provisioned"
-// @Failure      502      {object}  ErrorResponse  "keycloak_unavailable"
+// @Param        id  path  string  true  "Tenant UUID"  format(uuid)
+// @Success      204 "No Content"
+// @Failure      404 {object}  ErrorResponse  "tenant_realm_not_found"
+// @Failure      422 {object}  ErrorResponse  "service_account_not_provisioned"
+// @Failure      502 {object}  ErrorResponse  "keycloak_unavailable"
 // @Security     SystemRole
 // @Security     TenantID
-// @Router       /tenants/{id}/service-account/credentials/apply [post]
-func (h *InternalHandler) ApplyServiceAccountSecret(c *gin.Context) {
+// @Router       /tenants/{id}/service-account/keys/refresh [post]
+func (h *InternalHandler) RefreshServiceAccountKeys(c *gin.Context) {
 	if h.Provisioning == nil {
-		h.fallback.ApplyServiceAccountSecret(c)
+		h.fallback.RefreshServiceAccountKeys(c)
 		return
 	}
 	tenantID, err := parseTenantID(c)
@@ -374,12 +369,7 @@ func (h *InternalHandler) ApplyServiceAccountSecret(c *gin.Context) {
 		HandleError(c, err)
 		return
 	}
-	var req applyServiceAccountSecretRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		HandleError(c, domain.NewError(domain.ErrInvalidRequest, err.Error()))
-		return
-	}
-	if err := h.Provisioning.ApplyServiceAccountSecret(c.Request.Context(), tenantID, req.Secret); err != nil {
+	if err := h.Provisioning.RefreshServiceAccountKeys(c.Request.Context(), tenantID); err != nil {
 		HandleError(c, err)
 		return
 	}

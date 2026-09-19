@@ -20,6 +20,33 @@ func seedSharedRealm(realms *mockTenantRealmRepository, tenantID uuid.UUID) {
 	}
 }
 
+// Convert's post-success cleanup must target the PERSISTED
+// ServiceAccountKeycloakClientID, not a name re-derived from the naming
+// convention — a legacy/out-of-band row can diverge from that convention,
+// and re-deriving would then silently target the wrong (nonexistent)
+// client, leaking the real one with no error signal.
+func TestConvert_Success_DeletesThePersistedOldClientID_NotADerivedName(t *testing.T) {
+	svc, kc, realms, _, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	seedSharedRealm(realms, tenantID)
+	legacyClientID := "legacy-client-name-not-matching-convention"
+	realms.rows[tenantID].ServiceAccountKeycloakClientID = &legacyClientID
+
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
+	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) { return nil, nil }
+	kc.ListUsersByTenantFn = func(ctx context.Context, realmName string, tid uuid.UUID) ([]uuid.UUID, error) { return nil, nil }
+	kc.ForceLogoutRealmFn = func(ctx context.Context, realmName string) error { return nil }
+	var deletedClientID string
+	kc.DeleteServiceAccountClientIfExistsFn = func(ctx context.Context, realmName, clientID string) error {
+		deletedClientID = clientID
+		return nil
+	}
+
+	_, err := svc.Convert(context.Background(), "conv-key-legacy-client", tenantID, service.ConvertRequest{Plan: "pro"})
+	require.NoError(t, err)
+	assert.Equal(t, legacyClientID, deletedClientID)
+}
+
 func TestConvert_Success(t *testing.T) {
 	svc, kc, realms, _, pub := newProvisioningTestService(t)
 	tenantID := uuid.New()
@@ -43,9 +70,19 @@ func TestConvert_Success(t *testing.T) {
 		assert.Equal(t, "trial", realmName)
 		return nil
 	}
+	var deletedOldClientRealm, deletedOldClientID string
+	kc.DeleteServiceAccountClientIfExistsFn = func(ctx context.Context, realmName, clientID string) error {
+		deletedOldClientRealm, deletedOldClientID = realmName, clientID
+		return nil
+	}
 
 	result, err := svc.Convert(context.Background(), "conv-key-1", tenantID, service.ConvertRequest{Plan: "pro", BillingSubscriptionID: "sub_123"})
 	require.NoError(t, err)
+
+	// §2.5: once the principal has moved to the new dedicated realm's
+	// client, the stale trial-realm client is retired.
+	assert.Equal(t, "trial", deletedOldClientRealm)
+	assert.Equal(t, "platform-automation-"+tenantID.String(), deletedOldClientID)
 
 	assert.Equal(t, "dedicated", result.Strategy)
 	assert.Equal(t, 2, result.UsersMigrated)
@@ -67,6 +104,29 @@ func TestConvert_Success(t *testing.T) {
 	assert.False(t, converted.DirectSignup)
 	assert.Equal(t, 2, converted.UsersMigrated)
 	assert.Equal(t, "pro", converted.Plan)
+}
+
+// bestEffortDeleteServiceAccountClient's own failure is best-effort — it
+// must not fail an otherwise-successful conversion, just get logged.
+func TestConvert_Success_StaleClientDeleteFails_LoggedNotPropagated(t *testing.T) {
+	svc, kc, realms, _, _ := newProvisioningTestService(t)
+	logger := &mockLogger{}
+	svc.WithLogger(logger)
+	tenantID := uuid.New()
+	seedSharedRealm(realms, tenantID)
+
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
+	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) { return nil, nil }
+	kc.ListUsersByTenantFn = func(ctx context.Context, realmName string, tid uuid.UUID) ([]uuid.UUID, error) { return nil, nil }
+	kc.ForceLogoutRealmFn = func(ctx context.Context, realmName string) error { return nil }
+	kc.DeleteServiceAccountClientIfExistsFn = func(ctx context.Context, realmName, clientID string) error {
+		return errors.New("keycloak down")
+	}
+
+	result, err := svc.Convert(context.Background(), "conv-key-delete-fail", tenantID, service.ConvertRequest{Plan: "pro"})
+	require.NoError(t, err, "the stale-client cleanup failing must not fail the conversion itself")
+	assert.Equal(t, "dedicated", result.Strategy)
+	assert.GreaterOrEqual(t, logger.warnCalls, 1)
 }
 
 // Already-dedicated tenants must be rejected — Convert requires shared strategy.
@@ -306,8 +366,8 @@ func TestConvert_MintPlatformAutomationFails_BeforeMigration_TeardownCalled(t *t
 	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) {
 		return []string{"tender-web"}, nil
 	}
-	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID string) (uuid.UUID, error) {
-		return uuid.Nil, domain.NewError(domain.ErrKeycloakUnavailable, "boom")
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID, jwksURL string) (uuid.UUID, bool, error) {
+		return uuid.Nil, false, domain.NewError(domain.ErrKeycloakUnavailable, "boom")
 	}
 	kc.ListUsersByTenantFn = func(ctx context.Context, realmName string, tid uuid.UUID) ([]uuid.UUID, error) {
 		t.Fatal("mint failure must short-circuit before ListUsersByTenant/migration")
@@ -338,9 +398,9 @@ func TestConvert_MintPlatformAutomation_CarriesPrincipalAcrossRealms(t *testing.
 	kc.ListUsersByTenantFn = func(ctx context.Context, realmName string, tid uuid.UUID) ([]uuid.UUID, error) { return nil, nil }
 	kc.ForceLogoutRealmFn = func(ctx context.Context, realmName string) error { return nil }
 	var gotClientID string
-	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID string) (uuid.UUID, error) {
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID, jwksURL string) (uuid.UUID, bool, error) {
 		gotClientID = clientID
-		return uuid.New(), nil
+		return uuid.New(), true, nil
 	}
 
 	_, err := svc.Convert(context.Background(), "conv-key-6c", tenantID, service.ConvertRequest{Plan: "pro"})

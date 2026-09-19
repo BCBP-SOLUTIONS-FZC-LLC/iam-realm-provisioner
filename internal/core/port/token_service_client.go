@@ -31,11 +31,13 @@ type IssueCredentialRequest struct {
 	OverlapSeconds *int
 }
 
-// IssueCredentialResult is TS-1's response body. Secret is the plaintext,
-// returned exactly once — the caller (this service) must apply it to
-// Keycloak and discard it immediately (RP-17, TS-INV-2). Replayed is true
-// when RotationID matched an already-committed issue/rotate rather than
-// generating new material (§9.2).
+// IssueCredentialResult is TS-1's response body. Secret is the plaintext
+// private key, returned exactly once — this service discards it immediately
+// without ever touching Keycloak with it (EXT-6, corrected from the earlier
+// apply-a-client-secret design: Keycloak already trusts the JWKS Token
+// Service serves at JWKSURLFor, and fetches the public half itself).
+// Replayed is true when RotationID matched an already-committed
+// issue/rotate rather than generating new material (§9.2).
 type IssueCredentialResult struct {
 	Version        int
 	Secret         string
@@ -46,9 +48,11 @@ type IssueCredentialResult struct {
 }
 
 // TokenServiceClient is this service's outbound dependency on the Token
-// Service's credential-lifecycle API (§2.5, RP-17/RP-18) — RP mints and
-// applies, Token Service generates and custodies (RP-INV-1 preserved:
-// this service never lets Token Service touch Keycloak).
+// Service's credential-lifecycle API (§2.5, RP-17/RP-18) — RP mints the
+// Keycloak client and clears its JWKS key cache; Token Service generates,
+// custodies, and directly serves the credential material's public half as
+// a JWKS Keycloak fetches itself (EXT-6, RP-INV-1 preserved: this service
+// never lets Token Service touch Keycloak).
 type TokenServiceClient interface {
 	// RegisterPrincipal calls TS-4 to register the automation principal
 	// after CreateServiceAccountClient mints its Keycloak client.
@@ -59,6 +63,14 @@ type TokenServiceClient interface {
 	// ReadPrincipal calls TS-3 to read principal + credential-version
 	// metadata (RP-18) — never a secret.
 	ReadPrincipal(ctx context.Context, tenantID, principalID uuid.UUID) (*ReadPrincipalResult, error)
+	// JWKSURLFor returns the JWKS URL Token Service serves tenantID's
+	// platform-automation public keys at (EXT-6, §2.5) — pure string
+	// construction from this client's own configured base URL, no network
+	// call. Keyed by tenant_id alone (valid: at most one platform_automation
+	// principal per tenant, uq_sap_active_principal), so it's available
+	// before CreateServiceAccountClient has minted a principal_id or
+	// keycloak_client_id to key it by instead.
+	JWKSURLFor(tenantID uuid.UUID) string
 }
 
 // CredentialSummary is one entry in ReadPrincipalResult.Credentials.

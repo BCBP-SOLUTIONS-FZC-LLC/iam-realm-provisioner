@@ -64,6 +64,26 @@ func TestTrialExpiry_HappyPath_DisablesAndEmits(t *testing.T) {
 	}
 }
 
+// When the TxRunner wires no event publisher into ctx, the local commit
+// still lands and the tenant still counts as succeeded — just with no
+// TrialExpired event enqueued.
+func TestTrialExpiry_NoEventPublisherInContext_StillCommitsLocally(t *testing.T) {
+	jctx, kc, realms, _, pub, _ := newTestContext()
+	jctx.TxRunner = &mockTxRunner{pub: pub, SkipPublisher: true}
+	row := newExpiredTrialRow(uuid.New(), time.Now().UTC().Add(-1*time.Hour))
+	realms.ListExpiredTrialsFn = func(ctx context.Context, limit int) ([]*domain.TenantRealm, error) {
+		return []*domain.TenantRealm{row}, nil
+	}
+	kc.DisableUsersInRealmFn = func(ctx context.Context, realmName string, tid uuid.UUID) error { return nil }
+	jctx.BatchLimit = 50
+	jctx.TrialGraceDays = 14
+
+	res, err := TrialExpiry(context.Background(), jctx)
+	require.NoError(t, err)
+	assert.Equal(t, Result{Attempted: 1, Succeeded: 1}, res)
+	assert.Empty(t, pub.events, "no event publisher in context means no event, but the tenant still succeeds")
+}
+
 func TestTrialExpiry_IdempotencyReplay_SkipsKeycloak(t *testing.T) {
 	jctx, kc, realms, idem, pub, _ := newTestContext()
 	row := newExpiredTrialRow(uuid.New(), time.Now().UTC().Add(-1*time.Hour))
@@ -119,6 +139,25 @@ func TestTrialExpiry_ListExpiredTrialsFails_Propagates(t *testing.T) {
 
 	_, err := TrialExpiry(context.Background(), jctx)
 	require.Error(t, err)
+}
+
+// A hard ledger failure from idempotency.Begin itself (not a `found`
+// replay) must be counted as a per-tenant failure, not abort the whole
+// sweep — the same defer-and-continue shape every other per-tenant failure
+// in this job uses.
+func TestTrialExpiry_BeginHardError_CountedAsFailed(t *testing.T) {
+	jctx, _, realms, idem, pub, logger := newTestContext()
+	row := newExpiredTrialRow(uuid.New(), time.Now().UTC().Add(-1*time.Hour))
+	realms.ListExpiredTrialsFn = func(ctx context.Context, limit int) ([]*domain.TenantRealm, error) {
+		return []*domain.TenantRealm{row}, nil
+	}
+	idem.BeginErr = errors.New("ledger unavailable")
+
+	res, err := TrialExpiry(context.Background(), jctx)
+	require.NoError(t, err)
+	assert.Equal(t, Result{Attempted: 1, Failed: 1}, res)
+	assert.Empty(t, pub.events)
+	assert.GreaterOrEqual(t, logger.warnCalls, 1)
 }
 
 func TestTrialExpiry_UpdateFails_MarksIdempotencyFailed(t *testing.T) {

@@ -14,34 +14,35 @@ import (
 // letting each test wire only the methods its scenario exercises. ────────
 
 type mockKeycloakAdmin struct {
-	ReadyFn                      func(ctx context.Context) error
-	CreateRealmFromTemplateFn    func(ctx context.Context, realmName, templateVersion string) error
-	RegisterOIDCClientsFn        func(ctx context.Context, realmName, tenantSlug string) ([]string, error)
-	DisableRealmFn               func(ctx context.Context, realmName string) error
-	EnableRealmFn                func(ctx context.Context, realmName string) error
-	ExportRealmFn                func(ctx context.Context, realmName string) ([]byte, error)
-	DeleteRealmFn                func(ctx context.Context, realmName string) error
-	DeleteRealmIfExistsFn        func(ctx context.Context, realmName string) error
-	CreateTrialUserFn            func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error)
-	CreateInvitedUserFn          func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error)
-	FindUserByEmailFn            func(ctx context.Context, realmName, email string) (*port.ExistingUser, error)
-	MigrateUserFn                func(ctx context.Context, sourceRealm, targetRealm string, keycloakUserID uuid.UUID) (bool, error)
-	ListUsersByTenantFn          func(ctx context.Context, realmName string, tenantID uuid.UUID) ([]uuid.UUID, error)
-	DisableUsersInRealmFn        func(ctx context.Context, realmName string, tenantID uuid.UUID) error
-	EnableUsersInRealmFn         func(ctx context.Context, realmName string, tenantID uuid.UUID) error
-	HardDeleteUsersInRealmFn     func(ctx context.Context, realmName string, tenantID uuid.UUID) error
-	DeleteUserFn                 func(ctx context.Context, realmName string, keycloakUserID uuid.UUID) error
-	RevokeUserSessionsFn         func(ctx context.Context, realmName string, keycloakUserID uuid.UUID) error
-	ForceLogoutRealmFn           func(ctx context.Context, realmName string) error
-	AssignRequiresMFAFn          func(ctx context.Context, realmName string, userID uuid.UUID) error
-	RevokeRequiresMFAFn          func(ctx context.Context, realmName string, userID uuid.UUID) error
-	HasRequiresMFAFn             func(ctx context.Context, realmName string, userID uuid.UUID) (bool, error)
-	ResetMFAFn                   func(ctx context.Context, realmName string, userID uuid.UUID, requiresMFA bool) error
-	CreateOrUpdateIdpFn          func(ctx context.Context, realmName string, idp port.IdpKeycloakConfig) error
-	DeleteIdpFn                  func(ctx context.Context, realmName, alias string) error
-	ApplyRealmConfigFn           func(ctx context.Context, realmName, settingKey string, desiredValue any) error
-	CreateServiceAccountClientFn func(ctx context.Context, realmName, clientID string) (uuid.UUID, error)
-	SetClientSecretFn            func(ctx context.Context, realmName, clientID, secret string) error
+	ReadyFn                              func(ctx context.Context) error
+	CreateRealmFromTemplateFn            func(ctx context.Context, realmName, templateVersion string) error
+	RegisterOIDCClientsFn                func(ctx context.Context, realmName, tenantSlug string) ([]string, error)
+	DisableRealmFn                       func(ctx context.Context, realmName string) error
+	EnableRealmFn                        func(ctx context.Context, realmName string) error
+	ExportRealmFn                        func(ctx context.Context, realmName string) ([]byte, error)
+	DeleteRealmFn                        func(ctx context.Context, realmName string) error
+	DeleteRealmIfExistsFn                func(ctx context.Context, realmName string) error
+	CreateTrialUserFn                    func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error)
+	CreateInvitedUserFn                  func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error)
+	FindUserByEmailFn                    func(ctx context.Context, realmName, email string) (*port.ExistingUser, error)
+	MigrateUserFn                        func(ctx context.Context, sourceRealm, targetRealm string, keycloakUserID uuid.UUID) (bool, error)
+	ListUsersByTenantFn                  func(ctx context.Context, realmName string, tenantID uuid.UUID) ([]uuid.UUID, error)
+	DisableUsersInRealmFn                func(ctx context.Context, realmName string, tenantID uuid.UUID) error
+	EnableUsersInRealmFn                 func(ctx context.Context, realmName string, tenantID uuid.UUID) error
+	HardDeleteUsersInRealmFn             func(ctx context.Context, realmName string, tenantID uuid.UUID) error
+	DeleteUserFn                         func(ctx context.Context, realmName string, keycloakUserID uuid.UUID) error
+	RevokeUserSessionsFn                 func(ctx context.Context, realmName string, keycloakUserID uuid.UUID) error
+	ForceLogoutRealmFn                   func(ctx context.Context, realmName string) error
+	AssignRequiresMFAFn                  func(ctx context.Context, realmName string, userID uuid.UUID) error
+	RevokeRequiresMFAFn                  func(ctx context.Context, realmName string, userID uuid.UUID) error
+	HasRequiresMFAFn                     func(ctx context.Context, realmName string, userID uuid.UUID) (bool, error)
+	ResetMFAFn                           func(ctx context.Context, realmName string, userID uuid.UUID, requiresMFA bool) error
+	CreateOrUpdateIdpFn                  func(ctx context.Context, realmName string, idp port.IdpKeycloakConfig) error
+	DeleteIdpFn                          func(ctx context.Context, realmName, alias string) error
+	ApplyRealmConfigFn                   func(ctx context.Context, realmName, settingKey string, desiredValue any) error
+	CreateServiceAccountClientFn         func(ctx context.Context, realmName, clientID, jwksURL string) (uuid.UUID, bool, error)
+	ClearServiceAccountKeysCacheFn       func(ctx context.Context, realmName string) error
+	DeleteServiceAccountClientIfExistsFn func(ctx context.Context, realmName, clientID string) error
 }
 
 var _ port.KeycloakAdmin = (*mockKeycloakAdmin)(nil)
@@ -122,11 +123,14 @@ func (m *mockKeycloakAdmin) DeleteIdp(ctx context.Context, realmName, alias stri
 func (m *mockKeycloakAdmin) ApplyRealmConfig(ctx context.Context, realmName, settingKey string, desiredValue any) error {
 	return m.ApplyRealmConfigFn(ctx, realmName, settingKey, desiredValue)
 }
-func (m *mockKeycloakAdmin) CreateServiceAccountClient(ctx context.Context, realmName, clientID string) (uuid.UUID, error) {
-	return m.CreateServiceAccountClientFn(ctx, realmName, clientID)
+func (m *mockKeycloakAdmin) CreateServiceAccountClient(ctx context.Context, realmName, clientID, jwksURL string) (uuid.UUID, bool, error) {
+	return m.CreateServiceAccountClientFn(ctx, realmName, clientID, jwksURL)
 }
-func (m *mockKeycloakAdmin) SetClientSecret(ctx context.Context, realmName, clientID, secret string) error {
-	return m.SetClientSecretFn(ctx, realmName, clientID, secret)
+func (m *mockKeycloakAdmin) ClearServiceAccountKeysCache(ctx context.Context, realmName string) error {
+	return m.ClearServiceAccountKeysCacheFn(ctx, realmName)
+}
+func (m *mockKeycloakAdmin) DeleteServiceAccountClientIfExists(ctx context.Context, realmName, clientID string) error {
+	return m.DeleteServiceAccountClientIfExistsFn(ctx, realmName, clientID)
 }
 
 // ── mockTenantRealmRepository — in-memory, keyed by tenant_id. Optional
@@ -443,6 +447,7 @@ type mockTokenServiceClient struct {
 	RegisterPrincipalFn       func(ctx context.Context, tenantID uuid.UUID, req port.RegisterPrincipalRequest) (*port.RegisterPrincipalResult, error)
 	IssueOrRotateCredentialFn func(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error)
 	ReadPrincipalFn           func(ctx context.Context, tenantID, principalID uuid.UUID) (*port.ReadPrincipalResult, error)
+	JWKSURLForFn              func(tenantID uuid.UUID) string
 }
 
 var _ port.TokenServiceClient = (*mockTokenServiceClient)(nil)
@@ -456,24 +461,40 @@ func (m *mockTokenServiceClient) IssueOrRotateCredential(ctx context.Context, te
 func (m *mockTokenServiceClient) ReadPrincipal(ctx context.Context, tenantID, principalID uuid.UUID) (*port.ReadPrincipalResult, error) {
 	return m.ReadPrincipalFn(ctx, tenantID, principalID)
 }
+func (m *mockTokenServiceClient) JWKSURLFor(tenantID uuid.UUID) string {
+	return m.JWKSURLForFn(tenantID)
+}
 
-// wirePlatformAutomationHappyPath sets kc's CreateServiceAccountClientFn/
-// SetClientSecretFn and returns a mockTokenServiceClient wired end-to-end
-// for a successful mint (§2.5) — the shared default every RP-1/RP-2/RP-3
-// success-path test needs, since mintPlatformAutomation now runs as part
-// of those flows. Tests exercising the mint step itself override
-// individual *Fn fields on the returned mock or on kc afterward.
+// wirePlatformAutomationHappyPath sets kc's CreateServiceAccountClientFn and
+// returns a mockTokenServiceClient wired end-to-end for a successful mint
+// (§2.5) — the shared default every RP-1/RP-2/RP-3 success-path test needs,
+// since mintPlatformAutomation now runs as part of those flows. No Keycloak
+// "apply" step happens at mint time (EXT-6): Keycloak fetches the JWKS
+// lazily on first use, so kc.ClearServiceAccountKeysCacheFn is deliberately
+// left unwired here — a mint-path test that unexpectedly called it would
+// panic, catching a regression. Tests exercising the mint step itself
+// override individual *Fn fields on the returned mock or on kc afterward.
+// DeleteServiceAccountClientIfExistsFn defaults to a no-op: it's the
+// best-effort compensating-cleanup primitive (a mint-failure orphan, or
+// Convert's stale shared-realm client after a successful conversion,
+// §9.3/§2.5) that most tests here have no reason to assert on; a test
+// exercising that cleanup itself overrides it on kc afterward.
 func wirePlatformAutomationHappyPath(kc *mockKeycloakAdmin) *mockTokenServiceClient {
-	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID string) (uuid.UUID, error) {
-		return uuid.New(), nil
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID, jwksURL string) (uuid.UUID, bool, error) {
+		return uuid.New(), true, nil
 	}
-	kc.SetClientSecretFn = func(ctx context.Context, realmName, clientID, secret string) error { return nil }
+	kc.DeleteServiceAccountClientIfExistsFn = func(ctx context.Context, realmName, clientID string) error {
+		return nil
+	}
 	return &mockTokenServiceClient{
 		RegisterPrincipalFn: func(ctx context.Context, tenantID uuid.UUID, req port.RegisterPrincipalRequest) (*port.RegisterPrincipalResult, error) {
 			return &port.RegisterPrincipalResult{PrincipalID: uuid.New(), Created: true, RecordVersion: 1}, nil
 		},
 		IssueOrRotateCredentialFn: func(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
 			return &port.IssueCredentialResult{Version: 1, Secret: "test-secret", OpenBaoPath: "iam/serviceaccount/test/v1", RecordVersion: 1}, nil
+		},
+		JWKSURLForFn: func(tenantID uuid.UUID) string {
+			return "http://token-service.test/api/v1/internal/tenants/" + tenantID.String() + "/service-accounts/platform-automation/jwks.json"
 		},
 	}
 }

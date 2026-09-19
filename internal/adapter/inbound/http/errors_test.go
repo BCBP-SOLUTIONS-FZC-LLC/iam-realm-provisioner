@@ -9,9 +9,50 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/stretchr/testify/assert"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 )
+
+// newErrorResponse's c==nil branch — no known production call site passes
+// a nil context, but the function guards against it explicitly, so it's
+// exercised directly here rather than left dark.
+func TestNewErrorResponse_NilContext(t *testing.T) {
+	er := newErrorResponse(nil, "some_code", map[string]any{"k": "v"})
+	assert.Equal(t, "some_code", er.Error)
+	assert.Empty(t, er.TraceID)
+	assert.Empty(t, er.RequestID)
+	assert.Equal(t, "v", er.Details["k"])
+}
+
+// The request-id fallback chain's second branch: no value stored on the
+// context by gincommon's own RequestIDMiddleware, but the inbound request
+// carries the header directly.
+func TestNewErrorResponse_RequestIDFromInboundHeader(t *testing.T) {
+	c, _ := newErrorTestContext()
+	c.Request.Header.Set(gincommon.HeaderRequestID, "req-from-header")
+	er := newErrorResponse(c, "some_code", nil)
+	assert.Equal(t, "req-from-header", er.RequestID)
+}
+
+// The request-id fallback chain's third branch: neither the context value
+// nor the inbound header is set, but a response header was already written
+// (e.g. by an earlier middleware echoing the ID back to the caller).
+func TestNewErrorResponse_RequestIDFromResponseHeader(t *testing.T) {
+	c, w := newErrorTestContext()
+	w.Header().Set(gincommon.HeaderRequestIDResponse, "req-from-response")
+	er := newErrorResponse(c, "some_code", nil)
+	assert.Equal(t, "req-from-response", er.RequestID)
+}
+
+// All three request-id sources absent — RequestID stays empty rather than
+// panicking or fabricating a value.
+func TestNewErrorResponse_NoRequestIDSourceAvailable(t *testing.T) {
+	c, _ := newErrorTestContext()
+	er := newErrorResponse(c, "some_code", nil)
+	assert.Empty(t, er.RequestID)
+}
 
 // newErrorTestContext builds a bare *gin.Context with a real (non-nil)
 // *http.Request, matching what every real handler invocation carries.

@@ -303,6 +303,84 @@ func TestGaugeRepository_RLSViolationCounts_ConcurrentRepositoriesNeverDoubleCou
 		"the two concurrent callers must together count every violation exactly once — never both counting the same rows, never dropping any")
 }
 
+// PendingRealmConfigs/RLSViolationCounts/groupedCounts (the shared helper
+// behind ActiveRealmsByStrategy/TemplateDriftByVersion) all route through
+// withPool -> wrapConnErr, so a closed pool is the simplest way to force
+// their query-failure branch without corrupting the real schema.
+func TestGaugeRepository_PendingRealmConfigs_ConnectivityFailure_WrapsAsDatabaseUnavailable(t *testing.T) {
+	t.Parallel()
+	_, rawPool := setupTestDB(t)
+	ctx := context.Background()
+	closingPool := setupSysPool(t, rawPool)
+	gauges := pgadapter.NewGaugeRepository(closingPool)
+	closingPool.Close()
+
+	_, err := gauges.PendingRealmConfigs(ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "database unavailable")
+}
+
+func TestGaugeRepository_GroupedCounts_ConnectivityFailure_WrapsAsDatabaseUnavailable(t *testing.T) {
+	t.Parallel()
+	_, rawPool := setupTestDB(t)
+	ctx := context.Background()
+	closingPool := setupSysPool(t, rawPool)
+	gauges := pgadapter.NewGaugeRepository(closingPool)
+	closingPool.Close()
+
+	_, err := gauges.ActiveRealmsByStrategy(ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "database unavailable")
+}
+
+func TestGaugeRepository_RLSViolationCounts_ConnectivityFailure_WrapsAsDatabaseUnavailable(t *testing.T) {
+	t.Parallel()
+	_, rawPool := setupTestDB(t)
+	ctx := context.Background()
+	closingPool := setupSysPool(t, rawPool)
+	gauges := pgadapter.NewGaugeRepository(closingPool)
+	closingPool.Close()
+
+	_, err := gauges.RLSViolationCounts(ctx, 5*time.Minute)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "database unavailable")
+}
+
+// TestGaugeRepository_RLSViolationCounts_WatermarkInsertFails corrupts
+// exporter_watermarks (dropping its only non-key column) so the very first
+// statement in RLSViolationCounts — the watermark bootstrap INSERT — fails
+// on its own terms, distinct from the whole-pool-closed connectivity case
+// above (which never even reaches this statement).
+func TestGaugeRepository_RLSViolationCounts_WatermarkInsertFails(t *testing.T) {
+	t.Parallel()
+	_, rawPool := setupTestDB(t)
+	ctx := context.Background()
+	gauges := pgadapter.NewGaugeRepository(setupSysPool(t, rawPool))
+
+	_, err := rawPool.Exec(ctx, `ALTER TABLE exporter_watermarks DROP COLUMN last_processed_at CASCADE`)
+	require.NoError(t, err)
+
+	_, err = gauges.RLSViolationCounts(ctx, 5*time.Minute)
+	require.Error(t, err, "the watermark bootstrap INSERT names the now-missing last_processed_at column")
+}
+
+// TestGaugeRepository_RLSViolationCounts_GroupByQueryFails corrupts
+// rls_violation_log's own grouping column (leaving exporter_watermarks
+// intact, so the watermark bootstrap above succeeds first) to isolate the
+// GROUP BY query's own failure branch.
+func TestGaugeRepository_RLSViolationCounts_GroupByQueryFails(t *testing.T) {
+	t.Parallel()
+	_, rawPool := setupTestDB(t)
+	ctx := context.Background()
+	gauges := pgadapter.NewGaugeRepository(setupSysPool(t, rawPool))
+
+	_, err := rawPool.Exec(ctx, `ALTER TABLE rls_violation_log DROP COLUMN violation_type CASCADE`)
+	require.NoError(t, err)
+
+	_, err = gauges.RLSViolationCounts(ctx, 5*time.Minute)
+	require.Error(t, err, "the GROUP BY query names the now-missing violation_type column")
+}
+
 // TestGaugeRepository_RLSViolationCounts_EmptyWhenNoViolations pins the
 // absent-not-zero result: the exporter's Add-delta loop must not synthesize
 // a 0 for either violation_type when the table has nothing to report.

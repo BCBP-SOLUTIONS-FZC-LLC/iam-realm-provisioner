@@ -9,6 +9,7 @@ package postgres_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -20,7 +21,21 @@ import (
 	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/test/dbseed"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/outbox"
 )
+
+// noopEventPublisher backs the real outbox.Runner these OutboxPrune tests
+// construct — PrunePublished never actually publishes anything, but
+// outbox.NewRunner requires a non-nil Publisher.
+type noopEventPublisher struct{}
+
+func (noopEventPublisher) Publish(context.Context, events.Envelope[json.RawMessage]) error {
+	return nil
+}
+func (noopEventPublisher) PublishBatch(context.Context, []events.Envelope[json.RawMessage]) error {
+	return nil
+}
 
 // ── a full functional port.KeycloakAdmin fake — TrialHardDelete only
 // exercises HardDeleteUsersInRealm; every other method panics if called
@@ -108,10 +123,13 @@ func (f *fakeJobsKeycloakAdmin) DeleteIdp(ctx context.Context, realmName, alias 
 func (f *fakeJobsKeycloakAdmin) ApplyRealmConfig(ctx context.Context, realmName, settingKey string, desiredValue any) error {
 	panic("not implemented")
 }
-func (f *fakeJobsKeycloakAdmin) CreateServiceAccountClient(ctx context.Context, realmName, clientID string) (uuid.UUID, error) {
+func (f *fakeJobsKeycloakAdmin) CreateServiceAccountClient(ctx context.Context, realmName, clientID, jwksURL string) (uuid.UUID, bool, error) {
 	panic("not implemented")
 }
-func (f *fakeJobsKeycloakAdmin) SetClientSecret(ctx context.Context, realmName, clientID, secret string) error {
+func (f *fakeJobsKeycloakAdmin) ClearServiceAccountKeysCache(ctx context.Context, realmName string) error {
+	panic("not implemented")
+}
+func (f *fakeJobsKeycloakAdmin) DeleteServiceAccountClientIfExists(ctx context.Context, realmName, clientID string) error {
 	panic("not implemented")
 }
 
@@ -278,6 +296,32 @@ func TestTrialHardDelete(t *testing.T) {
 	})
 }
 
+// TestTrialHardDelete_ListCandidatesQueryFails drops tenant_realms.disabled_at
+// (named in listHardDeleteCandidates' own WHERE clause) so its tx.Query
+// fails on its own terms — a genuine query failure distinct from every
+// other TrialHardDelete case above, which all exercise a healthy query.
+// Its own container: DROP COLUMN here must never bleed into the shared
+// container TestTrialHardDelete's other subtests reuse above.
+func TestTrialHardDelete_ListCandidatesQueryFails(t *testing.T) {
+	t.Parallel()
+	_, rawPool := setupTestDB(t)
+	sysPool := setupSysPool(t, rawPool)
+	ctx := context.Background()
+
+	_, err := rawPool.Exec(ctx, `ALTER TABLE tenant_realms DROP COLUMN disabled_at CASCADE`)
+	require.NoError(t, err)
+
+	jctx := &jobs.Context{
+		SysPool:        sysPool,
+		Logger:         port.NewSlogStyleLogger(noopLogger{}),
+		BatchLimit:     10,
+		TrialGraceDays: 30,
+	}
+
+	_, err = jobs.TrialHardDelete(ctx, jctx)
+	require.Error(t, err, "the WHERE clause names the now-missing disabled_at column")
+}
+
 func TestProcessedEventsPrune(t *testing.T) {
 	t.Parallel()
 	_, rawPool := setupTestDB(t)
@@ -324,6 +368,31 @@ func TestProcessedEventsPrune(t *testing.T) {
 		assert.Equal(t, jobs.Result{}, res)
 		assertProcessedEventPresent(t, ctx, rawPool, recentEvent, "tenant")
 	})
+
+	t.Run("NoStoreWired_SkipsWithZeroResult", func(t *testing.T) {
+		jctx := &jobs.Context{Logger: port.NewSlogStyleLogger(noopLogger{})}
+		res, err := jobs.ProcessedEventsPrune(ctx, jctx)
+		require.NoError(t, err)
+		assert.Equal(t, jobs.Result{}, res)
+	})
+
+	t.Run("BatchLimitUnset_UsesDefault", func(t *testing.T) {
+		oldEvent := uuid.NewString()
+		insertProcessedEventAt(t, ctx, rawPool, oldEvent, "tenant", time.Now().UTC().Add(-10*24*time.Hour))
+
+		jctx := &jobs.Context{
+			ProcessedEvents:        pgadapter.NewProcessedEventsRepository(sysPool),
+			Logger:                 port.NewSlogStyleLogger(noopLogger{}),
+			ProcessedEventsTTLDays: 7,
+			// BatchLimit deliberately left unset (0) — must fall back to
+			// defaultPruneBatchLimit rather than deleting zero rows.
+		}
+
+		res, err := jobs.ProcessedEventsPrune(ctx, jctx)
+		require.NoError(t, err)
+		assert.Equal(t, jobs.Result{Attempted: 1, Succeeded: 1}, res)
+		assertProcessedEventGone(t, ctx, rawPool, oldEvent, "tenant")
+	})
 }
 
 func insertProcessedEventAt(t testing.TB, ctx context.Context, rawPool *dbseed.Pool, eventID, consumer string, processedAt time.Time) {
@@ -344,4 +413,85 @@ func assertProcessedEventPresent(t testing.TB, ctx context.Context, rawPool *dbs
 	var count int
 	require.NoError(t, rawPool.QueryRow(ctx, `SELECT count(*) FROM processed_events WHERE event_id = $1 AND consumer = $2`, eventID, consumer).Scan(&count))
 	assert.Equal(t, 1, count)
+}
+
+func insertOutboxEvent(t testing.TB, ctx context.Context, rawPool *dbseed.Pool, id uuid.UUID, publishedAt *time.Time) {
+	t.Helper()
+	_, err := rawPool.Exec(ctx, `
+		INSERT INTO outbox_events (id, event_type, payload, tenant_id, published_at)
+		VALUES ($1, 'test.event', '{}', 'test-tenant', $2)`, id, publishedAt)
+	require.NoError(t, err)
+}
+
+func assertOutboxEventGone(t testing.TB, ctx context.Context, rawPool *dbseed.Pool, id uuid.UUID) {
+	t.Helper()
+	var count int
+	require.NoError(t, rawPool.QueryRow(ctx, `SELECT count(*) FROM outbox_events WHERE id = $1`, id).Scan(&count))
+	assert.Equal(t, 0, count)
+}
+
+func assertOutboxEventPresent(t testing.TB, ctx context.Context, rawPool *dbseed.Pool, id uuid.UUID) {
+	t.Helper()
+	var count int
+	require.NoError(t, rawPool.QueryRow(ctx, `SELECT count(*) FROM outbox_events WHERE id = $1`, id).Scan(&count))
+	assert.Equal(t, 1, count)
+}
+
+func TestOutboxPrune(t *testing.T) {
+	t.Parallel()
+	_, rawPool := setupTestDB(t)
+	sysPool := setupSysPool(t, rawPool)
+	ctx := context.Background()
+
+	t.Run("NoRunnerWired_SkipsWithZeroResult", func(t *testing.T) {
+		jctx := &jobs.Context{Logger: port.NewSlogStyleLogger(noopLogger{})}
+		res, err := jobs.OutboxPrune(ctx, jctx)
+		require.NoError(t, err)
+		assert.Equal(t, jobs.Result{}, res)
+	})
+
+	t.Run("PrunesOnlyPublishedRowsPastRetention", func(t *testing.T) {
+		_, err := rawPool.Exec(ctx, `DELETE FROM outbox_events`)
+		require.NoError(t, err)
+
+		oldPublished := uuid.New()
+		recentPublished := uuid.New()
+		neverPublished := uuid.New()
+		oldAt := time.Now().UTC().Add(-10 * 24 * time.Hour)
+		recentAt := time.Now().UTC().Add(-1 * time.Hour)
+		insertOutboxEvent(t, ctx, rawPool, oldPublished, &oldAt)
+		insertOutboxEvent(t, ctx, rawPool, recentPublished, &recentAt)
+		insertOutboxEvent(t, ctx, rawPool, neverPublished, nil)
+
+		runner, err := outbox.NewRunner(outbox.Config{Pool: sysPool, Publisher: noopEventPublisher{}})
+		require.NoError(t, err)
+
+		jctx := &jobs.Context{
+			OutboxRunner:        runner,
+			Logger:              port.NewSlogStyleLogger(noopLogger{}),
+			BatchLimit:          500,
+			OutboxRetentionDays: 7,
+		}
+		res, err := jobs.OutboxPrune(ctx, jctx)
+		require.NoError(t, err)
+		assert.Equal(t, jobs.Result{Attempted: 1, Succeeded: 1}, res)
+
+		assertOutboxEventGone(t, ctx, rawPool, oldPublished)
+		assertOutboxEventPresent(t, ctx, rawPool, recentPublished)
+		assertOutboxEventPresent(t, ctx, rawPool, neverPublished)
+	})
+
+	t.Run("InvalidBatchLimit_PropagatesError", func(t *testing.T) {
+		runner, err := outbox.NewRunner(outbox.Config{Pool: sysPool, Publisher: noopEventPublisher{}})
+		require.NoError(t, err)
+
+		jctx := &jobs.Context{
+			OutboxRunner:        runner,
+			Logger:              port.NewSlogStyleLogger(noopLogger{}),
+			BatchLimit:          0, // PrunePublished requires limit > 0
+			OutboxRetentionDays: 7,
+		}
+		_, err = jobs.OutboxPrune(ctx, jctx)
+		require.Error(t, err)
+	})
 }

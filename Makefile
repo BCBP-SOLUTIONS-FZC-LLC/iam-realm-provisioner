@@ -48,6 +48,8 @@ TEST_INTERNAL_PKGS := ./cmd/... \
                       ./internal/adapter/outbound/keycloak/... \
                       ./internal/adapter/outbound/openbao/... \
                       ./internal/adapter/outbound/orgmembership/... \
+                      ./internal/adapter/outbound/tokenservice/... \
+                      ./internal/adapter/outbound/httpx/... \
                       ./internal/adapter/outbound/s3/... \
                       ./internal/adapter/outbound/metrics/... \
                       ./internal/core/service/... \

@@ -418,6 +418,20 @@ func TestToken_UnreachableAddrWrapsTransportError(t *testing.T) {
 	assert.Contains(t, err.Error(), "kubernetes_login")
 }
 
+// A control character in Addr makes the login URL malformed, so
+// http.NewRequestWithContext itself fails — the one remaining branch in
+// token() distinct from a reachable-but-erroring server.
+func TestToken_MalformedAddrPropagatesNewRequestError(t *testing.T) {
+	c := New(Config{
+		Addr:                "http://exa\x7fmple.com",
+		AuthRole:            "iam-realm-provisioner",
+		KubernetesTokenPath: writeFakeSAToken(t),
+	}, noopLogger{})
+
+	_, err := c.token(context.Background())
+	require.Error(t, err)
+}
+
 func TestKVCalls_GenericErrorStatusPropagates(t *testing.T) {
 	bao := newFakeBao()
 	bao.writeStatus = http.StatusInternalServerError

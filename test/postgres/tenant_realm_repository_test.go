@@ -351,6 +351,75 @@ func TestTenantRealmRepository(t *testing.T) {
 		assert.Equal(t, expired1, limited[0].TenantID, "ORDER BY trial_ends_at ASC — the oldest expiry comes first")
 	})
 
+	t.Run("ListSuspendedPastRetention_FiltersOrdersAndLimits", func(t *testing.T) {
+		t.Parallel()
+		now := time.Now().UTC()
+
+		pastRetention1 := uuid.New()
+		pastRetention2 := uuid.New()
+		withinRetention := uuid.New()
+		operatorSourced := uuid.New()
+		wrongStatus := uuid.New()
+
+		seedSuspendedRealm(t, ctx, rawPool, pastRetention1, domain.SuspensionSourceBillingLapse, now.Add(-40*24*time.Hour))
+		seedSuspendedRealm(t, ctx, rawPool, pastRetention2, domain.SuspensionSourceBillingLapse, now.Add(-35*24*time.Hour))
+		seedSuspendedRealm(t, ctx, rawPool, withinRetention, domain.SuspensionSourceBillingLapse, now.Add(-5*24*time.Hour))
+		seedSuspendedRealm(t, ctx, rawPool, operatorSourced, domain.SuspensionSourceOperator, now.Add(-40*24*time.Hour))
+		seedSuspendedRealm(t, ctx, rawPool, wrongStatus, domain.SuspensionSourceBillingLapse, now.Add(-40*24*time.Hour))
+		_, err := rawPool.Exec(ctx, `UPDATE tenant_realms SET status = 'active' WHERE tenant_id = $1`, wrongStatus)
+		require.NoError(t, err)
+
+		all, err := sysRepo.ListSuspendedPastRetention(ctx, 30, 10)
+		require.NoError(t, err)
+		var gotIDs []uuid.UUID
+		for _, r := range all {
+			gotIDs = append(gotIDs, r.TenantID)
+		}
+		assert.Contains(t, gotIDs, pastRetention1)
+		assert.Contains(t, gotIDs, pastRetention2)
+		assert.NotContains(t, gotIDs, withinRetention, "not yet past the retention window")
+		assert.NotContains(t, gotIDs, operatorSourced, "operator suspensions must never be swept by RP-C3's billing-lapse offboard phase")
+		assert.NotContains(t, gotIDs, wrongStatus, "must be status=suspended")
+
+		limited, err := sysRepo.ListSuspendedPastRetention(ctx, 30, 1)
+		require.NoError(t, err)
+		require.Len(t, limited, 1)
+		assert.Equal(t, pastRetention1, limited[0].TenantID, "ORDER BY disabled_at ASC — the oldest suspension comes first")
+	})
+
+	t.Run("CountsByShard_ConnectivityFailure_WrapsAsDatabaseUnavailable", func(t *testing.T) {
+		t.Parallel()
+		closingPool, err := pgcommon.NewPool(ctx, pgcommon.Config{DSN: connStringForApp(t, rawPool)})
+		require.NoError(t, err)
+		closingPool.Close()
+
+		_, err = pgadapter.NewTenantRealmRepository(closingPool).CountsByShard(ctx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "database unavailable")
+	})
+
+	t.Run("ListExpiredTrials_ConnectivityFailure_WrapsAsDatabaseUnavailable", func(t *testing.T) {
+		t.Parallel()
+		closingPool, err := pgcommon.NewPool(ctx, pgcommon.Config{DSN: connStringForApp(t, rawPool)})
+		require.NoError(t, err)
+		closingPool.Close()
+
+		_, err = pgadapter.NewTenantRealmRepository(closingPool).ListExpiredTrials(ctx, 10)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "database unavailable")
+	})
+
+	t.Run("ListSuspendedPastRetention_ConnectivityFailure_WrapsAsDatabaseUnavailable", func(t *testing.T) {
+		t.Parallel()
+		closingPool, err := pgcommon.NewPool(ctx, pgcommon.Config{DSN: connStringForApp(t, rawPool)})
+		require.NoError(t, err)
+		closingPool.Close()
+
+		_, err = pgadapter.NewTenantRealmRepository(closingPool).ListSuspendedPastRetention(ctx, 30, 10)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "database unavailable")
+	})
+
 	t.Run("ConnectivityFailure_WrapsAsDatabaseUnavailable", func(t *testing.T) {
 		t.Parallel()
 		closingPool, err := pgcommon.NewPool(ctx, pgcommon.Config{
@@ -374,5 +443,17 @@ func seedExpiredTrial(t testing.TB, ctx context.Context, rawPool *dbseed.Pool, t
 	_, err := rawPool.Exec(ctx, `
 		INSERT INTO tenant_realms (tenant_id, realm_name, strategy, status, trial_ends_at)
 		VALUES ($1, 'trial', 'shared', 'active', $2)`, tenantID, trialEndsAt)
+	require.NoError(t, err)
+}
+
+// seedSuspendedRealm inserts a dedicated realm already in status=suspended
+// with the given suspension_source and disabled_at, for
+// ListSuspendedPastRetention's RP-C3 offboard-phase query (§8.8).
+func seedSuspendedRealm(t testing.TB, ctx context.Context, rawPool *dbseed.Pool, tenantID uuid.UUID, source domain.SuspensionSource, disabledAt time.Time) {
+	t.Helper()
+	_, err := rawPool.Exec(ctx, `
+		INSERT INTO tenant_realms (tenant_id, realm_name, strategy, keycloak_shard, status, suspension_source, disabled_at)
+		VALUES ($1, $2, 'dedicated', 'shard-1', 'suspended', $3, $4)`,
+		tenantID, "tenant-"+tenantID.String(), source, disabledAt)
 	require.NoError(t, err)
 }

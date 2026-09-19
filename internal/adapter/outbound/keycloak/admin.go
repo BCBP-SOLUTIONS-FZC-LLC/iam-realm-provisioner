@@ -385,27 +385,35 @@ func (a *Admin) findClientByID(ctx context.Context, tok, realmName, clientID str
 
 // CreateServiceAccountClient idempotently mints a confidential,
 // service-account-enabled client (clientID) in realmName — the
-// platform-automation principal (§2.5, RP-17) — and returns the Keycloak
-// service-account user's sub.
-func (a *Admin) CreateServiceAccountClient(ctx context.Context, realmName, clientID string) (sub uuid.UUID, err error) {
+// platform-automation principal (§2.5, RP-17) — authenticated via
+// Keycloak's client-jwt (private_key_jwt) authenticator against the JWKS
+// at jwksURL (EXT-6), and returns the Keycloak service-account user's sub.
+// created reports whether this call minted a brand new client (true) or
+// resumed one that already existed (false); a resumed client also has its
+// auth config re-applied (ensureClientJWTAuth) so a drifted/stale existing
+// client is corrected rather than silently left on the wrong mechanism.
+func (a *Admin) CreateServiceAccountClient(ctx context.Context, realmName, clientID, jwksURL string) (sub uuid.UUID, created bool, err error) {
 	ctx, done := a.begin(ctx, "create_service_account_client")
 	defer func() { done(err) }()
 
 	tok, err := a.token(ctx)
 	if err != nil {
-		return uuid.Nil, wrapErr("create_service_account_client: token", err)
+		return uuid.Nil, false, wrapErr("create_service_account_client: token", err)
 	}
 
 	existing, err := a.findClientByID(ctx, tok, realmName, clientID)
 	if err != nil {
-		return uuid.Nil, wrapErr("create_service_account_client: get_clients", err)
+		return uuid.Nil, false, wrapErr("create_service_account_client: get_clients", err)
 	}
 
 	var internalID string
 	if existing != nil {
+		// Not a Keycloak-unavailable condition (retrying changes nothing) —
+		// a permanently inconsistent resource state, so a plain error
+		// (-> 500 internal_error) rather than domain.ErrKeycloakUnavailable
+		// (-> 502, which implies retry will help).
 		if existing.ID == nil {
-			return uuid.Nil, domain.NewError(domain.ErrKeycloakUnavailable, "existing service-account client has no internal id").
-				WithDetails(map[string]any{"realm": realmName, "client_id": clientID})
+			return uuid.Nil, false, fmt.Errorf("create_service_account_client: existing client %q in realm %q has no internal id", clientID, realmName)
 		}
 		internalID = *existing.ID
 	} else {
@@ -417,58 +425,133 @@ func (a *Admin) CreateServiceAccountClient(ctx context.Context, realmName, clien
 			DirectAccessGrantsEnabled: gocloak.BoolP(false),
 			ServiceAccountsEnabled:    gocloak.BoolP(true),
 			Enabled:                   gocloak.BoolP(true),
+			ClientAuthenticatorType:   gocloak.StringP("client-jwt"),
+			Attributes: &map[string]string{
+				"use.jwks.url": "true",
+				"jwks.url":     jwksURL,
+			},
 		})
 		if err != nil {
 			if isConflict(err) {
 				// Lost-response retry of our own create — resume by
-				// looking the client back up rather than erroring.
+				// looking the client back up rather than erroring. Treated
+				// like the found-up-front branch above: not "created" by
+				// this call.
 				resumed, findErr := a.findClientByID(ctx, tok, realmName, clientID)
 				if findErr != nil || resumed == nil || resumed.ID == nil {
-					return uuid.Nil, wrapErr("create_service_account_client: resume_after_conflict", err)
+					return uuid.Nil, false, wrapErr("create_service_account_client: resume_after_conflict", err)
 				}
 				internalID = *resumed.ID
 			} else {
-				return uuid.Nil, wrapErr("create_service_account_client", err)
+				return uuid.Nil, false, wrapErr("create_service_account_client", err)
 			}
+		} else {
+			created = true
+		}
+	}
+
+	// A resumed client (either found up front or recovered after our own
+	// lost-response conflict) predates this call and may have drifted from
+	// the expected auth config — re-applied once here rather than at each
+	// of the two resume branches above, so there is a single place this
+	// logic can change. A freshly-created client above already has it.
+	if !created {
+		if err := a.ensureClientJWTAuth(ctx, tok, realmName, internalID, jwksURL); err != nil {
+			return uuid.Nil, false, wrapErr("create_service_account_client: reapply_auth_config", err)
 		}
 	}
 
 	svcUser, err := a.client.GetClientServiceAccount(ctx, tok, realmName, internalID)
 	if err != nil {
-		return uuid.Nil, wrapErr("create_service_account_client: get_service_account", err)
+		return uuid.Nil, false, wrapErr("create_service_account_client: get_service_account", err)
 	}
 	if svcUser == nil || svcUser.ID == nil {
-		return uuid.Nil, domain.NewError(domain.ErrKeycloakUnavailable, "service-account client has no linked user").
-			WithDetails(map[string]any{"realm": realmName, "client_id": clientID})
+		return uuid.Nil, false, fmt.Errorf("create_service_account_client: service-account client %q in realm %q has no linked user", clientID, realmName)
 	}
 	subID, err := uuid.Parse(*svcUser.ID)
 	if err != nil {
-		return uuid.Nil, wrapErr("create_service_account_client: parse_sub", err)
+		return uuid.Nil, false, wrapErr("create_service_account_client: parse_sub", err)
 	}
-	return subID, nil
+	return subID, created, nil
 }
 
-// SetClientSecret sets clientID's secret in realmName to secret — RP-17's
-// apply step (§2.5). secret is a caller-supplied value (Token Service's
-// TS-1 plaintext), never a Keycloak-generated one.
-func (a *Admin) SetClientSecret(ctx context.Context, realmName, clientID, secret string) (err error) {
-	ctx, done := a.begin(ctx, "set_client_secret")
+// ensureClientJWTAuth (re-)applies the client-jwt authenticator and JWKS
+// attributes to an already-existing client found by CreateServiceAccountClient's
+// resume path — CreateClient only sets these once, at creation, so a
+// resumed client whose config had drifted (an out-of-band edit, a stale
+// pre-EXT-6 client) would otherwise silently keep serving on the wrong auth
+// mechanism with no error. Fetches the full representation first and PUTs
+// it back with only the two fields changed: Keycloak's client update
+// replaces the fields supplied, so writing a partial representation risks
+// clobbering unrelated config (name, redirect URIs, ...) this service
+// doesn't own. Skips the write entirely when already correctly configured.
+func (a *Admin) ensureClientJWTAuth(ctx context.Context, tok, realmName, internalID, jwksURL string) error {
+	// gocloak's GetClient always returns a non-nil *Client when err is nil
+	// (verified against the vendored v13.9.0 source), so there is no
+	// full == nil case to guard here.
+	full, err := a.client.GetClient(ctx, tok, realmName, internalID)
+	if err != nil {
+		return fmt.Errorf("get_client: %w", err)
+	}
+	if full.ClientAuthenticatorType != nil && *full.ClientAuthenticatorType == "client-jwt" &&
+		full.Attributes != nil && (*full.Attributes)["use.jwks.url"] == "true" && (*full.Attributes)["jwks.url"] == jwksURL {
+		return nil
+	}
+	full.ClientAuthenticatorType = gocloak.StringP("client-jwt")
+	if full.Attributes == nil {
+		full.Attributes = &map[string]string{}
+	}
+	(*full.Attributes)["use.jwks.url"] = "true"
+	(*full.Attributes)["jwks.url"] = jwksURL
+	if err := a.client.UpdateClient(ctx, tok, realmName, *full); err != nil {
+		return fmt.Errorf("update_client: %w", err)
+	}
+	return nil
+}
+
+// ClearServiceAccountKeysCache evicts Keycloak's cached JWKS keys for
+// realmName (EXT-6, RP-17) — realm-scoped, not client-scoped. Called after
+// every mint/rotate/revoke of a platform-automation credential so Keycloak
+// actually notices the change; Keycloak does not self-refresh a
+// jwks.url client's keys otherwise (verified empirically).
+func (a *Admin) ClearServiceAccountKeysCache(ctx context.Context, realmName string) (err error) {
+	ctx, done := a.begin(ctx, "clear_service_account_keys_cache")
 	defer func() { done(err) }()
 
 	tok, err := a.token(ctx)
 	if err != nil {
-		return wrapErr("set_client_secret: token", err)
+		return wrapErr("clear_service_account_keys_cache: token", err)
+	}
+	if err := a.client.ClearKeysCache(ctx, tok, realmName); err != nil {
+		return wrapErr("clear_service_account_keys_cache", err)
+	}
+	return nil
+}
+
+// DeleteServiceAccountClientIfExists deletes clientID's client in realmName
+// — compensating cleanup for a partial mint failure or a stale client left
+// behind by RP-3 conversion (§2.5, §9.3). Idempotent: deleting an absent
+// client succeeds, mirroring DeleteRealmIfExists.
+func (a *Admin) DeleteServiceAccountClientIfExists(ctx context.Context, realmName, clientID string) (err error) {
+	ctx, done := a.begin(ctx, "delete_service_account_client_if_exists")
+	defer func() { done(err) }()
+
+	tok, err := a.token(ctx)
+	if err != nil {
+		return wrapErr("delete_service_account_client_if_exists: token", err)
 	}
 	existing, err := a.findClientByID(ctx, tok, realmName, clientID)
 	if err != nil {
-		return wrapErr("set_client_secret: get_clients", err)
+		return wrapErr("delete_service_account_client_if_exists: get_clients", err)
 	}
 	if existing == nil || existing.ID == nil {
-		return domain.NewError(domain.ErrKeycloakUnavailable, "service-account client not found").
-			WithDetails(map[string]any{"realm": realmName, "client_id": clientID})
+		return nil
 	}
-	if err := a.client.UpdateClient(ctx, tok, realmName, gocloak.Client{ID: existing.ID, Secret: gocloak.StringP(secret)}); err != nil {
-		return wrapErr("set_client_secret", err)
+	if err := a.client.DeleteClient(ctx, tok, realmName, *existing.ID); err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return wrapErr("delete_service_account_client_if_exists", err)
 	}
 	return nil
 }

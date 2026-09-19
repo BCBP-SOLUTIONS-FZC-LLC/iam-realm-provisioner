@@ -35,8 +35,11 @@ type serviceDeps struct {
 
 func newServiceDeps() *serviceDeps {
 	keycloak := &fakeKeycloakAdmin{
-		CreateServiceAccountClientFn: func(ctx context.Context, realmName, clientID string) (uuid.UUID, error) { return uuid.New(), nil },
-		SetClientSecretFn:            func(ctx context.Context, realmName, clientID, secret string) error { return nil },
+		CreateServiceAccountClientFn: func(ctx context.Context, realmName, clientID, jwksURL string) (uuid.UUID, bool, error) {
+			return uuid.New(), true, nil
+		},
+		ClearServiceAccountKeysCacheFn:       func(ctx context.Context, realmName string) error { return nil },
+		DeleteServiceAccountClientIfExistsFn: func(ctx context.Context, realmName, clientID string) error { return nil },
 	}
 	tokenService := &fakeTokenServiceClient{
 		RegisterPrincipalFn: func(ctx context.Context, tenantID uuid.UUID, req port.RegisterPrincipalRequest) (*port.RegisterPrincipalResult, error) {
@@ -44,6 +47,9 @@ func newServiceDeps() *serviceDeps {
 		},
 		IssueOrRotateCredentialFn: func(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
 			return &port.IssueCredentialResult{Version: 1, Secret: "test-secret", OpenBaoPath: "iam/serviceaccount/test/v1", RecordVersion: 1}, nil
+		},
+		JWKSURLForFn: func(tenantID uuid.UUID) string {
+			return "http://token-service.test/api/v1/internal/tenants/" + tenantID.String() + "/service-accounts/platform-automation/jwks.json"
 		},
 	}
 	return &serviceDeps{
@@ -88,7 +94,7 @@ func (d *serviceDeps) putRealm(r *domain.TenantRealm) uuid.UUID {
 // internal route (RequireSystemRole) requires.
 func sysHeaders() map[string]string {
 	return map[string]string{
-		"x-user-id":      systemPrincipalUserID,
+		"x-user-id":      domain.SystemActorID,
 		"x-tenant-id":    uuid.New().String(),
 		"x-tenant-roles": "iam-system",
 		"Content-Type":   "application/json",

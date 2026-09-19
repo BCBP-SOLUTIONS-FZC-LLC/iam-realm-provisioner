@@ -200,6 +200,55 @@ func TestDocsRoutes_ProductionAuthToken(t *testing.T) {
 	})
 }
 
+// The /swagger/*any route dispatches three ways by path suffix — exercise
+// all three so registerDocsRoutes' routing switch is fully covered, not
+// just the plain-stdSwagger default branch.
+func TestDocsRoutes_SwaggerAssetRouting(t *testing.T) {
+	r := NewRouter(RouterConfig{
+		GinConfig: testGinConfig,
+		Docs:      DocsConfig{Environment: "staging"},
+		Handlers:  newServiceDeps().handler(),
+	}).Handler()
+
+	t.Run("theme css", func(t *testing.T) {
+		rec := doRequest(r, http.MethodGet, "/swagger/index.css", nil, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "text/css; charset=utf-8" {
+			t.Fatalf("expected the branded CSS handler, got Content-Type %q", ct)
+		}
+	})
+	t.Run("initializer js", func(t *testing.T) {
+		rec := doRequest(r, http.MethodGet, "/swagger/swagger-initializer.js", nil, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "application/javascript; charset=utf-8" {
+			t.Fatalf("expected the initializer JS handler, got Content-Type %q", ct)
+		}
+	})
+	t.Run("default falls through to stdSwagger", func(t *testing.T) {
+		rec := doRequest(r, http.MethodGet, "/swagger/doc.json", nil, "")
+		if rec.Code == http.StatusNotFound {
+			t.Fatalf("expected the standard swagger handler to serve doc.json, got 404")
+		}
+	})
+}
+
+func TestDocsRoutes_ProductionNoAuthToken_OpenAccess(t *testing.T) {
+	r := NewRouter(RouterConfig{
+		GinConfig: testGinConfig,
+		Docs:      DocsConfig{Environment: "production", Enabled: true, AuthToken: ""},
+		Handlers:  newServiceDeps().handler(),
+	}).Handler()
+
+	rec := doRequest(r, http.MethodGet, "/asyncapi", nil, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 (no auth token configured means open access), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRouter_UnknownRouteIs404(t *testing.T) {
 	r := newServiceDeps().engine()
 	rec := doRequest(r, http.MethodGet, "/nope", nil, "")

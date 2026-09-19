@@ -79,6 +79,24 @@ func TestTenantRealmRepository_SchemaCorruption(t *testing.T) {
 	})
 }
 
+// TestTenantRealmRepository_ListSuspendedPastRetention_QueryFailure drops
+// suspension_source (named only in this method's own WHERE clause, not the
+// shared SELECT column list) so its tx.Query fails on its own terms,
+// distinct from the whole-pool-closed connectivity case already covered.
+func TestTenantRealmRepository_ListSuspendedPastRetention_QueryFailure(t *testing.T) {
+	t.Parallel()
+	_, rawPool := setupTestDB(t)
+	sysPool := setupSysPool(t, rawPool)
+	ctx := context.Background()
+	sysRepo := pgadapter.NewTenantRealmRepository(sysPool)
+
+	_, err := rawPool.Exec(ctx, `ALTER TABLE tenant_realms DROP COLUMN suspension_source CASCADE`)
+	require.NoError(t, err)
+
+	_, err = sysRepo.ListSuspendedPastRetention(ctx, 30, 10)
+	require.Error(t, err, "the WHERE clause names the now-missing suspension_source column")
+}
+
 // TestReconciliationRepository_SchemaCorruption drops
 // realm_config_reconciliations.attempts (part of ListPending's SELECT list)
 // after seeding a pending row, forcing a genuine Query failure.
@@ -113,6 +131,34 @@ func TestProcessedEventsRepository_SchemaCorruption(t *testing.T) {
 
 	_, err = repo.CleanupExpired(ctx, 24*time.Hour)
 	require.Error(t, err)
+}
+
+// TestProcessedEventsRepository_IsProcessedAndPrune_SchemaCorruption drops
+// processed_events.consumer — referenced by IsProcessed's WHERE clause and
+// by Prune's subquery/DELETE — forcing a genuine Query/Exec failure in
+// both. A separate container/test from the CleanupExpired one above since
+// that one corrupts a different column (processed_at, which neither of
+// these two methods' WHERE/column lists need for IsProcessed, though Prune
+// does also reference it — dropping consumer alone is enough to break both
+// without needing to reason about column drop ordering).
+func TestProcessedEventsRepository_IsProcessedAndPrune_SchemaCorruption(t *testing.T) {
+	t.Parallel()
+	appPool, rawPool := setupTestDB(t)
+	ctx := context.Background()
+	repo := pgadapter.NewProcessedEventsRepository(appPool)
+
+	_, err := rawPool.Exec(ctx, `ALTER TABLE processed_events DROP COLUMN consumer CASCADE`)
+	require.NoError(t, err)
+
+	t.Run("IsProcessed_QueryFailure", func(t *testing.T) {
+		_, err := repo.IsProcessed(ctx, domain.ConsumerMembership, "evt-1")
+		require.Error(t, err)
+	})
+
+	t.Run("Prune_ExecFailure", func(t *testing.T) {
+		_, err := repo.Prune(ctx, 90, 100)
+		require.Error(t, err)
+	})
 }
 
 // TestIdempotencyRepository_SchemaCorruption exercises two distinct Begin
@@ -227,4 +273,86 @@ func TestIdpValidationRepository_SchemaCorruption(t *testing.T) {
 
 	_, err = repo.LatestForAlias(tctx, tenantID, "corrupt-alias")
 	require.Error(t, err, "both the SELECT list and the ORDER BY name the now-missing validated_at column")
+}
+
+// TestIdpValidationRepository_Insert_SchemaCorruption drops
+// keycloak_idp_config_validations.outcome — named directly in Insert's own
+// INSERT column list — forcing a genuine Exec failure. A separate test
+// function (rather than extending the one above) because Insert's INSERT
+// list never references validated_at, so that corruption alone would never
+// exercise this branch.
+func TestIdpValidationRepository_Insert_SchemaCorruption(t *testing.T) {
+	t.Parallel()
+	_, rawPool := setupTestDB(t)
+	ctx := context.Background()
+	repo := pgadapter.NewIdpValidationRepository(setupSysPool(t, rawPool))
+
+	_, err := rawPool.Exec(ctx, `ALTER TABLE keycloak_idp_config_validations DROP COLUMN outcome CASCADE`)
+	require.NoError(t, err)
+
+	err = repo.Insert(ctx, &domain.IdpConfigValidation{
+		TenantID:         uuid.New(),
+		IdpAlias:         "corrupt-alias",
+		ValidatorVersion: 1,
+		Outcome:          domain.ValidationOutcomePass,
+		Checks:           map[string]string{"sso_region": "pass"},
+		Acknowledgements: []domain.IdpValidationAck{},
+	})
+	require.Error(t, err, "Insert's own INSERT column list names the now-missing outcome column")
+}
+
+// TestIdempotencyRepository_Begin_SchemaCorruption drops
+// provisioning_operations.operation — named in Begin's own INSERT column
+// list — forcing a genuine query failure distinct from the pgx.ErrNoRows
+// case the rest of Begin's tests already exercise.
+func TestIdempotencyRepository_Begin_SchemaCorruption(t *testing.T) {
+	t.Parallel()
+	appPool, rawPool := setupTestDB(t)
+	ctx := context.Background()
+	repo := pgadapter.NewIdempotencyRepository(appPool)
+	tenantID := uuid.New()
+	tctx := withTenant(ctx, tenantID)
+
+	_, err := rawPool.Exec(ctx, `ALTER TABLE provisioning_operations DROP COLUMN operation CASCADE`)
+	require.NoError(t, err)
+
+	_, _, err = repo.Begin(tctx, "corrupt-key", tenantID, domain.OpProvisionTrial)
+	require.Error(t, err, "Begin's own INSERT column list names the now-missing operation column")
+}
+
+// TestReconciliationRepository_ListPending_SchemaCorruption drops
+// realm_config_reconciliations.setting_key — named in ListPending's SELECT
+// list — forcing tx.Query itself to fail.
+func TestReconciliationRepository_ListPending_SchemaCorruption(t *testing.T) {
+	t.Parallel()
+	appPool, rawPool := setupTestDB(t)
+	ctx := context.Background()
+	repo := pgadapter.NewReconciliationRepository(appPool)
+	tenantID := uuid.New()
+	tctx := withTenant(ctx, tenantID)
+
+	_, err := rawPool.Exec(ctx, `ALTER TABLE realm_config_reconciliations DROP COLUMN setting_key CASCADE`)
+	require.NoError(t, err)
+
+	_, err = repo.ListPending(tctx, 10)
+	require.Error(t, err, "ListPending's own SELECT list names the now-missing setting_key column")
+}
+
+// TestGaugeRepository_ActiveRealmsByStrategy_QueryFailure drops
+// tenant_realms.status — named in groupedCounts' underlying
+// activeRealmsByStrategySQL — forcing tx.Query itself to fail. Distinct
+// from the existing GroupedCounts_ConnectivityFailure test, which exercises
+// withPool's own connection-acquisition error rather than a query that
+// reaches Postgres and fails there.
+func TestGaugeRepository_ActiveRealmsByStrategy_QueryFailure(t *testing.T) {
+	t.Parallel()
+	_, rawPool := setupTestDB(t)
+	ctx := context.Background()
+	gauges := pgadapter.NewGaugeRepository(setupSysPool(t, rawPool))
+
+	_, err := rawPool.Exec(ctx, `ALTER TABLE tenant_realms DROP COLUMN status CASCADE`)
+	require.NoError(t, err)
+
+	_, err = gauges.ActiveRealmsByStrategy(ctx)
+	require.Error(t, err, "activeRealmsByStrategySQL names the now-missing status column")
 }

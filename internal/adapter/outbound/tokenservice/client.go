@@ -1,9 +1,11 @@
 // Package tokenservice implements port.TokenServiceClient — this
 // service's outbound HTTP dependency on the Token Service's
 // credential-lifecycle API (TS-1/TS-3/TS-4, §2.5, RP-17/RP-18). RP mints
-// the Keycloak client and applies the secret Token Service returns;
-// Token Service generates and custodies the secret material and never
-// touches Keycloak (RP-INV-1).
+// the Keycloak client (client-jwt/JWKS auth, EXT-6) and clears its cached
+// JWKS keys on rotate/revoke; Token Service generates and custodies the
+// credential material and serves its public half directly to Keycloak as
+// a JWKS — it never touches Keycloak itself, and RP never applies a secret
+// to it (RP-INV-1).
 package tokenservice
 
 import (
@@ -22,11 +24,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 )
 
-// systemPrincipalUserID is the reserved iam-system caller identity Token
-// Service's GUCBridgeMiddleware requires as x-user-id on every
-// /api/v1/internal/* route (mirrors orgmembership's identical constant).
-const systemPrincipalUserID = "00000000-0000-0000-0000-0000000000a1"
-
 // Client implements port.TokenServiceClient.
 type Client struct {
 	baseURL string
@@ -40,6 +37,13 @@ var _ port.TokenServiceClient = (*Client)(nil)
 // baseURL.
 func New(baseURL string, log port.Logger) *Client {
 	return &Client{baseURL: baseURL, http: httpx.NewClient(5 * time.Second), log: log}
+}
+
+// JWKSURLFor returns the JWKS URL for tenantID's platform-automation
+// principal (EXT-6, §2.5) — pure string construction from this client's own
+// baseURL, no network call.
+func (c *Client) JWKSURLFor(tenantID uuid.UUID) string {
+	return fmt.Sprintf("%s/api/v1/internal/tenants/%s/service-accounts/platform-automation/jwks.json", c.baseURL, tenantID)
 }
 
 func (c *Client) newRequest(ctx context.Context, method, url string, body any) (*http.Request, error) {
@@ -62,7 +66,7 @@ func (c *Client) newRequest(ctx context.Context, method, url string, body any) (
 }
 
 func (c *Client) do(req *http.Request, tenantID uuid.UUID) (*http.Response, error) {
-	req.Header.Set("x-user-id", systemPrincipalUserID)
+	req.Header.Set("x-user-id", domain.SystemActorID)
 	req.Header.Set("x-tenant-id", tenantID.String())
 
 	resp, err := c.http.Do(req)
@@ -70,6 +74,23 @@ func (c *Client) do(req *http.Request, tenantID uuid.UUID) (*http.Response, erro
 		return nil, domain.NewError(domain.ErrTokenServiceUnavailable, "token service unavailable").WithDetails(map[string]any{"error": err.Error()})
 	}
 	return resp, nil
+}
+
+// classifyStatus maps a non-2xx TS response status to the shared error
+// every RegisterPrincipal/IssueOrRotateCredential/ReadPrincipal apply
+// identically: >=500 as the retryable ErrTokenServiceUnavailable, any
+// other >=300 as a plain unexpected-status error naming endpoint (e.g.
+// "TS-4"). Returns nil for a 2xx status. Callers that need to special-case
+// a specific status first (IssueOrRotateCredential's 409) check that before
+// falling through to this.
+func classifyStatus(status int, endpoint string) error {
+	if status >= 500 {
+		return domain.NewError(domain.ErrTokenServiceUnavailable, "token service unavailable").WithDetails(map[string]any{"status": status})
+	}
+	if status >= 300 {
+		return fmt.Errorf("tokenservice: unexpected status %d from %s", status, endpoint)
+	}
+	return nil
 }
 
 type registerPrincipalRequestBody struct {
@@ -96,17 +117,14 @@ func (c *Client) RegisterPrincipal(ctx context.Context, tenantID uuid.UUID, req 
 		return nil, err
 	}
 
-	resp, err := c.do(httpReq, tenantID)
+	resp, err := c.do(httpReq, tenantID) //nolint:bodyclose // closed via the shared httpx.CloseBody helper below, which the linter's cross-package analysis doesn't trace
 	if err != nil {
 		return nil, err
 	}
-	defer closeBody(c.log, resp.Body)
+	defer httpx.CloseBody(c.log, resp.Body)
 
-	if resp.StatusCode >= 500 {
-		return nil, domain.NewError(domain.ErrTokenServiceUnavailable, "token service unavailable").WithDetails(map[string]any{"status": resp.StatusCode})
-	}
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("tokenservice: unexpected status %d from TS-4", resp.StatusCode)
+	if err := classifyStatus(resp.StatusCode, "TS-4"); err != nil {
+		return nil, err
 	}
 
 	var body principalResponseBody
@@ -123,6 +141,14 @@ type issueOrRotateRequestBody struct {
 	OverlapSeconds *int   `json:"overlap_seconds,omitempty"`
 }
 
+// errorResponseBody is the subset of platform-gincommon's flat
+// ErrorResponse wire shape this client needs to disambiguate a 409 — see
+// the Token Service LLD §17 (`rotation_in_flight` vs `optimistic_lock_conflict`
+// vs the additive `credential_replay_revoked`, all 409).
+type errorResponseBody struct {
+	Error string `json:"error"`
+}
+
 type issueOrRotateResponseBody struct {
 	Version        int     `json:"version"`
 	Secret         string  `json:"secret"`
@@ -133,9 +159,11 @@ type issueOrRotateResponseBody struct {
 
 // IssueOrRotateCredential calls TS-1
 // POST /api/v1/internal/tenants/:id/service-accounts/:principal_id/credentials.
-// A 409 is surfaced as domain.ErrServiceAccountRotationInFlight or
-// domain.ErrOptimisticLockConflict (TS-1's own two 409 causes) rather than
-// a generic error, so callers can decide retry-vs-fail.
+// A 409 is surfaced as domain.ErrOptimisticLockConflict when TS-1's response
+// body names that cause explicitly, or domain.ErrServiceAccountRotationInFlight
+// otherwise (TS-1's `rotation_in_flight` cause, and the safe default for any
+// other/unparseable 409 body) — so callers can decide retry-vs-fail using
+// the actual upstream cause rather than always assuming a rotation race.
 func (c *Client) IssueOrRotateCredential(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
 	url := fmt.Sprintf("%s/api/v1/internal/tenants/%s/service-accounts/%s/credentials", c.baseURL, tenantID, principalID)
 	httpReq, err := c.newRequest(ctx, http.MethodPost, url, issueOrRotateRequestBody{
@@ -145,21 +173,24 @@ func (c *Client) IssueOrRotateCredential(ctx context.Context, tenantID, principa
 		return nil, err
 	}
 
-	resp, err := c.do(httpReq, tenantID)
+	resp, err := c.do(httpReq, tenantID) //nolint:bodyclose // closed via the shared httpx.CloseBody helper below, which the linter's cross-package analysis doesn't trace
 	if err != nil {
 		return nil, err
 	}
-	defer closeBody(c.log, resp.Body)
+	defer httpx.CloseBody(c.log, resp.Body)
 
 	if resp.StatusCode == http.StatusConflict {
-		return nil, domain.NewError(domain.ErrServiceAccountRotationInFlight, "token service credential issue/rotate conflict").
-			WithDetails(map[string]any{"tenant_id": tenantID, "principal_id": principalID})
+		var errBody errorResponseBody
+		_ = json.NewDecoder(resp.Body).Decode(&errBody) //nolint:errcheck // best-effort; falls back to the safe default below on a malformed/empty body
+		code := domain.ErrServiceAccountRotationInFlight
+		if errBody.Error == string(domain.ErrOptimisticLockConflict) {
+			code = domain.ErrOptimisticLockConflict
+		}
+		return nil, domain.NewError(code, "token service credential issue/rotate conflict").
+			WithDetails(map[string]any{"tenant_id": tenantID, "principal_id": principalID, "upstream_error": errBody.Error})
 	}
-	if resp.StatusCode >= 500 {
-		return nil, domain.NewError(domain.ErrTokenServiceUnavailable, "token service unavailable").WithDetails(map[string]any{"status": resp.StatusCode})
-	}
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("tokenservice: unexpected status %d from TS-1", resp.StatusCode)
+	if err := classifyStatus(resp.StatusCode, "TS-1"); err != nil {
+		return nil, err
 	}
 
 	var body issueOrRotateResponseBody
@@ -208,17 +239,14 @@ func (c *Client) ReadPrincipal(ctx context.Context, tenantID, principalID uuid.U
 		return nil, err
 	}
 
-	resp, err := c.do(httpReq, tenantID)
+	resp, err := c.do(httpReq, tenantID) //nolint:bodyclose // closed via the shared httpx.CloseBody helper below, which the linter's cross-package analysis doesn't trace
 	if err != nil {
 		return nil, err
 	}
-	defer closeBody(c.log, resp.Body)
+	defer httpx.CloseBody(c.log, resp.Body)
 
-	if resp.StatusCode >= 500 {
-		return nil, domain.NewError(domain.ErrTokenServiceUnavailable, "token service unavailable").WithDetails(map[string]any{"status": resp.StatusCode})
-	}
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("tokenservice: unexpected status %d from TS-3", resp.StatusCode)
+	if err := classifyStatus(resp.StatusCode, "TS-3"); err != nil {
+		return nil, err
 	}
 
 	var body readPrincipalResponseBody
@@ -247,12 +275,4 @@ func (c *Client) ReadPrincipal(ctx context.Context, tenantID, principalID uuid.U
 		PrincipalID: body.PrincipalID, TenantID: body.TenantID, KeycloakClientID: body.KeycloakClientID,
 		PrincipalType: body.PrincipalType, Status: body.Status, RecordVersion: body.RecordVersion, Credentials: creds,
 	}, nil
-}
-
-// closeBody closes body, logging (not propagating) a failure — mirrors
-// orgmembership's identical helper.
-func closeBody(log port.Logger, body io.Closer) {
-	if err := body.Close(); err != nil {
-		log.Warn("tokenservice: close response body failed", map[string]any{"error": err.Error()})
-	}
 }
