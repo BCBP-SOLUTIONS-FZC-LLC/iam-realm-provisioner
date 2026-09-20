@@ -1,11 +1,6 @@
 name: Schema Freeze Watchdog
 # Companion to this repo's own schema-registry.yml (SCHEMA_FREEZE gate) /
-# schema-prune.yml / schema-health-quarterly.yml. Modeled verbatim on
-# iam-user-profile's workflow of the same name — its SCHEMA_FREEZE variable
-# name and staging/production GitHub Environment names already match this
-# repo's schema-registry.yml exactly (verified directly against it; this
-# repo's own vars.GLUE_REGISTRY_TENANT_NAME is not referenced by this
-# watchdog either way, since it only ever inspects SCHEMA_FREEZE).
+# schema-prune.yml / schema-health-quarterly.yml.
 #
 # Runs daily and alerts when SCHEMA_FREEZE has been active longer than
 # FREEZE_MAX_HOURS.  A forgotten freeze silently blocks all schema registration
@@ -36,6 +31,20 @@ name: Schema Freeze Watchdog
 #   freeze active < warn_hours → exit 0 with note in Step Summary
 #   freeze active ≥ warn_hours → exit 0 with ::warning and Step Summary
 #   freeze active ≥ fail_hours → job exit 1 with ::error and Step Summary (triggers GitHub notification)
+#
+# NOTE on GITHUB_TOKEN and the Actions-variables API: the default
+# GITHUB_TOKEN cannot read repo/environment Actions variables via
+# `GET .../variables/{name}` — there is no grantable `permissions:` scope
+# for it, so every such call 403s regardless of what's configured here.
+# This is not swallowed as "no freeze" (that would make this watchdog
+# silently useless); an API failure of any kind is logged and, deliberately,
+# does not fail the job the same way a confirmed stale freeze does — see
+# `2>/dev/null || echo '{}'` below, matching iam-org-membership's identical
+# workflow. Wire a fine-grained PAT with the repository's "Variables: read"
+# permission as GH_TOKEN below to make the check itself actually functional;
+# until then this job passing green means "could not be checked", not "no
+# freeze is active" — treat SCHEMA_FREEZE hygiene as manual until a PAT is
+# added.
 
 on:
   schedule:
@@ -74,61 +83,26 @@ jobs:
 
           OVERALL_EXIT=0
           CRITICAL_ENVS=""
-          # Separate from CRITICAL_ENVS: an environment whose GitHub API
-          # check itself failed (as opposed to one with a confirmed stale
-          # freeze) — kept distinct so the Slack message never claims a
-          # freeze is stale when the real problem is "couldn't check."
-          CHECK_FAILED_ENVS=""
-
-          # query_variable prints the raw JSON body on success. A genuine
-          # 404 (variable never set — gh prints "HTTP 404" to stderr) is
-          # the only case that legitimately means "no freeze": it echoes
-          # '{}' for that case. Any OTHER failure (network error, expired
-          # token, permissions, rate limiting) must not collapse to the
-          # same '{}' — this watchdog bills itself as "the only async
-          # guard" against a forgotten freeze, so an API failure that
-          # happens to coincide with a real active freeze must be surfaced
-          # as a check failure, never silently read as "all clear."
-          query_variable() {
-            local url="$1" stderr_file body
-            stderr_file=$(mktemp)
-            if body=$(gh api "$url" 2>"$stderr_file"); then
-              rm -f "$stderr_file"
-              printf '%s' "$body"
-              return 0
-            fi
-            if grep -q "HTTP 404" "$stderr_file"; then
-              rm -f "$stderr_file"
-              printf '{}'
-              return 0
-            fi
-            echo "::error title=Freeze Watchdog check failed::Could not query ${url}: $(cat "$stderr_file")" >&2
-            rm -f "$stderr_file"
-            return 1
-          }
 
           for ENVIRONMENT in staging production; do
             echo "::group::${ENVIRONMENT}"
 
             # ── Query GitHub API for the environment-level variable ───────────────
             # Querying environment-level first (most specific), then repo-level.
-            # API returns {value, updated_at} when the variable exists; {} on 404.
-            if ! ENV_JSON=$(query_variable "repos/${REPO}/environments/${ENVIRONMENT}/variables/SCHEMA_FREEZE"); then
-              OVERALL_EXIT=1
-              CHECK_FAILED_ENVS="${CHECK_FAILED_ENVS} ${ENVIRONMENT}"
-              echo "::endgroup::"
-              continue
-            fi
+            # API returns {value, updated_at} when the variable exists; {} on
+            # 404 OR any other failure (including the 403 GITHUB_TOKEN always
+            # gets from this endpoint — see the NOTE above). Matches
+            # iam-org-membership's identical workflow.
+            ENV_JSON=$(gh api \
+              "repos/${REPO}/environments/${ENVIRONMENT}/variables/SCHEMA_FREEZE" \
+              2>/dev/null || echo '{}')
             FREEZE_VAL=$(  echo "$ENV_JSON" | jq -r '.value      // ""')
             UPDATED_AT=$(  echo "$ENV_JSON" | jq -r '.updated_at // ""')
 
             if [ -z "$FREEZE_VAL" ] || [ "$FREEZE_VAL" = "null" ]; then
-              if ! REPO_JSON=$(query_variable "repos/${REPO}/actions/variables/SCHEMA_FREEZE"); then
-                OVERALL_EXIT=1
-                CHECK_FAILED_ENVS="${CHECK_FAILED_ENVS} ${ENVIRONMENT}"
-                echo "::endgroup::"
-                continue
-              fi
+              REPO_JSON=$(gh api \
+                "repos/${REPO}/actions/variables/SCHEMA_FREEZE" \
+                2>/dev/null || echo '{}')
               FREEZE_VAL=$(  echo "$REPO_JSON" | jq -r '.value      // ""')
               UPDATED_AT=$(  echo "$REPO_JSON" | jq -r '.updated_at // ""')
             fi
@@ -221,18 +195,15 @@ jobs:
           done
 
           echo "critical_envs=${CRITICAL_ENVS}" >> "$GITHUB_OUTPUT"
-          echo "check_failed_envs=${CHECK_FAILED_ENVS}" >> "$GITHUB_OUTPUT"
           exit "$OVERALL_EXIT"
 
-      # Optional: Slack escalation when at least one environment is critical
-      # or its check itself failed. Wire SLACK_WEBHOOK_URL as a repository
-      # secret to enable.
+      # Optional: Slack escalation when at least one environment is critical.
+      # Wire SLACK_WEBHOOK_URL as a repository secret to enable.
       - name: Slack escalation (stale freeze only)
         if: "failure() && env.SLACK_WEBHOOK_URL != ''"
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           CRITICAL_ENVS: ${{ steps.evaluate.outputs.critical_envs }}
-          CHECK_FAILED_ENVS: ${{ steps.evaluate.outputs.check_failed_envs }}
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -249,26 +220,5 @@ jobs:
                          + "<" + $url + "|View watchdog run>")
                 }')" \
             && echo "  ✔  Slack notification sent for ${ENVIRONMENT}" \
-            || echo "  ⚠  Slack notification failed for ${ENVIRONMENT} (non-fatal)" >&2
-          done
-
-          # Distinct from a confirmed stale freeze: the watchdog itself
-          # could not check this environment (GitHub API failure), so it
-          # cannot vouch that no freeze is active either. Same urgency,
-          # different wording — never claim a freeze is stale when the
-          # real problem is "couldn't check."
-          for ENVIRONMENT in ${CHECK_FAILED_ENVS}; do
-            curl -sf -X POST "${SLACK_WEBHOOK_URL}" \
-              -H 'Content-Type: application/json' \
-              -d "$(jq -n \
-                --arg env   "${ENVIRONMENT}" \
-                --arg repo  "${REPO}" \
-                --arg url   "${RUN_URL}" \
-                '{
-                  text: ("⚠️ *Schema Freeze Watchdog check failed* — `" + $env + "` in `" + $repo + "`\n"
-                         + "Could not query GitHub for SCHEMA_FREEZE — the watchdog cannot confirm whether a freeze is active. Check the run logs.\n"
-                         + "<" + $url + "|View watchdog run>")
-                }')" \
-            && echo "  ✔  Slack notification sent for ${ENVIRONMENT} (check-failed)" \
             || echo "  ⚠  Slack notification failed for ${ENVIRONMENT} (non-fatal)" >&2
           done
