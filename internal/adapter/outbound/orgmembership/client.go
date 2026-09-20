@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -20,10 +19,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 )
-
-// systemPrincipalUserID is the reserved iam-system caller identity RP→O&M
-// calls use (§18.3: x-user-id=…00a1).
-const systemPrincipalUserID = "00000000-0000-0000-0000-0000000000a1"
 
 // mfaRequiringRoles mirrors O&M's tenant-role vocabulary (§8.6) — a user
 // holding either still requires MFA regardless of department level.
@@ -67,15 +62,15 @@ func (c *Client) HasResidualMFARequirement(ctx context.Context, tenantID, userID
 	if err != nil {
 		return false, err
 	}
-	req.Header.Set("x-user-id", systemPrincipalUserID)
+	req.Header.Set("x-user-id", domain.SystemActorID)
 	req.Header.Set("x-tenant-id", tenantID.String())
 	req.Header.Set("x-tenant-roles", "iam-system")
 
-	resp, err := c.http.Do(req)
+	resp, err := c.http.Do(req) //nolint:bodyclose // closed via the shared httpx.CloseBody helper below, which the linter's cross-package analysis doesn't trace
 	if err != nil {
 		return false, domain.NewError(domain.ErrOrgMembershipUnavailable, "org membership unavailable").WithDetails(map[string]any{"error": err.Error()})
 	}
-	defer closeBody(c.log, resp.Body)
+	defer httpx.CloseBody(c.log, resp.Body)
 
 	if resp.StatusCode == http.StatusNotFound {
 		// No active membership at all — no residual requirement.
@@ -131,7 +126,7 @@ func (c *Client) ListLapsedSubscriptions(ctx context.Context) ([]port.LapsedSubs
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("x-user-id", systemPrincipalUserID)
+	req.Header.Set("x-user-id", domain.SystemActorID)
 	req.Header.Set("x-tenant-roles", "iam-system")
 	// O&M's shared gincommon auth middleware (RequireAuth) requires
 	// x-tenant-id to be present on every /api/v1 route, including this one
@@ -142,11 +137,11 @@ func (c *Client) ListLapsedSubscriptions(ctx context.Context) ([]port.LapsedSubs
 	// check without claiming any real tenant scope.
 	req.Header.Set("x-tenant-id", uuid.Nil.String())
 
-	resp, err := c.http.Do(req)
+	resp, err := c.http.Do(req) //nolint:bodyclose // closed via the shared httpx.CloseBody helper below, which the linter's cross-package analysis doesn't trace
 	if err != nil {
 		return nil, domain.NewError(domain.ErrOrgMembershipUnavailable, "org membership unavailable").WithDetails(map[string]any{"error": err.Error()})
 	}
-	defer closeBody(c.log, resp.Body)
+	defer httpx.CloseBody(c.log, resp.Body)
 
 	if resp.StatusCode >= 500 {
 		return nil, domain.NewError(domain.ErrOrgMembershipUnavailable, "org membership unavailable").WithDetails(map[string]any{"status": resp.StatusCode})
@@ -169,13 +164,4 @@ func (c *Client) ListLapsedSubscriptions(ctx context.Context) ([]port.LapsedSubs
 		}
 	}
 	return out, nil
-}
-
-// closeBody closes body, logging (not propagating) a failure — by the time
-// this runs the response has already been fully handled, so there is no
-// remaining action a Close error could change.
-func closeBody(log port.Logger, body io.Closer) {
-	if err := body.Close(); err != nil {
-		log.Warn("orgmembership: close response body failed", map[string]any{"error": err.Error()})
-	}
 }

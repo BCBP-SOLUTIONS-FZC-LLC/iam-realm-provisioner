@@ -242,6 +242,58 @@ func TestSubscriptionLapse_Suspend_KeycloakFailure(t *testing.T) {
 	assert.GreaterOrEqual(t, logger.warnCalls, 1)
 }
 
+// A DB failure inside the local commit (after DisableRealm already
+// succeeded) must mark the idempotency key failed, same as a Keycloak-side
+// failure — Keycloak-effect-first (§9.1) means a committed row always
+// reflects real Keycloak state, so a local-commit failure here must not be
+// silently swallowed.
+func TestSubscriptionLapse_Suspend_UpdateFails_MarksIdempotencyFailed(t *testing.T) {
+	jctx, kc, realms, idem, pub, _ := newTestContext()
+	tenantID := uuid.New()
+	lapses := &mockSubscriptionLapseReader{
+		ListLapsedSubscriptionsFn: func(ctx context.Context) ([]port.LapsedSubscription, error) {
+			return []port.LapsedSubscription{newLapsed(tenantID, "dedicated")}, nil
+		},
+	}
+	jctx.SubscriptionLapses = lapses
+	row := newActiveDedicatedRealm(tenantID, "tenant-x")
+	realms.FindByTenantIDFn = func(ctx context.Context, tid uuid.UUID) (*domain.TenantRealm, error) { return row, nil }
+	kc.DisableRealmFn = func(ctx context.Context, realmName string) error { return nil }
+	realms.UpdateFn = func(ctx context.Context, r *domain.TenantRealm) error { return errors.New("db down") }
+	noOffboardCandidates(jctx)
+
+	res, err := SubscriptionLapse(context.Background(), jctx)
+	require.NoError(t, err)
+	assert.Equal(t, Result{Attempted: 1, Failed: 1}, res)
+	assert.Empty(t, pub.events)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["lapse-suspend:"+tenantID.String()].Status)
+}
+
+// When the TxRunner wires no event publisher into ctx, the local commit
+// still lands and the tenant still counts as succeeded — just with no
+// TenantSuspended event enqueued.
+func TestSubscriptionLapse_Suspend_NoEventPublisherInContext_StillCommitsLocally(t *testing.T) {
+	jctx, kc, realms, _, pub, _ := newTestContext()
+	jctx.TxRunner = &mockTxRunner{pub: pub, SkipPublisher: true}
+	tenantID := uuid.New()
+	lapses := &mockSubscriptionLapseReader{
+		ListLapsedSubscriptionsFn: func(ctx context.Context) ([]port.LapsedSubscription, error) {
+			return []port.LapsedSubscription{newLapsed(tenantID, "dedicated")}, nil
+		},
+	}
+	jctx.SubscriptionLapses = lapses
+	row := newActiveDedicatedRealm(tenantID, "tenant-x")
+	realms.FindByTenantIDFn = func(ctx context.Context, tid uuid.UUID) (*domain.TenantRealm, error) { return row, nil }
+	kc.DisableRealmFn = func(ctx context.Context, realmName string) error { return nil }
+	realms.UpdateFn = func(ctx context.Context, r *domain.TenantRealm) error { return nil }
+	noOffboardCandidates(jctx)
+
+	res, err := SubscriptionLapse(context.Background(), jctx)
+	require.NoError(t, err)
+	assert.Equal(t, Result{Attempted: 1, Succeeded: 1}, res)
+	assert.Empty(t, pub.events, "no event publisher in context means no event, but the tenant still succeeds")
+}
+
 // TestSubscriptionLapse_Suspend_RetriedAfterPriorDayFailure pins the fix for
 // a real bug: a tenant still returned by O&M's lapse list on a later day
 // must actually be retried, not permanently skipped because a prior run's
@@ -495,6 +547,29 @@ func TestSubscriptionLapse_Offboard_HappyPath_CallOrderAndEvent(t *testing.T) {
 	assert.Contains(t, idem.rows, "offboard:"+tenantID.String())
 }
 
+// When the TxRunner wires no event publisher into ctx, the local commit
+// still lands and the tenant still counts as succeeded — just with no
+// TenantOffboarded event enqueued.
+func TestSubscriptionLapse_Offboard_NoEventPublisherInContext_StillCommitsLocally(t *testing.T) {
+	jctx, kc, realms, _, pub, _ := newTestContext()
+	jctx.SubscriptionLapses = nil
+	jctx.TxRunner = &mockTxRunner{pub: pub, SkipPublisher: true}
+	tenantID := uuid.New()
+	row := newSuspendedForOffboard(tenantID, "tenant-x")
+	realms.ListSuspendedPastRetentionFn = func(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error) {
+		return []*domain.TenantRealm{row}, nil
+	}
+	kc.ExportRealmFn = func(ctx context.Context, realmName string) ([]byte, error) { return []byte("x"), nil }
+	jctx.ObjectStore = &mockObjectStore{PutRealmExportFn: func(ctx context.Context, key string, data []byte) error { return nil }}
+	kc.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error { return nil }
+	realms.UpdateFn = func(ctx context.Context, realm *domain.TenantRealm) error { return nil }
+
+	res, err := SubscriptionLapse(context.Background(), jctx)
+	require.NoError(t, err)
+	assert.Equal(t, Result{Attempted: 1, Succeeded: 1}, res)
+	assert.Empty(t, pub.events, "no event publisher in context means no event, but the tenant still succeeds")
+}
+
 func TestSubscriptionLapse_Offboard_ExportFails(t *testing.T) {
 	jctx, kc, realms, idem, pub, _ := newTestContext()
 	jctx.SubscriptionLapses = nil
@@ -573,6 +648,34 @@ func TestSubscriptionLapse_Offboard_DeleteRealmIfExistsFails(t *testing.T) {
 	assert.Empty(t, pub.events)
 	assert.Equal(t, domain.OpStatusFailed, idem.rows["offboard:"+tenantID.String()].Status)
 	assert.Equal(t, beforeSuccess+1, testutil.ToFloat64(metrics.RealmExportTotal.WithLabelValues("success")), "export+put succeeded before the delete failure")
+}
+
+// A DB failure inside the local commit (after export+delete already
+// succeeded) must mark the idempotency key failed — the realm is already
+// gone from Keycloak at this point (RP-EVT-4: export-then-delete already
+// happened), so this is a "local row now lags reality" failure mode, not a
+// prevented mutation, but it must still be surfaced as Failed, not silently
+// counted as Succeeded.
+func TestSubscriptionLapse_Offboard_UpdateFails_MarksIdempotencyFailed(t *testing.T) {
+	jctx, kc, realms, idem, pub, _ := newTestContext()
+	jctx.SubscriptionLapses = nil
+	tenantID := uuid.New()
+	row := newSuspendedForOffboard(tenantID, "tenant-x")
+	realms.ListSuspendedPastRetentionFn = func(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error) {
+		return []*domain.TenantRealm{row}, nil
+	}
+	kc.ExportRealmFn = func(ctx context.Context, realmName string) ([]byte, error) { return []byte("x"), nil }
+	jctx.ObjectStore = &mockObjectStore{
+		PutRealmExportFn: func(ctx context.Context, key string, data []byte) error { return nil },
+	}
+	kc.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error { return nil }
+	realms.UpdateFn = func(ctx context.Context, r *domain.TenantRealm) error { return errors.New("db down") }
+
+	res, err := SubscriptionLapse(context.Background(), jctx)
+	require.NoError(t, err)
+	assert.Equal(t, Result{Attempted: 1, Failed: 1}, res)
+	assert.Empty(t, pub.events)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["offboard:"+tenantID.String()].Status)
 }
 
 func TestSubscriptionLapse_Offboard_IdempotentReplay(t *testing.T) {

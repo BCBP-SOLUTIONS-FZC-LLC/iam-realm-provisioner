@@ -159,14 +159,8 @@ func NewIdpValidationRepository(pool *pgcommon.Pool) *IdpValidationRepository {
 
 // Insert appends v to the append-only validation history.
 func (r *IdpValidationRepository) Insert(ctx context.Context, v *domain.IdpConfigValidation) error {
-	checks, err := json.Marshal(v.Checks)
-	if err != nil {
-		return err
-	}
-	acks, err := json.Marshal(v.Acknowledgements)
-	if err != nil {
-		return err
-	}
+	checks, _ := json.Marshal(v.Checks)         //nolint:errcheck // map[string]string can never fail to marshal
+	acks, _ := json.Marshal(v.Acknowledgements) //nolint:errcheck // domain.IdpValidationAck's fields (string/uuid.UUID/time.Time, always set via time.Now()) can never fail to marshal
 	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
 			INSERT INTO keycloak_idp_config_validations (tenant_id, idp_alias, validator_version, outcome, checks, acknowledgements)

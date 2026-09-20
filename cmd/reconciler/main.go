@@ -57,10 +57,12 @@ func run() int {
 
 	if jobName == "" {
 		die("no job specified — pass --job=<name> or set RECONCILER_JOB")
+		return 1
 	}
 	fn, ok := registry[jobName]
 	if !ok {
 		die("unknown job %q — valid: %v", jobName, registryNames())
+		return 1
 	}
 
 	appEnv := envOr("APP_ENV", "dev")
@@ -289,7 +291,12 @@ func mustEnv(key, appEnv string) string {
 	return v
 }
 
+// osExit is a package-level indirection over os.Exit so die's exit path is
+// unit-testable in-process (a test stubs this to record the code instead of
+// terminating the test binary) without changing production behavior.
+var osExit = os.Exit
+
 func die(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", a...)
-	os.Exit(1)
+	osExit(1)
 }

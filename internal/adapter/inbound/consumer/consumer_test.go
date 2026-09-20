@@ -224,6 +224,22 @@ func TestMembershipConsumer_Redelivery_IsNoOp(t *testing.T) {
 	assert.Len(t, mfa.calls, 1, "a redelivered event must not re-execute the effect")
 }
 
+// An unknown event type still fails loudly if ackUnknown's own
+// mark-processed write fails — the wrap-and-return branch in Handle's
+// default case, distinct from the known-event-type mark-processed test
+// below.
+func TestMembershipConsumer_UnknownEventType_MarkProcessedFailurePropagates(t *testing.T) {
+	mfa := &stubMfaSyncer{}
+	dedup := newStubDedup()
+	dedup.markProcessErr = errors.New("dedup write failed")
+	c := newTestMembership(mfa, dedup)
+
+	env := envelope(t, "DepartmentMembershipRevoked", map[string]any{})
+	err := c.Handle(context.Background(), env)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "membership consumer")
+}
+
 func TestMembershipConsumer_IsProcessedErrorPropagates(t *testing.T) {
 	mfa := &stubMfaSyncer{}
 	dedup := newStubDedup()

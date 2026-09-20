@@ -186,13 +186,10 @@ func (c *Client) token(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("openbao: read kubernetes service account token: %w", err)
 	}
-	body, err := json.Marshal(map[string]string{
+	body, _ := json.Marshal(map[string]string{ //nolint:errcheck // map[string]string can never fail to marshal
 		"role": c.cfg.AuthRole,
 		"jwt":  strings.TrimSpace(string(jwt)),
 	})
-	if err != nil {
-		return "", fmt.Errorf("openbao: marshal kubernetes_login body: %w", err)
-	}
 	url := fmt.Sprintf("%s/v1/auth/kubernetes/login", c.cfg.Addr)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {

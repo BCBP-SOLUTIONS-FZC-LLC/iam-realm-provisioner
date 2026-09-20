@@ -142,6 +142,35 @@ func (fakeOrgMembership) HasResidualMFARequirement(context.Context, uuid.UUID, u
 
 var _ port.OrgMembershipClient = fakeOrgMembership{}
 
+// fakeTokenService is a minimal in-memory port.TokenServiceClient — RP-1/
+// RP-2/RP-3's mint step (§2.5) now runs unconditionally, so it must be
+// wired to something, but no scenario in this suite asserts on Token
+// Service's own HTTP contract (that's tokenservice/client_test.go's job);
+// this only needs to let CreateServiceAccountClient's real Keycloak effect
+// (already exercised against the real testcontainer, plain client-secret
+// auth since this suite never proves the JWKS fetch itself — see
+// test/integration/keycloak_service_account_test.go for that) complete
+// with a plausible principal/credential.
+type fakeTokenService struct{}
+
+func (fakeTokenService) RegisterPrincipal(context.Context, uuid.UUID, port.RegisterPrincipalRequest) (*port.RegisterPrincipalResult, error) {
+	return &port.RegisterPrincipalResult{PrincipalID: uuid.New(), Created: true, RecordVersion: 1}, nil
+}
+
+func (fakeTokenService) IssueOrRotateCredential(context.Context, uuid.UUID, uuid.UUID, port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
+	return &port.IssueCredentialResult{Version: 1, Secret: "e2e-test-secret", OpenBaoPath: "iam/serviceaccount/e2e/v1", RecordVersion: 1}, nil
+}
+
+func (fakeTokenService) ReadPrincipal(context.Context, uuid.UUID, uuid.UUID) (*port.ReadPrincipalResult, error) {
+	return nil, nil
+}
+
+func (fakeTokenService) JWKSURLFor(tenantID uuid.UUID) string {
+	return "http://token-service.e2e-test/api/v1/internal/tenants/" + tenantID.String() + "/service-accounts/platform-automation/jwks.json"
+}
+
+var _ port.TokenServiceClient = fakeTokenService{}
+
 func TestMain(m *testing.M) {
 	code, err := runE2ESuite(m)
 	if err != nil {
@@ -249,7 +278,7 @@ func runE2ESuite(m *testing.M) (int, error) {
 	idempotencyRepo := pgadapter.NewIdempotencyRepository(appPool)
 
 	provisioningSvc := service.NewProvisioningService(
-		tenantRealmRepo, idempotencyRepo, kcAdmin, txRunner, sharedRealm, nil,
+		tenantRealmRepo, idempotencyRepo, kcAdmin, fakeTokenService{}, txRunner, sharedRealm, nil,
 	).WithLogger(noopLogger{})
 	lifecycleSvc := service.NewLifecycleService(
 		tenantRealmRepo, idempotencyRepo, kcAdmin, txRunner, sharedRealm,

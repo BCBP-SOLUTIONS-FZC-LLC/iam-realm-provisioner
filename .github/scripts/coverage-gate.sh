@@ -5,9 +5,14 @@
 # iam-delegation) — not an aspiration, a floor. Ratcheted to 90% once real
 # suites landed across every package (postgres/keycloak testcontainer
 # coverage, full handler/service/eventbus/consumer coverage) took the
-# measured total to ~91.8%; the buffer below that keeps testcontainer-run
-# variance from flaking an otherwise-good PR. Ratchet this up over time as
-# more tests are added; never lower it to make a failing PR pass.
+# measured total to ~92.2%; the buffer below that keeps testcontainer-run
+# variance from flaking an otherwise-good PR. The remaining gap to 100% is
+# overwhelmingly composition-root wiring (cmd/server/main.go,
+# cmd/reconciler/main.go's run(), exporters.go's runBusinessExporters) that
+# only a live Postgres/Keycloak/AWS connection exercises — not something
+# more unit/testcontainer tests can close. Ratchet this threshold up only
+# if that wiring is refactored into smaller, mockable units; never lower it
+# to make a failing PR pass.
 set -euo pipefail
 
 THRESHOLD="${COVERAGE_THRESHOLD:-90}"

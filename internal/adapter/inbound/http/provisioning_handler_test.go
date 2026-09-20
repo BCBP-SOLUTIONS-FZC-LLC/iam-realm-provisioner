@@ -195,6 +195,15 @@ func TestProvisionDirect_UnsafeTenantSlug_Rejected(t *testing.T) {
 	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
 }
 
+func TestProvisionDirect_UnsupportedPlan_Rejected(t *testing.T) {
+	d := newServiceDeps() // keycloak.CreateRealmFromTemplateFn left nil — a bypass would panic
+	tenantID := uuid.New()
+	headers := withHeader(sysHeaders(), "Idempotency-Key", "direct-plan-1")
+	body := `{"tenant_id":"` + tenantID.String() + `","tenant_name":"Acme","tenant_slug":"acme","admin_email":"a@example.com","admin_name":"Admin","plan":"gold"}`
+	rec := doRequest(d.engine(), http.MethodPost, provisionDirectPath, headers, body)
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+}
+
 // ── RP-3: convert ────────────────────────────────────────────────────────
 
 func convertPath(id uuid.UUID) string { return "/api/v1/internal/tenants/" + id.String() + "/convert" }

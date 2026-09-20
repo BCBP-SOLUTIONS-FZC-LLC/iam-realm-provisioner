@@ -36,7 +36,10 @@ iam-realm-provisioner/
 │   │   │   ├── errors.go               # ErrorCode taxonomy (§17) + Error{Code,Message,Details}, Status() -> HTTP code
 │   │   │   └── event.go                # Source="iam-realm-provisioner", SystemActorID, the 9 produced + 6 consumed event-type constants, Event{} struct, every payload struct (§25)
 │   │   ├── port/                       # interfaces required by the core
-│   │   │   ├── keycloak_admin.go       # KeycloakAdmin — RP-INV-1's sole seam, ~20 methods
+│   │   │   ├── keycloak_admin.go       # KeycloakAdmin — RP-INV-1's sole seam, 29 methods, incl. service-account
+│   │   │   │                          #   client mint (CreateServiceAccountClient -> sub, created bool, err —
+│   │   │   │                          #   created reports fresh-mint vs resumed, §2.5), ClearServiceAccountKeysCache,
+│   │   │   │                          #   DeleteServiceAccountClientIfExists (idempotent, mirrors DeleteRealmIfExists)
 │   │   │   ├── repositories.go         # TenantRealmRepository, IdpConfigRepository, IdpValidationRepository, ReconciliationRepository, IdempotencyStore, ProcessedEventsStore
 │   │   │   ├── subscription_status_reader.go # SubscriptionLapseReader — RP-C3 suspend-phase trigger, backed by O&M's I-16
 │   │   │   ├── openbao_client.go       # OpenBaoClient — IdP secret KV read/write/delete
@@ -46,7 +49,11 @@ iam-realm-provisioner/
 │   │   │   ├── tx_runner.go            # TxRunner.RunInTx
 │   │   │   └── logger.go               # Logger, SlogStyleLogger, NewSlogStyleLogger
 │   │   └── service/                    # use cases — domain+port+requestctx+observability only
-│   │       ├── provisioning_service.go # RP-1/2/3/4 (ProvisionTrial, ProvisionDirect, Convert, CreateInvitedUser, RevertConversion)
+│   │       ├── provisioning_service.go # RP-1/2/3/4/17 (ProvisionTrial, ProvisionDirect, Convert, CreateInvitedUser,
+│   │       │                          #   RevertConversion, RefreshServiceAccountKeys); mintPlatformAutomation is the
+│   │       │                          #   shared RP-1/2/3/4 mint helper (§2.5) — Convert also retires the tenant's old
+│   │       │                          #   shared-realm client on success; RevertConversion re-mints one back into the
+│   │       │                          #   shared realm since DeleteRealmIfExists just took the dedicated one down
 │   │       ├── lifecycle_service.go    # RP-10/11/12/14/15/16 (Reactivate, GetRealm, ExpireTrial, Suspend, DeleteUser, RevokeSessions)
 │   │       ├── idp_service.go          # RP-6/7/13 (ConfigureIdp, RemoveIdp, PortabilityAudit)
 │   │       ├── idp_validator.go        # §11.6 Region-Agnostic IdP Configuration Checklist (ValidateIdpConfig)
@@ -55,12 +62,12 @@ iam-realm-provisioner/
 │   └── adapter/
 │       ├── inbound/
 │       │   ├── http/                   # Gin handlers — router.go is the single source of truth for the route table
-│       │   │   ├── router.go           # NewRouter: infra routes, docs routes, /api/v1/internal/* (RP-1..RP-16)
+│       │   │   ├── router.go           # NewRouter: infra routes, docs routes, /api/v1/internal/* (RP-1..RP-17)
 │       │   │   ├── handlers.go / lifecycle_handler.go / idp_handler.go / internal_handler.go
 │       │   │   ├── middleware.go       # GUCBridgeMiddleware, RequireIdempotencyKey, RequireSystemRole, RequireOperatorRole, RequireJSONContentType
 │       │   │   ├── errors.go           # domain.Error -> gincommon.ErrorResponse mapping
 │       │   │   ├── asyncapi.go         # interactive dashboard + raw-YAML serving for the embedded api/asyncapi.yaml, at /asyncapi, /asyncapi.yaml
-│       │   │   └── swagger_theme.go / swagger_initializer.go  # custom-themed assets for GET /swagger/*any (swag-generated OpenAPI 2.0 UI, all 16 RP-1..RP-16 handlers)
+│       │   │   └── swagger_theme.go / swagger_initializer.go  # custom-themed assets for GET /swagger/*any (swag-generated OpenAPI 2.0 UI, all 17 RP-1..RP-17 handlers)
 │       │   └── consumer/               # 3 SQS handlers: membership-realm-q, tenant-realm-q, billing-realm-q
 │       └── outbound/
 │           ├── postgres/               # repository impls + migrations/000000_initial_schema.{up,down}.sql + gauge_repository.go (§11.2 exporters) + otel_tracer.go (pgcommon.Config.Tracer)
@@ -68,6 +75,7 @@ iam-realm-provisioner/
 │           ├── eventbus/               # outbox publisher, Glue/Noop/Validating codecs
 │           ├── openbao/                # OpenBao KV v2 + Kubernetes-auth client
 │           ├── orgmembership/          # HTTP client for O&M's I-8 residual-MFA check + I-16 subscription-lapse poll (RP-C3, port.SubscriptionLapseReader)
+│           ├── tokenservice/           # HTTP client for Token Service's TS-1/TS-3/TS-4 credential-lifecycle API (§2.5, port.TokenServiceClient)
 │           ├── s3/                     # realm-export object store
 │           ├── httpx/                  # cross-cutting leaf: the one HTTP transport every outbound adapter builds on, injecting W3C traceparent (§11.3)
 │           └── metrics/                # cross-cutting Prometheus counters/histograms/gauges (iam_realm_provisioner_*) — the "observability" component
@@ -93,9 +101,10 @@ iam-realm-provisioner/
 ├── docs/lld/                           # frozen LLD
 ├── docs/runbook-schema-registry.md     # schema-governance operator runbook (shared iam-tenant-events registry)
 ├── VERSIONING.md                       # SemVer policy + maintainer release process (release.yml)
-├── Dockerfile  docker-compose.yml  docker-compose.pro.yml  Makefile  go.mod  .golangci.yml  .go-arch-lint.yml
-    # docker-compose.pro.yml is standalone (Postgres/Keycloak/OpenBao duplicated, LocalStack swapped
-    # for the Pro image), not an override of docker-compose.yml — keep both in sync by hand
+├── Dockerfile  docker-compose.yml  Makefile  go.mod  .golangci.yml  .go-arch-lint.yml
+    # docker-compose.yml's `floci`/`floci-ui` services replace LocalStack —
+    # Floci's free tier covers SNS/SQS/S3/Glue, so the former Pro-tier
+    # split (docker-compose.pro.yml, retired) is no longer needed
 ```
 
 **`internal/eventschema/` is the local half of schema governance** — `internal/eventschema/asyncapi_drift_test.go` is a fast, no-AWS CI check: it asserts `api/asyncapi.yaml`'s `iamTenantEvents` channel message list and `eventschema.ByEventType`'s map keys name exactly the same 9 events. The live-registry half is `platform-schemagov` (`schema-gov` CLI, Docker image, zero Go-code presence): `.github/workflows/schema-registry.yml` validates/diffs/registers this service's 9 schemas against the shared `iam-tenant-events` Glue registry (O&M's `TenantCreated`/`TrialStarted` share the registry but are never touched — no exclusion flag exists upstream, so `schema-prune.yml` hard-blocks `--execute` while either name is present), `schema-prune.yml` and `schema-health-quarterly.yml` cover pruning and quarterly lint. `make schema-*` runs the same checks locally. See `docs/runbook-schema-registry.md`.
@@ -142,10 +151,11 @@ Single-topic publisher (not a `RoutingPublisher` like some siblings) — one SNS
 - **`port`** — may depend on `domain` only.
 - **`service`** — may depend on `domain`, `port`, `requestctx`, and **`observability`** (`internal/adapter/outbound/metrics`) — `mfa_service.go`, `idp_service.go`, `realm_config_service.go` import it directly to record business-outcome counters at the point of the outcome, matching the sibling convention of treating the metrics package as a cross-cutting instrumentation leaf rather than a "real" adapter.
 - **`requestctx`**, **`eventschema`**, **`apispec`** (the `api/` package) — `anyVendorDeps: true`, standalone leaves.
-- **`observability`** — may depend on `domain` only.
-- **`httptransport`** (`internal/adapter/outbound/httpx`) — its own component, same rationale as `observability`: a cross-cutting leaf every outbound HTTP caller depends on (W3C traceparent injection, §11.3), not a "real" adapter. `anyVendorDeps: true` with no internal deps at all — not even `domain` (unlike `observability`, which depends on `domain`).
-- **`keycloak`** (`internal/adapter/outbound/keycloak`) — its own component, separate from `adapters_outbound`, specifically so the RP-INV-1 single-writer invariant can be verified structurally: no other `adapters_outbound` package needs to depend on it, and `.github/scripts/arch-lint.sh` additionally greps for stray `gocloak` imports outside this one package.
-- **`adapters_outbound`** (`postgres`, `eventbus`, `openbao`, `orgmembership`, `s3`) — may depend on `domain`, `port`, `service`, `eventschema`, `observability`, `httptransport`.
+- **`observability`** (`internal/adapter/outbound/metrics`) — `anyVendorDeps: true` with no internal deps at all — it imports nothing from `domain`/`port`, matching `httptransport`'s shape exactly.
+- **`httptransport`** (`internal/adapter/outbound/httpx`) — its own component, same rationale as `observability`: a cross-cutting leaf every outbound HTTP caller depends on (W3C traceparent injection, §11.3, plus the shared `CloseBody` helper every outbound client's `defer` calls), not a "real" adapter. `anyVendorDeps: true` with no internal deps at all — not even `domain`.
+- **`keycloak`** (`internal/adapter/outbound/keycloak`) — its own component, separate from `adapters_outbound`, specifically so the RP-INV-1 single-writer invariant can be verified structurally: no other `adapters_outbound` package needs to depend on it, and `.github/scripts/arch-lint.sh` additionally greps for stray `gocloak` imports outside this one package. May depend on `domain`, `port`, `observability`, `httptransport`.
+- **`postgres`** (`internal/adapter/outbound/postgres`) — its own component too, separate from `adapters_outbound`, so `eventbus` can import its `TxFromContext` without a false intra-component cycle (tx lives on ctx, matching `iam-org-membership`'s `EventPublisher`). Narrower `mayDependOn` than the rest of outbound: `domain`, `port` only — no `service`/`eventschema`/`observability`/`httptransport`.
+- **`adapters_outbound`** (`eventbus`, `openbao`, `orgmembership`, `s3`, `tokenservice` — **not** `postgres` or `keycloak`, both their own components above) — may depend on `domain`, `port`, `service`, `eventschema`, `observability`, `httptransport`, `postgres`.
 - **`adapters_inbound`** (`http`, `consumer`) — may depend on `domain`, `port`, `service`, `requestctx`, `apispec`, `observability`.
 - **`reconciler_jobs`** (`cmd/reconciler/jobs`) — its own component (not merged into `cmd`) so it can be declared as a normal dependency of `cmd/reconciler`'s `main.go` without a false-positive self-cycle warning. May depend on `domain`, `port`, `observability`.
 - **`cmd`** (`cmd/server`, `cmd/reconciler`) — the composition root; may import everything, including `keycloak`, both adapter groups, and `reconciler_jobs`.

@@ -62,6 +62,11 @@ func startKeycloakContainer(t *testing.T) string {
 		},
 		Cmd:        []string{"start-dev"},
 		WaitingFor: wait.ForLog("Listening on: http://0.0.0.0:8080").WithStartupTimeout(120 * time.Second),
+		// host.docker.internal lets the container reach an httptest server
+		// bound to the host (EXT-6's client-jwt/jwks.url test) — Docker
+		// Desktop (Mac/Windows) resolves this automatically; host-gateway
+		// makes it resolve on Linux Docker (>=20.10) too.
+		ExtraHosts: []string{"host.docker.internal:host-gateway"},
 	}
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,

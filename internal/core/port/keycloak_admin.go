@@ -103,6 +103,45 @@ type KeycloakAdmin interface {
 	// ── Realm config (§8.10, RP-INV-6) ───────────────────────────────────
 
 	ApplyRealmConfig(ctx context.Context, realmName, settingKey string, desiredValue any) error
+
+	// ── Service-account clients (§2.5, RP-17) ────────────────────────────
+
+	// CreateServiceAccountClient idempotently mints a confidential,
+	// service-account-enabled client (clientID) in realmName, authenticated
+	// via Keycloak's client-jwt (private_key_jwt) authenticator against the
+	// JWKS at jwksURL (EXT-6 — corrected from plain client-secret auth,
+	// which has no rotation-overlap mechanism, verified empirically) —
+	// returning the Keycloak service-account user's sub (the RP-supplied
+	// `principal_sub` for TS-4). Resume-if-exists, mirroring
+	// CreateRealmFromTemplate's idempotent-create pattern — a repeat call
+	// against an already-minted client returns its existing sub rather than
+	// erroring, and (re-)applies the client-jwt/JWKS auth config either way
+	// so a resumed client whose config had drifted is corrected, not just
+	// silently left alone. created reports whether this call minted a brand
+	// new client (true) or resumed one that already existed (false) — the
+	// caller uses this to decide whether a later failure may safely delete
+	// the client as an orphan (a resumed client predates this call and may
+	// already be in active use elsewhere, so it is never deleted on that
+	// signal alone).
+	CreateServiceAccountClient(ctx context.Context, realmName, clientID, jwksURL string) (sub uuid.UUID, created bool, err error)
+	// ClearServiceAccountKeysCache evicts Keycloak's cached JWKS keys for
+	// every client-jwt client in realmName (EXT-6, RP-17) — Keycloak does
+	// not self-refresh a jwks.url client's keys, verified empirically: a
+	// newly-added key is not recognized, and a removed key keeps
+	// authenticating, until this is called. Used after every
+	// mint/rotate/revoke of a platform-automation credential; realm-scoped,
+	// not client-scoped (a shared trial realm's refresh affects every
+	// tenant's automation client sharing that realm — harmless, just extra
+	// re-fetches).
+	ClearServiceAccountKeysCache(ctx context.Context, realmName string) error
+	// DeleteServiceAccountClientIfExists deletes clientID's client in
+	// realmName — compensating cleanup for a partial mint failure (§9.3,
+	// scoped to just the client rather than the whole realm) and for the
+	// stale trial-realm client RP-3 conversion leaves behind once the
+	// principal has moved to a fresh client in the dedicated realm.
+	// Idempotent, mirroring DeleteRealmIfExists — deleting an absent client
+	// succeeds.
+	DeleteServiceAccountClientIfExists(ctx context.Context, realmName, clientID string) error
 }
 
 // CreateUserRequest is the Keycloak-facing shape for creating a trial or

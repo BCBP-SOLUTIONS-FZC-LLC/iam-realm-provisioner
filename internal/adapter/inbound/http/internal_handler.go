@@ -11,7 +11,7 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
 )
 
-// InternalHandler implements Handlers (RP-1..RP-16) by delegating to the
+// InternalHandler implements Handlers (RP-1..RP-17) by delegating to the
 // core services. Each service dependency is filled in as its phase lands;
 // a nil service falls back to 501 not_implemented so the router can be
 // wired incrementally without breaking already-shipped endpoints.
@@ -331,6 +331,45 @@ func (h *InternalHandler) ResetMFA(c *gin.Context) {
 		return
 	}
 	if err := h.Mfa.ResetMFA(c.Request.Context(), tenantID, keycloakUserID); err != nil {
+		HandleError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// ── RP-17: standalone rotate/revoke/break-glass key-cache refresh (§2.5) ──
+
+// RefreshServiceAccountKeys handles RP-17
+// (POST /tenants/:id/service-account/keys/refresh), empty body. The caller
+// has already issued, rotated, or revoked a credential directly against
+// Token Service's own TS-1/TS-2 and calls this so the tenant's realm
+// actually notices — Keycloak does not self-refresh a jwks.url client's
+// cached keys (EXT-6, verified empirically), so neither a newly-rotated key
+// nor a revoked one takes effect at Keycloak without this call.
+//
+// @Summary      RP-17 — Refresh a service-account's Keycloak key cache
+// @Description  Clears the tenant's realm-scoped Keycloak keys cache so a just-issued/rotated credential is recognized and a just-revoked one stops authenticating (EXT-6, §2.5) — Keycloak's jwks.url client-jwt authenticator does not self-refresh. No Keycloak-side apply happens at mint time (RP-1/RP-2/RP-3): Keycloak fetches the JWKS lazily on first use. No Idempotency-Key: clearing an already-fresh cache is a harmless no-op. Fail-closed on Keycloak-unreachable.
+// @Tags         ServiceAccount
+// @Produce      json
+// @Param        id  path  string  true  "Tenant UUID"  format(uuid)
+// @Success      204 "No Content"
+// @Failure      404 {object}  ErrorResponse  "tenant_realm_not_found"
+// @Failure      422 {object}  ErrorResponse  "service_account_not_provisioned"
+// @Failure      502 {object}  ErrorResponse  "keycloak_unavailable"
+// @Security     SystemRole
+// @Security     TenantID
+// @Router       /tenants/{id}/service-account/keys/refresh [post]
+func (h *InternalHandler) RefreshServiceAccountKeys(c *gin.Context) {
+	if h.Provisioning == nil {
+		h.fallback.RefreshServiceAccountKeys(c)
+		return
+	}
+	tenantID, err := parseTenantID(c)
+	if err != nil {
+		HandleError(c, err)
+		return
+	}
+	if err := h.Provisioning.RefreshServiceAccountKeys(c.Request.Context(), tenantID); err != nil {
 		HandleError(c, err)
 		return
 	}

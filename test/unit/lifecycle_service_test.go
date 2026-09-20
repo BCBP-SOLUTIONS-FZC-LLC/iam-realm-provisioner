@@ -123,6 +123,53 @@ func TestReactivate_DedicatedTenant_EmitsOperatorSourcedEvent(t *testing.T) {
 	assert.Equal(t, domain.ReactivationSourceOperator, payload.Source)
 }
 
+// A still-provisioning tenant was never active — reactivating it is
+// rejected the same way an offboarded tenant is.
+func TestReactivate_RejectsStillProvisioning(t *testing.T) {
+	svc, _, realms, idem, _ := newLifecycleTestServiceWithIdem()
+	tenantID := uuid.New()
+	realms.rows[tenantID] = &domain.TenantRealm{TenantID: tenantID, RealmName: "tenant-x", Strategy: domain.RealmStrategyDedicated, Status: domain.RealmStatusProvisioning}
+
+	_, err := svc.Reactivate(context.Background(), "react-provisioning", tenantID, domain.ReactivationSourceOperator, "", nil)
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrTenantOffboarded, de.Code)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["react-provisioning"].Status)
+}
+
+// The outbox enqueue failing inside the local-commit tx (dedicated-realm
+// TenantReactivated path) marks the idempotency key failed.
+func TestReactivate_Dedicated_EventEnqueueFails_MarksIdempotencyFailed(t *testing.T) {
+	svc, kc, realms, idem, pub := newLifecycleTestServiceWithIdem()
+	tenantID := uuid.New()
+	shard := "kc-shard-1"
+	realms.rows[tenantID] = &domain.TenantRealm{TenantID: tenantID, RealmName: "tenant-x", Strategy: domain.RealmStrategyDedicated, KeycloakShard: &shard, Status: domain.RealmStatusSuspended}
+	kc.EnableRealmFn = func(ctx context.Context, realmName string) error { return nil }
+	pub.EnqueueErr = errors.New("outbox unavailable")
+	pub.FailFromCall = 1
+
+	_, err := svc.Reactivate(context.Background(), "react-enqueue-fail-dedicated", tenantID, domain.ReactivationSourceOperator, "resolved", nil)
+	require.Error(t, err)
+	assert.Empty(t, pub.events)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["react-enqueue-fail-dedicated"].Status)
+}
+
+// Same, for the shared-realm TrialReactivated path.
+func TestReactivate_Shared_EventEnqueueFails_MarksIdempotencyFailed(t *testing.T) {
+	svc, kc, realms, idem, pub := newLifecycleTestServiceWithIdem()
+	tenantID := uuid.New()
+	realms.rows[tenantID] = &domain.TenantRealm{TenantID: tenantID, RealmName: "trial", Strategy: domain.RealmStrategyShared, Status: domain.RealmStatusDisabled}
+	kc.EnableUsersInRealmFn = func(ctx context.Context, realmName string, tid uuid.UUID) error { return nil }
+	pub.EnqueueErr = errors.New("outbox unavailable")
+	pub.FailFromCall = 1
+
+	_, err := svc.Reactivate(context.Background(), "react-enqueue-fail-shared", tenantID, domain.ReactivationSourceBilling, "", nil)
+	require.Error(t, err)
+	assert.Empty(t, pub.events)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["react-enqueue-fail-shared"].Status)
+}
+
 func TestExpireTrial_DisablesUsersAndMarksRow(t *testing.T) {
 	svc, kc, realms, pub := newLifecycleTestService()
 	tenantID := uuid.New()
@@ -351,6 +398,49 @@ func TestExpireTrial_RejectsNonSharedStrategy(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, domain.ErrRealmAlreadyDedicated, de.Code)
 	assert.Equal(t, domain.OpStatusFailed, idem.rows["exp-2"].Status)
+}
+
+func TestExpireTrial_Offboarded_Returns409(t *testing.T) {
+	svc, _, realms, idem, _ := newLifecycleTestServiceWithIdem()
+	tenantID := uuid.New()
+	realms.rows[tenantID] = &domain.TenantRealm{TenantID: tenantID, RealmName: "trial", Strategy: domain.RealmStrategyShared, Status: domain.RealmStatusExported}
+
+	_, err := svc.ExpireTrial(context.Background(), "exp-offboarded", tenantID, 30)
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrTenantOffboarded, de.Code)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["exp-offboarded"].Status)
+}
+
+func TestExpireTrial_Suspended_Returns409(t *testing.T) {
+	svc, _, realms, idem, _ := newLifecycleTestServiceWithIdem()
+	tenantID := uuid.New()
+	realms.rows[tenantID] = &domain.TenantRealm{TenantID: tenantID, RealmName: "trial", Strategy: domain.RealmStrategyShared, Status: domain.RealmStatusSuspended}
+
+	_, err := svc.ExpireTrial(context.Background(), "exp-suspended", tenantID, 30)
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrTenantOffboarded, de.Code)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["exp-suspended"].Status)
+}
+
+// The outbox enqueue failing inside the local-commit tx (after Update
+// already succeeded) marks the idempotency key failed and returns the
+// publisher error.
+func TestExpireTrial_EventEnqueueFails_MarksIdempotencyFailed(t *testing.T) {
+	svc, kc, realms, idem, pub := newLifecycleTestServiceWithIdem()
+	tenantID := uuid.New()
+	realms.rows[tenantID] = &domain.TenantRealm{TenantID: tenantID, RealmName: "trial", Strategy: domain.RealmStrategyShared, Status: domain.RealmStatusActive}
+	kc.DisableUsersInRealmFn = func(ctx context.Context, realmName string, tid uuid.UUID) error { return nil }
+	pub.EnqueueErr = errors.New("outbox unavailable")
+	pub.FailFromCall = 1
+
+	_, err := svc.ExpireTrial(context.Background(), "exp-enqueue-fail", tenantID, 30)
+	require.Error(t, err)
+	assert.Empty(t, pub.events)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["exp-enqueue-fail"].Status)
 }
 
 func TestExpireTrial_KeycloakFailure_NoLocalCommit(t *testing.T) {

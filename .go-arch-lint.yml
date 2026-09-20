@@ -88,6 +88,7 @@ components:
       - internal/adapter/outbound/openbao
       - internal/adapter/outbound/orgmembership
       - internal/adapter/outbound/s3
+      - internal/adapter/outbound/tokenservice
 
   # cmd/reconciler/jobs is its own component (not merged into cmd) so it
   # can be declared as a normal dependency of cmd/reconciler's main.go

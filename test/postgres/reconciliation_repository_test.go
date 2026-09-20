@@ -18,6 +18,7 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/test/dbseed"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -174,6 +175,16 @@ func TestReconciliationRepository(t *testing.T) {
 		for _, rec := range pending {
 			assert.NotEqual(t, id, rec.ID, "a terminally-failed row must never be returned by ListPending again")
 		}
+	})
+
+	// Unlike MarkApplied (a bare UPDATE, no RETURNING), MarkFailed's UPDATE
+	// carries a RETURNING clause — zero matching rows means QueryRow.Scan
+	// itself fails with pgx.ErrNoRows, not a silent no-op.
+	t.Run("MarkFailed_UnknownID_ReturnsErrNoRows", func(t *testing.T) {
+		t.Parallel()
+		_, err := sysRepo.MarkFailed(ctx, uuid.New(), "keycloak: connection refused", 20)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, pgx.ErrNoRows)
 	})
 
 	t.Run("MarkApplied_CrossTenantThroughAppPoolSilentlyAffectsNothing", func(t *testing.T) {

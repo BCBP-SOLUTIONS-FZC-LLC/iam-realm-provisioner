@@ -156,6 +156,27 @@ func (r *loadTxRunner) RunInTx(ctx context.Context, fn func(ctx context.Context)
 	return fn(port.WithEventPublisher(ctx, r.pub))
 }
 
+// loadTokenServiceClient stubs port.TokenServiceClient (§2.5/RP-17) with
+// canned instant success — Convert's mint step is exercised at the
+// Keycloak-transport level via fakeKeycloakServer, so Token Service's own
+// HTTP contract isn't what this suite measures.
+type loadTokenServiceClient struct{}
+
+var _ port.TokenServiceClient = loadTokenServiceClient{}
+
+func (loadTokenServiceClient) RegisterPrincipal(context.Context, uuid.UUID, port.RegisterPrincipalRequest) (*port.RegisterPrincipalResult, error) {
+	return &port.RegisterPrincipalResult{PrincipalID: uuid.New(), Created: true, RecordVersion: 1}, nil
+}
+func (loadTokenServiceClient) IssueOrRotateCredential(context.Context, uuid.UUID, uuid.UUID, port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
+	return &port.IssueCredentialResult{Version: 1, Secret: "load-test-secret", OpenBaoPath: "iam/serviceaccount/load/v1", RecordVersion: 1}, nil
+}
+func (loadTokenServiceClient) ReadPrincipal(context.Context, uuid.UUID, uuid.UUID) (*port.ReadPrincipalResult, error) {
+	return nil, nil
+}
+func (loadTokenServiceClient) JWKSURLFor(tenantID uuid.UUID) string {
+	return "http://token-service.load-test/api/v1/internal/tenants/" + tenantID.String() + "/service-accounts/platform-automation/jwks.json"
+}
+
 // noopLogger implements port.Logger without emitting anything — the
 // per-call WARN paths Convert exercises on non-fatal Keycloak errors
 // (e.g. ForceLogoutRealm) aren't interesting to this suite's assertions.

@@ -21,6 +21,38 @@ Multi-step Keycloak sequences (`ProvisionDirect`, `Convert`) call `bestEffortDel
 
 Teardown failures are logged, not escalated — an orphaned partially-created realm is caught by manual cleanup or a future reconciler pass, never by blocking the caller's error response.
 
+## §2.5: Platform-Automation Mint Sequence (RP-17, shared by RP-1/RP-2/RP-3/RP-4, EXT-6)
+
+`mintPlatformAutomation(idempotencyKey, tenantID, realmName, clientID)` is one more Keycloak-effect step, always run before the caller's own `RunInTx`, under the same compensating-teardown rules as the steps around it in each flow:
+
+```
+sub, created := Keycloak.CreateServiceAccountClient(realmName, clientID, TokenService.JWKSURLFor(tenant_id))
+                                                                     -- client-jwt + jwks.url auth (EXT-6),
+                                                                        not client-secret; created=false when
+                                                                        this resumed an already-existing client
+                                                                        (found up front, or after our own
+                                                                        lost-response 409) -- its auth config is
+                                                                        (re-)applied via ensureClientJWTAuth
+                                                                        either way, GET-then-PUT the full
+                                                                        representation, skipped if already correct
+TokenService.RegisterPrincipal(tenant_id, sub, clientID)          -- TS-4 -> principal_id
+  fail -> if created: Keycloak.DeleteServiceAccountClientIfExists(realmName, clientID)  -- never for a resumed client
+          return err
+TokenService.IssueOrRotateCredential(tenant_id, principal_id, {
+  rotation_id: deterministic-from(idempotencyKey)                 -- so a retry of the same attempt
+})                                                                 -- TS-1 -> private key, discarded immediately
+                                                                     (lands on TS-1's own idempotent replay
+                                                                      path instead of a fresh rotation)
+  fail -> if created: Keycloak.DeleteServiceAccountClientIfExists(realmName, clientID)  -- same created-only gate
+          return err
+-- no Keycloak-side apply step: Keycloak fetches the JWKS lazily on the client's first real use (EXT-6)
+```
+`clientID` is the literal `"platform-automation"` for a dedicated realm (RP-2, RP-3 post-conversion) or `"platform-automation-" + tenant_id` for the shared trial realm (RP-1, RP-4 on revert — a shared realm cannot hold two clients named identically). The returned `principal_id`/`clientID` are set on the `tenant_realms` row written in that flow's own `RunInTx` (`service_account_principal_id`/`service_account_keycloak_client_id`). A failure anywhere in this sequence propagates through the caller's existing failure branch — RP-1's (no realm-level teardown, so the `created`-gated client delete above is what prevents an orphan), RP-2's (`bestEffortDeleteRealm`), RP-3's (`bestEffortDeleteRealm` gated by `realmMayHaveMigratedUsers`, placed right after `RegisterOIDCClients` succeeds so it never runs after user migration begins), or RP-4's (no local commit, `502 conversion_failed`).
+
+**Known, accepted gap.** If `RegisterPrincipal` succeeds (Token Service's carry-over now points the principal at this fresh client) but `IssueOrRotateCredential` then fails, the `created`-gated cleanup above deletes that same client — Token Service is left believing the principal's `keycloak_client_id` points at a now-deleted client, with no API for this service to revert the carry-over. Self-heals on the next successful retry of the same Idempotency-Key (the retry's own `RegisterPrincipal` re-points the principal at whatever it mints); persists indefinitely only if no retry ever happens.
+
+**RP-3's success additionally retires the old client; RP-4's re-mints one.** Once `Convert` commits, it best-effort deletes the tenant's now-stale shared-realm client (`DeleteServiceAccountClientIfExists`, reading the row's *persisted* `ServiceAccountKeycloakClientID` rather than re-deriving the name by convention). `RevertConversion` deletes the dedicated realm as part of undoing a conversion, which takes that realm's client down with it — so it calls `mintPlatformAutomation` again to mint a fresh one back in the shared realm before its own commit (see RP-4 below).
+
 ## RP-1: Trial Provisioning
 
 ```
@@ -35,8 +67,11 @@ POST /tenants/provision-trial {tenant_id, tenant_name, tenant_slug, admin_email,
            existing.tenant_id == tenant_id -> resume with existing.id (idempotent success, no failure)
            else / lookup fails             -> failIdempotency, return the ORIGINAL 409 unchanged
     -> any other failure -> failIdempotency, return err
+  mintPlatformAutomation(key, tenant_id, "trial", "platform-automation-"+tenant_id)   -- §2.5, RP-17
+    -> fail -> failIdempotency, return err (nothing else to tear down)
   RunInTx:
-    tenant_realms.Upsert{tenant_id, realm_name:"trial", strategy:"shared", status:"active"}
+    tenant_realms.Upsert{tenant_id, realm_name:"trial", strategy:"shared", status:"active",
+      service_account_principal_id, service_account_keycloak_client_id}
     outbox.Enqueue(TrialTenantProvisioned{tenant_id, realm:"trial", keycloak_user_id})
   idempotency.Complete(key, marshaled result)
   -> 201 {tenant_id, realm:"trial", strategy:"shared", keycloak_user_id, email_verification_sent:true}
@@ -56,8 +91,11 @@ POST /tenants/provision-direct {..., billing_subscription_id}
          existing.tenant_id == tenant_id -> resume in place (realm/OIDC clients from this same attempt kept, no teardown)
          else / lookup fails             -> bestEffortDeleteRealm, failIdempotency, return the ORIGINAL 409 unchanged
     -- any other failure -> bestEffortDeleteRealm, failIdempotency, return err
+  mintPlatformAutomation(key, tenant_id, realmName, "platform-automation")   -- §2.5, RP-17
+    -- fail -> bestEffortDeleteRealm(realmName), failIdempotency, return err
   RunInTx:
-    tenant_realms.Upsert{tenant_id, realm_name:realmName, strategy:"dedicated", keycloak_shard:shard, status:"active", converted_at:now()}
+    tenant_realms.Upsert{tenant_id, realm_name:realmName, strategy:"dedicated", keycloak_shard:shard, status:"active", converted_at:now(),
+      service_account_principal_id, service_account_keycloak_client_id}
     outbox.Enqueue(TenantRealmReady{tenant_id, realm, keycloak_shard, oidc_clients})
     outbox.Enqueue(DirectPaidSignup{tenant_id, realm, direct_signup:true})
     outbox.Enqueue(TenantConverted{tenant_id, realm, plan, billing_subscription_id?, users_migrated:0, direct_signup:true})
@@ -89,6 +127,12 @@ POST /tenants/:id/convert {plan, billing_subscription_id, payment_method_id (acc
     any other failure -> failIdempotency, return err (nothing created yet, no teardown needed)
   Keycloak.RegisterOIDCClients(realmName, slug)
     fail -> if !realmMayHaveMigratedUsers: bestEffortDeleteRealm(realmName); 502 conversion_failed
+  mintPlatformAutomation(key, tenant_id, realmName, "platform-automation")   -- §2.5, RP-17 — "carries across":
+    fail -> if !realmMayHaveMigratedUsers: bestEffortDeleteRealm(realmName); 502 conversion_failed
+                                            re-registers the SAME Token Service principal (TS-4 carry-over
+                                            upsert) against the new dedicated-realm client's new sub — placed
+                                            here, before migration starts, so a failure can still safely
+                                            trigger teardown
   sourceUsers := Keycloak.ListUsersByTenant(current.RealmName, tenant_id)
     fail -> if !realmMayHaveMigratedUsers: bestEffortDeleteRealm(realmName); 502 conversion_failed
   for each uid in sourceUsers:
@@ -130,14 +174,21 @@ POST /tenants/:id/revert-conversion
   else:
     for each uid: Keycloak.MigrateUser(dedicatedRealm, sharedRealm, uid)     -- fail -> 502 conversion_failed
     Keycloak.DeleteRealmIfExists(dedicatedRealm)
+  -- §2.5: the dedicated realm just torn down took its platform-automation client with it, so re-mint
+  -- one back in the shared realm before committing -- symmetric with Convert's mint-on-the-way-in
+  principalID := mintPlatformAutomation(key, tenant_id, sharedRealm, "platform-automation-"+tenant_id)
+    fail -> 502 conversion_failed, no local commit
   RunInTx:
-    current.{Strategy:"shared", RealmName:sharedRealm, KeycloakShard:nil, ConvertedAt:nil, TrialEndsAt:now()+newTrialDurationDays, Status:"active"}
+    current.{Strategy:"shared", RealmName:sharedRealm, KeycloakShard:nil, ConvertedAt:nil, TrialEndsAt:now()+newTrialDurationDays, Status:"active",
+              ServiceAccountPrincipalID:principalID, ServiceAccountKeycloakClientID:"platform-automation-"+tenant_id}
     tenant_realms.Update(current)
     outbox.Enqueue(TrialReactivated{tenant_id, new_trial_ends_at})
   -> 200 {tenant_id, realm:"trial", strategy:"shared"}
 ```
 
 **Correctness fix — a local-commit failure after a successful realm delete must not permanently strand the tenant.** Before this fix, `DeleteRealmIfExists` ran unconditionally and unwrapped; if it succeeded but the subsequent `RunInTx` failed (an ordinary DB hiccup), the local row was left claiming `Strategy=dedicated` against a realm that no longer existed in Keycloak, and every retry's `ListUsersByTenant` hard-failed against the absent realm forever — the tenant could neither revert nor convert without an operator manually fixing the row. `Admin.ListUsersByTenant` now returns a distinguishable `ErrTenantRealmNotFound` on a 404 (reliable here — a realm that exists but matches zero users returns `200` with an empty list, never `404`), which `RevertConversion` treats as the resume signal above.
+
+**Design gap fix (§2.5) — a reverted tenant used to keep pointing at a dead client.** `DeleteRealmIfExists` above deletes the dedicated realm's `platform-automation` client along with everything else in it, but nothing used to update `tenant_realms.service_account_principal_id`/`service_account_keycloak_client_id` afterward — the row kept claiming a client/realm that no longer existed anywhere, and RP-17 (`RefreshServiceAccountKeys`) would silently no-op against it instead of surfacing the missing credential. `RevertConversion` now calls the same `mintPlatformAutomation` helper RP-1/RP-2/RP-3 use, minting a fresh tenant-scoped client back in the shared realm and carrying the Token Service principal over to it, before its own commit.
 
 ## RP-6/RP-7: IdP Configuration Under the §11.6 Gate
 
@@ -241,6 +292,17 @@ One endpoint reverses **both** a billing-lapse suspension and an RP-14 operator 
 ## RP-15/RP-16: Idempotent User Operations
 
 Both resolve the realm from `tenant_realms` then delegate straight to `KeycloakAdmin.DeleteUser`/`RevokeUserSessions` — no local state, no idempotency ledger entry (the underlying Keycloak operations are themselves naturally idempotent: deleting an absent user succeeds; revoking sessions for a user with none active succeeds).
+
+## RP-17: Refresh Service-Account Keys (standalone, rotation/revoke/break-glass; EXT-6, was "apply a secret")
+
+```
+POST /tenants/:id/service-account/keys/refresh   -- empty body
+  realm := tenant_realms.FindByTenantID(tenant_id)   -- 404 tenant_realm_not_found if absent
+  realm.ServiceAccountKeycloakClientID == nil -> 422 service_account_not_provisioned
+  Keycloak.ClearServiceAccountKeysCache(realm.RealmName)
+  -> 204
+```
+No `RunInTx`/outbox (mutates no tracked local field) and no Idempotency-Key (clearing an already-fresh cache is a no-op). Fail-closed on Keycloak-unreachable — unlike RP-8's local-intent-first pattern, a stale key cache is security-sensitive enough that a delayed reconciler retry risks leaving a compromised key live longer than necessary, and the caller can simply retry the call itself. The caller drives Token Service's TS-1 (rotate)/TS-2 (revoke) directly first (Token Service LLD §8.2/§8.7) — this endpoint never calls TS-1/TS-2 itself, it only makes Keycloak notice: a rotated key is unrecognized, and a revoked key keeps authenticating, until this call lands (verified empirically, EXT-6 — Keycloak does not self-refresh a `jwks.url` client's cached keys).
 
 ## RP-C2: Trial Hard Delete
 

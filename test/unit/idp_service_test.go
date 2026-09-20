@@ -65,6 +65,101 @@ func TestConfigureIdp_TenantNotFound(t *testing.T) {
 	require.Error(t, err)
 }
 
+// RP-6: a terminal (offboarded) tenant must reject IdP configuration
+// before any §11.6 validation or Keycloak/OpenBao call.
+func TestConfigureIdp_Offboarded_Returns409(t *testing.T) {
+	svc, _, realms, _, _, _, idem := newIdpTestService()
+	tenantID := uuid.New()
+	shard := "kc-shard-1"
+	realms.rows[tenantID] = &domain.TenantRealm{
+		TenantID: tenantID, RealmName: "tenant-x", Strategy: domain.RealmStrategyDedicated,
+		KeycloakShard: &shard, Status: domain.RealmStatusDeleted,
+	}
+
+	_, err := svc.ConfigureIdp(context.Background(), "idem-offboarded", tenantID, validSAMLIdpRequest())
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrTenantOffboarded, de.Code)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["idem-offboarded"].Status)
+}
+
+// failIdempotency's own persistence failure is best-effort — the caller
+// still sees the ORIGINAL error, not a ledger error.
+func TestConfigureIdp_FailIdempotencyPersistFailure_LoggedNotEscalated(t *testing.T) {
+	svc, _, realms, _, _, _, idem := newIdpTestService()
+	logger := &mockLogger{}
+	svc.WithLogger(logger)
+	idem.FailErr = errors.New("ledger unavailable")
+	tenantID := uuid.New()
+	seedSharedRealm(realms, tenantID)
+
+	_, err := svc.ConfigureIdp(context.Background(), "idem-fail-persist", tenantID, validSAMLIdpRequest())
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrIdpRequiresDedicatedRealm, de.Code, "the ORIGINAL error, not the ledger failure")
+	assert.GreaterOrEqual(t, logger.warnCalls, 1)
+}
+
+// A hard ledger failure from idempotency.Begin propagates immediately — no
+// tenant lookup, no Keycloak/OpenBao calls.
+func TestConfigureIdp_BeginError_Propagates(t *testing.T) {
+	svc, _, realms, _, _, _, idem := newIdpTestService()
+	idem.BeginErr = errors.New("ledger unavailable")
+	tenantID := uuid.New()
+	seedDedicatedRealm(realms, tenantID, nil)
+
+	_, err := svc.ConfigureIdp(context.Background(), "idem-begin-fail", tenantID, validSAMLIdpRequest())
+	require.Error(t, err)
+	assert.Same(t, idem.BeginErr, err)
+}
+
+// A FindByAlias failure other than the distinguishable ErrIdpConfigNotFound
+// (a transient repo error, say) is treated as "might be an update" for
+// compensating-delete safety — logged, not propagated, and the flow
+// continues to a normal success.
+func TestConfigureIdp_ExistingConfigLookupFails_TreatedAsUpdate_LoggedNotPropagated(t *testing.T) {
+	svc, kc, realms, idpConfigs, _, openbao, _ := newIdpTestService()
+	logger := &mockLogger{}
+	svc.WithLogger(logger)
+	tenantID := uuid.New()
+	seedDedicatedRealm(realms, tenantID, nil)
+	idpConfigs.FindByAliasFn = func(ctx context.Context, tid uuid.UUID, alias string) (*domain.IdpConfig, error) {
+		return nil, errors.New("db down")
+	}
+	openbao.WriteIdpSecretFn = func(ctx context.Context, tid uuid.UUID, alias string, secret map[string]any) error { return nil }
+	kc.CreateOrUpdateIdpFn = func(ctx context.Context, realmName string, idp port.IdpKeycloakConfig) error { return nil }
+	openbao.DeleteIdpSecretFn = func(ctx context.Context, tid uuid.UUID, alias string) error {
+		t.Fatal("an unresolved lookup must be treated as 'might be an update' — no compensating delete on later success")
+		return nil
+	}
+	idpConfigs.UpsertFn = func(ctx context.Context, cfg *domain.IdpConfig) error { return nil }
+
+	_, err := svc.ConfigureIdp(context.Background(), "idem-lookup-fail", tenantID, validSAMLIdpRequest())
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, logger.warnCalls, 1)
+}
+
+// idempotency.Complete's own persistence failure is best-effort — logged,
+// not propagated; the caller still sees a successful result.
+func TestConfigureIdp_IdempotencyCompleteFailure_LoggedNotPropagated(t *testing.T) {
+	svc, kc, realms, idpConfigs, _, openbao, idem := newIdpTestService()
+	logger := &mockLogger{}
+	svc.WithLogger(logger)
+	idem.CompleteErr = errors.New("ledger unavailable")
+	tenantID := uuid.New()
+	seedDedicatedRealm(realms, tenantID, nil)
+	openbao.WriteIdpSecretFn = func(ctx context.Context, tid uuid.UUID, alias string, secret map[string]any) error { return nil }
+	kc.CreateOrUpdateIdpFn = func(ctx context.Context, realmName string, idp port.IdpKeycloakConfig) error { return nil }
+	idpConfigs.UpsertFn = func(ctx context.Context, cfg *domain.IdpConfig) error { return nil }
+
+	result, err := svc.ConfigureIdp(context.Background(), "idem-complete-fail", tenantID, validSAMLIdpRequest())
+	require.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.GreaterOrEqual(t, logger.warnCalls, 1)
+}
+
 // §11.6 CRITICAL failure blocks with 400, regardless of which check failed.
 func TestConfigureIdp_CriticalCheckFails_Returns400(t *testing.T) {
 	svc, _, realms, _, validations, _, _ := newIdpTestService()
@@ -224,6 +319,30 @@ func TestConfigureIdp_KeycloakFailure_NewConfig_CompensatingOpenBaoDelete(t *tes
 	assert.Equal(t, tenantID, deletedTenant, "the orphaned secret must be compensating-deleted")
 	assert.Equal(t, "acme-sso", deletedAlias)
 	assert.Equal(t, domain.OpStatusFailed, idem.rows["idem-9"].Status)
+}
+
+// The compensating delete itself failing is best-effort — logged, not
+// propagated; the caller still sees the original Keycloak failure, not a
+// confusing OpenBao one.
+func TestConfigureIdp_KeycloakFailure_NewConfig_CompensatingOpenBaoDeleteFails_LoggedNotEscalated(t *testing.T) {
+	svc, kc, realms, _, _, openbao, idem := newIdpTestService()
+	logger := &mockLogger{}
+	svc.WithLogger(logger)
+	tenantID := uuid.New()
+	seedDedicatedRealm(realms, tenantID, nil)
+	openbao.WriteIdpSecretFn = func(ctx context.Context, tid uuid.UUID, alias string, secret map[string]any) error { return nil }
+	keycloakErr := domain.NewError(domain.ErrKeycloakUnavailable, "down")
+	kc.CreateOrUpdateIdpFn = func(ctx context.Context, realmName string, idp port.IdpKeycloakConfig) error {
+		return keycloakErr
+	}
+	openbao.DeleteIdpSecretFn = func(ctx context.Context, tid uuid.UUID, alias string) error {
+		return errors.New("openbao unreachable")
+	}
+
+	_, err := svc.ConfigureIdp(context.Background(), "idem-9b", tenantID, validSAMLIdpRequest())
+	require.Same(t, keycloakErr, err, "the original Keycloak error must surface, not the compensating-delete failure")
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["idem-9b"].Status)
+	assert.GreaterOrEqual(t, logger.warnCalls, 1)
 }
 
 // CRITICAL: when this alias already had a prior config, a Keycloak failure

@@ -3,7 +3,11 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"net"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
@@ -153,6 +157,21 @@ func TestSystemPoolConfig_AppliesStatementTimeout(t *testing.T) {
 	assert.Contains(t, cfg.DSN, "statement_timeout%3D5000")
 }
 
+// noopPortLogger is a minimal port.Logger for exercising SystemPoolConfig's
+// non-nil-logger branch — the nil case is already covered above.
+type noopPortLogger struct{}
+
+func (noopPortLogger) Debug(msg string, fields map[string]any) {}
+func (noopPortLogger) Info(msg string, fields map[string]any)  {}
+func (noopPortLogger) Warn(msg string, fields map[string]any)  {}
+func (noopPortLogger) Error(msg string, fields map[string]any) {}
+
+func TestSystemPoolConfig_NonNilLoggerIsWrapped(t *testing.T) {
+	clearPgEnv(t)
+	cfg := SystemPoolConfig("postgres://sys@host/db", noopPortLogger{})
+	assert.Equal(t, NewLoggerAdapter(noopPortLogger{}), cfg.Logger, "a non-nil port.Logger must be wrapped via NewLoggerAdapter")
+}
+
 // wrapConnErr is a pure function of its input error, so every branch can be
 // exercised directly without a database — no repository method in this
 // package actually produces a bare pgx.ErrNoRows or a bare context
@@ -240,6 +259,62 @@ func TestWrapConnErr_ClosedPoolMapsToDBUnavailable(t *testing.T) {
 	var de *domain.Error
 	require.True(t, errors.As(got, &de))
 	assert.Equal(t, domain.ErrDBUnavailable, de.Code)
+}
+
+// wrapConnErr's own isNetworkError branch (a bare Go-level network error,
+// not wrapped in *pgconn.PgError) maps to ErrDBUnavailable just like the
+// SQLSTATE-classified branch above.
+func TestWrapConnErr_NetworkErrorMapsToDBUnavailable(t *testing.T) {
+	got := wrapConnErr(io.EOF)
+
+	var de *domain.Error
+	require.True(t, errors.As(got, &de))
+	assert.Equal(t, domain.ErrDBUnavailable, de.Code)
+}
+
+// isNetworkError's branches are only reachable through wrapConnErr when pgx
+// surfaces a Go-level network failure directly (connection dropped
+// mid-flight) rather than a *pgconn.PgError — exercised directly here since
+// synthesizing each underlying error shape (net.OpError, syscall.Errno,
+// wrapped io.EOF, and the last-resort text match) is much simpler than
+// forcing a real testcontainer connection to fail in each of these ways.
+func TestIsNetworkError_IOEOFVariants(t *testing.T) {
+	assert.True(t, isNetworkError(io.EOF))
+	assert.True(t, isNetworkError(io.ErrUnexpectedEOF))
+	assert.True(t, isNetworkError(fmt.Errorf("wrapped: %w", io.EOF)))
+}
+
+func TestIsNetworkError_NetOpError(t *testing.T) {
+	opErr := &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}
+	assert.True(t, isNetworkError(opErr))
+}
+
+func TestIsNetworkError_SyscallErrno(t *testing.T) {
+	for _, errno := range []syscall.Errno{syscall.ECONNRESET, syscall.ECONNREFUSED, syscall.EPIPE, syscall.ETIMEDOUT} {
+		assert.True(t, isNetworkError(errno), errno.Error())
+	}
+}
+
+func TestIsNetworkError_SyscallErrno_NonRetryableCodeNotMatched(t *testing.T) {
+	// A syscall.Errno that is NOT one of the four explicitly retried codes
+	// must fall through to the text-match branch, not be misclassified by
+	// the switch alone.
+	assert.False(t, isNetworkError(syscall.EACCES))
+}
+
+func TestIsNetworkError_TextMatchFallback(t *testing.T) {
+	for _, msg := range []string{
+		"dial tcp: connection refused",
+		"read: connection reset by peer",
+		"write: broken pipe",
+		"unexpected EOF while reading",
+	} {
+		assert.True(t, isNetworkError(errors.New(msg)), msg)
+	}
+}
+
+func TestIsNetworkError_UnrelatedErrorNotNetwork(t *testing.T) {
+	assert.False(t, isNetworkError(errors.New("unique constraint violated")))
 }
 
 // withPool's "join an already-active transaction" branch (TxFromContext

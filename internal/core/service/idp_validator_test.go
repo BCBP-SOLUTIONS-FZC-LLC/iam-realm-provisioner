@@ -117,6 +117,12 @@ func TestValidateIdpConfig_CriticalChecks_EachBlocksIndependently(t *testing.T) 
 		{"oidc_issuer_region", domain.IdpProtocolOIDC, func(c map[string]any) { c["issuer"] = "https://login.example.com/us-east-1/oauth2" }, domain.CheckOIDCIssuerRegion},
 		{"oidc_redirect_region", domain.IdpProtocolOIDC, func(c map[string]any) { c["redirect_uri"] = "https://login.example.com/eu-central-1/callback" }, domain.CheckOIDCRedirectRegion},
 		{"oidc_audience_region", domain.IdpProtocolOIDC, func(c map[string]any) { c["audience"] = "acme-ap-northeast-1-client" }, domain.CheckOIDCAudienceRegion},
+		{"saml_injection_in_field", domain.IdpProtocolSAML, func(c map[string]any) { c["signing_cert"] = "<script>alert(1)</script>" }, domain.CheckConfigSafe},
+		{"oidc_injection_in_field", domain.IdpProtocolOIDC, func(c map[string]any) { c["client_id"] = "acme<img src=x>" }, domain.CheckConfigSafe},
+		{"oidc_issuer_not_https", domain.IdpProtocolOIDC, func(c map[string]any) { c["issuer"] = "http://login.example.com/oauth2" }, domain.CheckOIDCIssuerHTTPS},
+		{"oidc_issuer_empty", domain.IdpProtocolOIDC, func(c map[string]any) { c["issuer"] = "" }, domain.CheckOIDCIssuerHTTPS},
+		{"oidc_issuer_unparseable", domain.IdpProtocolOIDC, func(c map[string]any) { c["issuer"] = "://not-a-valid-url" }, domain.CheckOIDCIssuerHTTPS},
+		{"oidc_issuer_https_no_host", domain.IdpProtocolOIDC, func(c map[string]any) { c["issuer"] = "https:///no-host" }, domain.CheckOIDCIssuerHTTPS},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

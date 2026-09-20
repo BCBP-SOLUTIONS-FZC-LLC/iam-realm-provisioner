@@ -17,10 +17,11 @@ import (
 func newProvisioningTestService(t *testing.T) (*service.ProvisioningService, *mockKeycloakAdmin, *mockTenantRealmRepository, *mockIdempotencyStore, *mockEventPublisher) {
 	t.Helper()
 	kc := &mockKeycloakAdmin{}
+	ts := wirePlatformAutomationHappyPath(kc)
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx, pub := newMockTxRunner()
-	svc := service.NewProvisioningService(realms, idem, kc, tx, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
 	return svc, kc, realms, idem, pub
 }
 
@@ -84,6 +85,184 @@ func TestProvisionTrial_KeycloakFailure_NoLocalCommit(t *testing.T) {
 	row := idem.rows["key-2"]
 	require.NotNil(t, row)
 	assert.Equal(t, domain.OpStatusFailed, row.Status)
+}
+
+// §2.5/RP-17: RP-1 mints into the SHARED trial realm using a tenant-scoped
+// clientId ("platform-automation-<tenant_id>"), never the literal base
+// name — a shared realm cannot hold two clients named identically.
+func TestProvisionTrial_MintPlatformAutomation_UsesTenantScopedClientID(t *testing.T) {
+	svc, kc, realms, _, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
+	var gotRealm, gotClientID string
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID, jwksURL string) (uuid.UUID, bool, error) {
+		gotRealm, gotClientID = realmName, clientID
+		return uuid.New(), true, nil
+	}
+
+	_, err := svc.ProvisionTrial(context.Background(), "key-mint-1", service.ProvisionTrialRequest{
+		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "trial", gotRealm)
+	assert.Equal(t, "platform-automation-"+tenantID.String(), gotClientID)
+
+	row, err := realms.FindByTenantID(context.Background(), tenantID)
+	require.NoError(t, err)
+	require.NotNil(t, row.ServiceAccountPrincipalID)
+	require.NotNil(t, row.ServiceAccountKeycloakClientID)
+	assert.Equal(t, "platform-automation-"+tenantID.String(), *row.ServiceAccountKeycloakClientID)
+}
+
+// A mint failure at the CreateServiceAccountClient step itself has nothing
+// to tear down (no Keycloak client was ever minted, only the shared trial
+// user) — same no-teardown failure branch as a CreateTrialUser failure.
+func TestProvisionTrial_MintPlatformAutomationFails_NoLocalCommit(t *testing.T) {
+	svc, kc, realms, idem, pub := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID, jwksURL string) (uuid.UUID, bool, error) {
+		return uuid.Nil, false, domain.NewError(domain.ErrKeycloakUnavailable, "boom")
+	}
+	kc.DeleteServiceAccountClientIfExistsFn = func(ctx context.Context, realmName, clientID string) error {
+		t.Fatal("no client was ever minted, so no cleanup should be attempted")
+		return nil
+	}
+
+	_, err := svc.ProvisionTrial(context.Background(), "key-mint-2", service.ProvisionTrialRequest{
+		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
+	})
+	require.Error(t, err)
+
+	_, findErr := realms.FindByTenantID(context.Background(), tenantID)
+	assert.Error(t, findErr, "no local row should exist after a mint failure")
+	assert.Empty(t, pub.events)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["key-mint-2"].Status)
+}
+
+// Unlike ProvisionDirect/Convert, RP-1 has no realm-level compensating
+// teardown to fall back on (the shared trial realm is never deleted) — so
+// if the Keycloak client mint itself succeeds but the following Token
+// Service call (TS-4 register or TS-1 issue) fails, mintPlatformAutomation
+// must itself clean up the now-orphaned client, or it is left live in the
+// shared realm indefinitely with no local record to reconcile it.
+func TestProvisionTrial_MintPlatformAutomation_RegisterPrincipalFails_OrphanedClientCleanedUp(t *testing.T) {
+	kc := &mockKeycloakAdmin{}
+	ts := wirePlatformAutomationHappyPath(kc)
+	ts.RegisterPrincipalFn = func(ctx context.Context, tid uuid.UUID, req port.RegisterPrincipalRequest) (*port.RegisterPrincipalResult, error) {
+		return nil, domain.NewError(domain.ErrTokenServiceUnavailable, "boom")
+	}
+	realms := newMockTenantRealmRepository()
+	idem := newMockIdempotencyStore()
+	tx, _ := newMockTxRunner()
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
+
+	tenantID := uuid.New()
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
+	var deletedRealm, deletedClientID string
+	kc.DeleteServiceAccountClientIfExistsFn = func(ctx context.Context, realmName, clientID string) error {
+		deletedRealm, deletedClientID = realmName, clientID
+		return nil
+	}
+
+	_, err := svc.ProvisionTrial(context.Background(), "key-mint-3", service.ProvisionTrialRequest{
+		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
+	})
+	require.Error(t, err)
+	assert.Equal(t, "trial", deletedRealm)
+	assert.Equal(t, "platform-automation-"+tenantID.String(), deletedClientID)
+}
+
+// A RESUMED client (CreateServiceAccountClient's created=false — an earlier
+// attempt already minted it) must never be deleted on a later Token
+// Service failure: it predates this call and may already be correctly
+// registered and actively serving traffic, so treating a later, unrelated
+// failure as grounds to delete it risks breaking a working credential
+// rather than just cleaning up an orphan.
+func TestProvisionTrial_MintPlatformAutomation_RegisterPrincipalFails_ResumedClientNotDeleted(t *testing.T) {
+	kc := &mockKeycloakAdmin{}
+	ts := wirePlatformAutomationHappyPath(kc)
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID, jwksURL string) (uuid.UUID, bool, error) {
+		return uuid.New(), false, nil // resumed, not freshly created
+	}
+	ts.RegisterPrincipalFn = func(ctx context.Context, tid uuid.UUID, req port.RegisterPrincipalRequest) (*port.RegisterPrincipalResult, error) {
+		return nil, domain.NewError(domain.ErrTokenServiceUnavailable, "boom")
+	}
+	realms := newMockTenantRealmRepository()
+	idem := newMockIdempotencyStore()
+	tx, _ := newMockTxRunner()
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
+
+	tenantID := uuid.New()
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
+	kc.DeleteServiceAccountClientIfExistsFn = func(ctx context.Context, realmName, clientID string) error {
+		t.Fatal("a resumed (not freshly-created) client must never be deleted on a later failure")
+		return nil
+	}
+
+	_, err := svc.ProvisionTrial(context.Background(), "key-mint-4", service.ProvisionTrialRequest{
+		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
+	})
+	require.Error(t, err)
+}
+
+// The same created-gated cleanup applies to the LATER Token Service call
+// (TS-1 IssueOrRotateCredential) — a fresh client is cleaned up if it
+// fails after RegisterPrincipal (TS-4) already succeeded.
+func TestProvisionTrial_MintPlatformAutomation_IssueOrRotateCredentialFails_OrphanedClientCleanedUp(t *testing.T) {
+	kc := &mockKeycloakAdmin{}
+	ts := wirePlatformAutomationHappyPath(kc)
+	ts.IssueOrRotateCredentialFn = func(ctx context.Context, tid, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
+		return nil, domain.NewError(domain.ErrTokenServiceUnavailable, "boom")
+	}
+	realms := newMockTenantRealmRepository()
+	idem := newMockIdempotencyStore()
+	tx, _ := newMockTxRunner()
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
+
+	tenantID := uuid.New()
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
+	var deletedRealm, deletedClientID string
+	kc.DeleteServiceAccountClientIfExistsFn = func(ctx context.Context, realmName, clientID string) error {
+		deletedRealm, deletedClientID = realmName, clientID
+		return nil
+	}
+
+	_, err := svc.ProvisionTrial(context.Background(), "key-mint-5", service.ProvisionTrialRequest{
+		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
+	})
+	require.Error(t, err)
+	assert.Equal(t, "trial", deletedRealm)
+	assert.Equal(t, "platform-automation-"+tenantID.String(), deletedClientID)
+}
+
+// A RESUMED client must never be deleted on an IssueOrRotateCredential
+// failure either — same created-gating as the RegisterPrincipal case.
+func TestProvisionTrial_MintPlatformAutomation_IssueOrRotateCredentialFails_ResumedClientNotDeleted(t *testing.T) {
+	kc := &mockKeycloakAdmin{}
+	ts := wirePlatformAutomationHappyPath(kc)
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID, jwksURL string) (uuid.UUID, bool, error) {
+		return uuid.New(), false, nil // resumed, not freshly created
+	}
+	ts.IssueOrRotateCredentialFn = func(ctx context.Context, tid, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
+		return nil, domain.NewError(domain.ErrTokenServiceUnavailable, "boom")
+	}
+	realms := newMockTenantRealmRepository()
+	idem := newMockIdempotencyStore()
+	tx, _ := newMockTxRunner()
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
+
+	tenantID := uuid.New()
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
+	kc.DeleteServiceAccountClientIfExistsFn = func(ctx context.Context, realmName, clientID string) error {
+		t.Fatal("a resumed (not freshly-created) client must never be deleted on a later failure")
+		return nil
+	}
+
+	_, err := svc.ProvisionTrial(context.Background(), "key-mint-6", service.ProvisionTrialRequest{
+		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
+	})
+	require.Error(t, err)
 }
 
 // §9.2 lost-response-retry resolution: CreateTrialUser 409s (the original
@@ -300,6 +479,49 @@ func TestProvisionTrial_BeginError_Propagates(t *testing.T) {
 	require.Error(t, err)
 }
 
+// RP-1, §8.1: a tenant already offboarded (exported/deleted) must be
+// rejected before any Keycloak call is made — re-provisioning a terminal
+// tenant is never allowed.
+func TestProvisionTrial_Offboarded_Returns409(t *testing.T) {
+	svc, kc, realms, idem, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	realms.rows[tenantID] = &domain.TenantRealm{
+		TenantID: tenantID, RealmName: "trial", Strategy: domain.RealmStrategyShared,
+		Status: domain.RealmStatusExported,
+	}
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) {
+		t.Fatal("must not call Keycloak for an already-offboarded tenant")
+		return uuid.Nil, nil
+	}
+
+	_, err := svc.ProvisionTrial(context.Background(), "key-offboarded", service.ProvisionTrialRequest{
+		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
+	})
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrTenantOffboarded, de.Code)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["key-offboarded"].Status)
+}
+
+// The outbox enqueue failing inside the local-commit tx (after Upsert
+// already succeeded) marks the idempotency key failed and returns the
+// publisher error — mirrors Convert's TestConvert_FirstEventEnqueueFails.
+func TestProvisionTrial_EventEnqueueFails_MarksIdempotencyFailed(t *testing.T) {
+	svc, kc, _, idem, pub := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
+	pub.EnqueueErr = errors.New("outbox unavailable")
+	pub.FailFromCall = 1
+
+	_, err := svc.ProvisionTrial(context.Background(), "key-enqueue-fail", service.ProvisionTrialRequest{
+		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
+	})
+	require.Error(t, err)
+	assert.Empty(t, pub.events)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["key-enqueue-fail"].Status)
+}
+
 // The local-commit tx's realms.Upsert failing (after a successful Keycloak
 // call) marks the idempotency key failed and returns the repository error —
 // no event is enqueued.
@@ -322,10 +544,11 @@ func TestProvisionTrial_UpsertFails_MarksIdempotencyFailed(t *testing.T) {
 // lands and the call still succeeds — just with no event enqueued.
 func TestProvisionTrial_NoEventPublisherInContext_StillCommitsLocally(t *testing.T) {
 	kc := &mockKeycloakAdmin{}
+	ts := wirePlatformAutomationHappyPath(kc)
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx := newMockTxRunnerNoPublisher()
-	svc := service.NewProvisioningService(realms, idem, kc, tx, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
 	tenantID := uuid.New()
 	kcUserID := uuid.New()
 	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return kcUserID, nil }

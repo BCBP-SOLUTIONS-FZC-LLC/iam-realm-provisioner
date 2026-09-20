@@ -14,7 +14,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      localstack:
+      floci:
         condition: service_healthy
       keycloak:
         condition: service_healthy
@@ -39,22 +39,86 @@ services:
       timeout: 5s
       retries: 10
 
-  localstack:
-    image: localstack/localstack:4.4.0
+  floci:
+    # Floci — open-source (MIT), always-free AWS emulator; drop-in
+    # LocalStack replacement (iam-org-membership/iam-tender-acl/
+    # iam-delegation all use the same image). Unlike LocalStack Community,
+    # Glue Schema Registry ships in Floci's free tier, so this single
+    # service now covers SNS + SQS + S3 + Glue with no Pro tier / auth
+    # token needed — docker-compose.pro.yml (LocalStack Pro, Glue+KMS) is
+    # retired; scripts/init-floci.sh provisions the SNS topic, all 7 SQS
+    # queues, the S3 realm-export bucket, and the Glue registry + all 9
+    # event schemas in one run. KMS is NOT emulated here (undocumented
+    # whether Floci's free tier covers it, and nothing in this stack
+    # provisioned a KMS key even under the old Pro setup) — REALM_EXPORT_KMS_KEY
+    # stays unset in local dev, exactly as before this migration.
+    image: floci/floci:2.1.0-compat
     ports:
-      - "4571:4566"
+      # Host 4572 → container 4566. 4566/4567/4568/4569/4570/4571 are
+      # claimed by other sibling IAM services' own emulator instances (see
+      # each repo's docker-compose.yml) so all can run side-by-side.
+      - "4572:4566"
     environment:
-      SERVICES: sns,sqs,s3
-      DEBUG: 0
-      AWS_DEFAULT_REGION: ap-south-1
+      FLOCI_DEFAULT_REGION: ap-south-1
+      FLOCI_DEFAULT_ACCOUNT_ID: "000000000000"
+      # Rewrites the host in SQS QueueUrl / SNS TopicArn responses (e.g.
+      # http://floci:4566/... instead of http://localhost:4566/...) so the
+      # floci-ui container below — which resolves those URLs directly,
+      # AWS-SDK-console fashion — can actually reach them from inside its
+      # own container. Without this, floci-ui's queue list loads fine but
+      # every per-queue attribute (message counts included) silently comes
+      # back empty.
+      FLOCI_HOSTNAME: floci
+      # init-floci.sh makes ~40 sequential aws CLI round-trips (1 topic, 7
+      # queues + 7 DLQs, 7 subscriptions, 1 S3 bucket, 1 Glue registry, 9
+      # schemas); floci's default 30s ready-hook timeout is right at that
+      # edge on a busy host. Give real headroom.
+      FLOCI_INIT_HOOKS_TIMEOUT_SECONDS: "90"
     volumes:
-      - ./scripts/init-localstack.sh:/etc/localstack/init/ready.d/init-localstack.sh:ro
-      - localstack-data:/var/lib/localstack
+      - floci-data:/app/data
+      - ./scripts/init-floci.sh:/etc/floci/init/ready.d/init-floci.sh:ro
+      - ./internal/eventschema:/etc/floci/init/schemas:ro
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      # The compat image's AWS CLI defaults to region us-east-1 regardless
+      # of FLOCI_DEFAULT_REGION — floci treats region as an isolation
+      # boundary, so --region must be explicit here. Checks for the LAST
+      # resource init-floci.sh creates (the TrialTenantProvisioned Glue
+      # schema — Glue is registered LAST in that script, deliberately,
+      # after every SNS/SQS/S3 resource — see its own header comment for
+      # why: registering Glue first let a sibling repo's `app` container
+      # start against a still-partially-provisioned stack).
+      test: ["CMD", "aws", "--region", "ap-south-1", "glue", "get-schema",
+             "--schema-id", "RegistryName=iam-tenant-events,SchemaName=TrialTenantProvisioned"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
+      start_period: 5s
+
+  floci-ui:
+    # Web console for floci — browse SNS/SQS/Glue resources at
+    # http://localhost:4504 instead of the aws CLI. Talks to `floci` over
+    # the compose network. Shows queue/topic metadata including live
+    # message counts, but not message bodies or SNS topics/subscriptions —
+    # see README.md's "Testing domain events locally" for the CLI cookbook.
+    image: floci/floci-ui:0.5.0
+    ports:
+      # Host 4504 → container 4500. 4500/4501/4502/4503 are claimed by
+      # other sibling IAM services' own floci-ui instances.
+      - "4504:4500"
+    environment:
+      AWS_REGION: ap-south-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://floci:4566
+      # NOT the same as AWS_ENDPOINT_URL above — floci-ui's own
+      # connectivity probe reads this separate, floci-ui-specific var
+      # (upstream default: http://localhost:4566, which from *inside its
+      # own container* means itself, not `floci`).
+      FLOCI_ENDPOINT: http://floci:4566
+      PORT: "4500"
+    depends_on:
+      floci:
+        condition: service_healthy
 
   # Keycloak: neither sibling IAM service runs Keycloak locally — this is
   # the first service that needs to actually talk to its admin API, so
@@ -62,9 +126,6 @@ services:
   # node, backed by its own embedded H2-equivalent (dev-file) store — NOT
   # for production use (production Keycloak is externally managed per
   # HLD §4.2/§4.3).
-  #
-  # NOTE: docker-compose.pro.yml duplicates this block verbatim (it's a
-  # standalone file, not an override) — keep both in sync if this changes.
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
     command: start-dev
@@ -100,9 +161,6 @@ services:
   # token>` against this container) rather than relying on `make docker-up`
   # alone; test/integration/openbao_test.go is what exercises the real
   # Kubernetes-auth login end to end.
-  #
-  # NOTE: docker-compose.pro.yml duplicates this block verbatim (it's a
-  # standalone file, not an override) — keep both in sync if this changes.
   openbao:
     image: openbao/openbao:latest
     command: ["server", "-dev"]
@@ -117,7 +175,7 @@ services:
 
 volumes:
   pgdata:
-  localstack-data:
+  floci-data:
 
 secrets:
   go_private_token:

@@ -16,6 +16,43 @@ func TestNewValidatingCodec_CompilesAllEmbeddedSchemas(t *testing.T) {
 	assert.Len(t, c.schemas, len(eventschema.ByEventType))
 }
 
+// withPoisonedSchema temporarily injects (and removes) an extra entry into
+// the real eventschema.ByEventType map — the only way to reach
+// NewValidatingCodec's three construction-time error branches, since every
+// genuine embedded schema is a fixed, always-valid asset. ByEventType is a
+// plain package-level map (a reference type), so mutating it from here is
+// safe as long as the entry is removed again before the test ends.
+func withPoisonedSchema(t *testing.T, name string, raw []byte) {
+	t.Helper()
+	eventschema.ByEventType[name] = raw
+	t.Cleanup(func() { delete(eventschema.ByEventType, name) })
+}
+
+func TestNewValidatingCodec_MalformedSchemaJSON_ReturnsError(t *testing.T) {
+	withPoisonedSchema(t, "test-malformed-json", []byte(`not json`))
+	_, err := NewValidatingCodec(NoopCodec{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parse embedded schema")
+}
+
+// A map key that collides with a JSON-Schema meta-schema URI is the one
+// realistic way to make compiler.AddResource itself fail (as opposed to
+// Compile) — every genuine event-type name is a bare identifier, never a
+// URL, so this branch is otherwise unreachable via legitimate map content.
+func TestNewValidatingCodec_AddResourceCollision_ReturnsError(t *testing.T) {
+	withPoisonedSchema(t, "https://json-schema.org/draft/2020-12/schema", []byte(`{"type":"object"}`))
+	_, err := NewValidatingCodec(NoopCodec{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "add schema resource")
+}
+
+func TestNewValidatingCodec_SchemaFailsCompilation_ReturnsError(t *testing.T) {
+	withPoisonedSchema(t, "test-bad-ref", []byte(`{"$ref": "#/does/not/exist"}`))
+	_, err := NewValidatingCodec(NoopCodec{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "compile schema")
+}
+
 func TestValidatingCodec_Encode_ValidPayloadPasses(t *testing.T) {
 	c, err := NewValidatingCodec(NoopCodec{})
 	require.NoError(t, err)

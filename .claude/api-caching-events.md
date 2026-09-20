@@ -2,18 +2,18 @@
 
 ## API Conventions (§5.1)
 
-All 16 endpoints live under **one** prefix: `/api/v1/internal/*` — this service has almost no public surface; every route is mesh-internal, called by the Signup BFF, Org & Membership, Billing (via events, not directly), or operator tooling. Three infra routes (`/healthz`, `/readyz`) and two docs routes (`/asyncapi`, `/asyncapi.yaml`) sit outside that group, unauthenticated. `/metrics` is served on a **separate port** (`METRICS_PORT=9090`), never on the main router.
+All 17 endpoints live under **one** prefix: `/api/v1/internal/*` — this service has almost no public surface; every route is mesh-internal, called by the Signup BFF, Org & Membership, Billing (via events, not directly), or operator tooling. Three infra routes (`/healthz`, `/readyz`) and two docs routes (`/asyncapi`, `/asyncapi.yaml`) sit outside that group, unauthenticated. `/metrics` is served on a **separate port** (`METRICS_PORT=9090`), never on the main router.
 
 Middleware chain (`router.go`): 1 MB body-size cap → `gincommon.TimeoutMiddleware(30s)` → `gincommon.ObservabilityMiddlewares` → (per-route-group) `gincommon.ProtectedMiddlewares` → `GUCBridgeMiddleware` (binds `app.tenant_id` transaction-locally) → `RequireJSONContentType` → `RequireSystemRole` (defense-in-depth; mesh mTLS + NetworkPolicy is primary) → per-route `RequireIdempotencyKey` / `RequireOperatorRole` where applicable.
 
-## Endpoint Catalogue (RP-1..RP-16)
+## Endpoint Catalogue (RP-1..RP-17)
 
 | # | Method & Path | AuthZ | Idempotency-Key | Purpose |
 |---|---|---|---|---|
 | RP-1 | `POST /tenants/provision-trial` | system | required | Create a trial user in the shared realm, stamp `tenant_id`, trigger `VERIFY_EMAIL`. Emits `TrialTenantProvisioned`. |
 | RP-2 | `POST /tenants/provision-direct` | system | required | Provision a **dedicated** realm straight away (no shared-realm intermediate): create realm from template, register OIDC clients, create admin user. Emits `TenantRealmReady` + `DirectPaidSignup` + `TenantConverted{direct_signup:true}`. |
 | RP-3 | `POST /tenants/:id/convert` | system | required | Trial → dedicated conversion: create dedicated realm, migrate every trial user (preserving `sub`, copying TOTP, flagging WebAuthn re-enrollment), force-logout the shared realm. Emits `TenantRealmReady` + `TenantConverted{direct_signup:false}`. |
-| RP-4 | `POST /tenants/:id/revert-conversion` | system | required | Undo Convert within the reversal window: migrate users back to the shared realm, delete the dedicated realm, extend the trial. Emits `TrialReactivated`. `409 revert_window_expired` past the window. |
+| RP-4 | `POST /tenants/:id/revert-conversion` | system | required | Undo Convert within the reversal window: migrate users back to the shared realm, delete the dedicated realm, re-mint the tenant's `platform-automation` client back in the shared realm (§2.5 — the dedicated realm's client died with the realm), extend the trial. Emits `TrialReactivated`. `409 revert_window_expired` past the window. |
 | RP-5 | `POST /tenants/:id/users` | system | required | Create an invited user in the tenant's current realm with `RequiredActions` applied **verbatim** (never re-derived). No local persistence — no per-user table exists. |
 | RP-6 | `PUT /tenants/:id/idp` | system | required | Configure (create/update) a SAML/OIDC IdP — behind the §11.6 region-portability gate. Requires a `dedicated` realm (`409 idp_requires_dedicated_realm` otherwise). Writes the secret to OpenBao, then calls Keycloak, then upserts the local non-secret config row. |
 | RP-7 | `DELETE /tenants/:id/idp/:alias` | system | — | Remove an IdP — deletes from Keycloak, deletes the OpenBao secret, deletes the local row. Idempotent. |
@@ -26,6 +26,7 @@ Middleware chain (`router.go`): 1 MB body-size cap → `gincommon.TimeoutMiddlew
 | RP-14 | `POST /tenants/:id/suspend` | **operator** | required | Emergency operator-triggered lockout — disables the dedicated realm (or just that tenant's shared-realm users). Effect-only: never sets any subscription-status field (that's O&M's). Reversible via RP-10. Emits `TenantSuspended{source:"operator"}`. |
 | RP-15 | `DELETE /tenants/:id/users/:keycloak_user_id` | system | — | Idempotent Keycloak user delete — deleting an absent user is a success (backs O&M's PI-9-style reconciler). |
 | RP-16 | `POST /tenants/:id/users/:keycloak_user_id/revoke-sessions` | system | — | Idempotent session/token revocation, best-effort/fail-open from the caller's perspective. |
+| RP-17 | `POST /tenants/:id/service-account/keys/refresh` | system | — | Refreshes Keycloak's cached JWKS keys for the tenant's realm (`ClearServiceAccountKeysCache`, EXT-6) — required after a rotate (Token Service's TS-1) for the new key to be recognized, and after a revoke (TS-2) for the old key to actually stop authenticating; no Keycloak-side step happens at mint time (§2.5). Empty body, no idempotency key (clearing an already-fresh cache is a no-op); fail-closed on Keycloak-unreachable. `422 service_account_not_provisioned` if never minted. |
 
 **RP-9's route param note:** the frozen §25 path spells the segment `:uid`; Gin requires one wildcard name per path position across sibling routes sharing a prefix, and RP-15/RP-16 already use `:keycloak_user_id` at that position — so RP-9 uses the same internal capture name. This is a routing-internals detail only; the actual URL a caller hits is unchanged, and no wire contract is broken.
 
@@ -50,13 +51,16 @@ Every mutating endpoint above marked "required" enforces `RequireIdempotencyKey`
 | `revert_window_expired` | 409 | RP-4 past the reversal window |
 | `tenant_offboarded` | 409 | Any mutation against a terminal (offboarded) tenant |
 | `operation_in_progress` | 409 | Idempotency-Key replay against a non-`succeeded` row |
-| `optimistic_lock_conflict` | 409 | |
+| `optimistic_lock_conflict` | 409 | `record_version` mismatch on a `tenant_realms`/`idp_config` update; also surfaced from `IssueOrRotateCredential` when Token Service's TS-1 409 body names this cause explicitly (disambiguated from `service_account_rotation_in_flight` below by parsing the response body, not flattened into one code) |
 | `user_email_conflict` | 409 | Additive — RP-1/RP-2/RP-5 create-user 409 that `resolveUserCreateConflict` could not resolve as the caller's own lost-response retry (§9.2) |
+| `service_account_rotation_in_flight` | 409 | Additive — Token Service TS-1 rejected a concurrent issue/rotate for the same principal (§2.5); also the safe default for any other/unparseable TS-1 409 body |
+| `service_account_not_provisioned` | 422 | Additive — RP-17 apply attempted before the tenant's `platform-automation` principal was ever minted |
 | `keycloak_unavailable` | 502 | |
 | `conversion_failed` | 502 | RP-3/RP-4 Keycloak sequence failure (with `WithDetails` context) |
 | `org_membership_unavailable` | 503 | O&M I-8 residual-MFA check unreachable (membership-realm-q consumer) |
 | `object_store_unavailable` | 503 | S3 realm-export failure (RP-C3 offboarding) |
 | `db_unavailable` | 503 | Postgres connectivity / resource SQLSTATE (08/53/57/58) |
+| `token_service_unavailable` | 503 | Additive — Token Service TS-1/TS-4 unreachable (§2.5) |
 
 `Error.Status()` derives the HTTP code from `Code` via a lookup table; an unrecognized code defaults to 500. `Error.WithDetails(map[string]any)` attaches structured context echoed into the response body's `details` field.
 

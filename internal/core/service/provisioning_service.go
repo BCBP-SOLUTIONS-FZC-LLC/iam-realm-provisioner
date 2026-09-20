@@ -1,4 +1,4 @@
-// Package service implements the business logic behind the RP-1..RP-16
+// Package service implements the business logic behind the RP-1..RP-17
 // endpoints and the reconciler jobs — domain + port only, no adapter/Gin/
 // pgx/gocloak/AWS import (§3.2/§3.4).
 package service
@@ -35,13 +35,14 @@ func outcome(err error) string {
 
 // ProvisioningService implements RP-1/RP-2/RP-3/RP-4 (§8.1-8.4).
 type ProvisioningService struct {
-	realms      port.TenantRealmRepository
-	idempotency port.IdempotencyStore
-	keycloak    port.KeycloakAdmin
-	tx          port.TxRunner
-	log         port.SlogStyleLogger
-	sharedRealm string
-	shardIDs    []string
+	realms       port.TenantRealmRepository
+	idempotency  port.IdempotencyStore
+	keycloak     port.KeycloakAdmin
+	tokenService port.TokenServiceClient
+	tx           port.TxRunner
+	log          port.SlogStyleLogger
+	sharedRealm  string
+	shardIDs     []string
 }
 
 // NewProvisioningService wires ProvisioningService's dependencies.
@@ -49,6 +50,7 @@ func NewProvisioningService(
 	realms port.TenantRealmRepository,
 	idempotency port.IdempotencyStore,
 	keycloak port.KeycloakAdmin,
+	tokenService port.TokenServiceClient,
 	tx port.TxRunner,
 	sharedRealm string,
 	shardIDs []string,
@@ -59,7 +61,10 @@ func NewProvisioningService(
 	if len(shardIDs) == 0 {
 		shardIDs = []string{"kc-shard-1"}
 	}
-	return &ProvisioningService{realms: realms, idempotency: idempotency, keycloak: keycloak, tx: tx, sharedRealm: sharedRealm, shardIDs: shardIDs}
+	return &ProvisioningService{
+		realms: realms, idempotency: idempotency, keycloak: keycloak, tokenService: tokenService,
+		tx: tx, sharedRealm: sharedRealm, shardIDs: shardIDs,
+	}
 }
 
 // WithLogger attaches a logger and returns s for chaining.
@@ -86,6 +91,107 @@ func (s *ProvisioningService) bestEffortDeleteRealm(ctx context.Context, realmNa
 	if err := s.keycloak.DeleteRealmIfExists(ctx, realmName); err != nil {
 		s.log.WarnContext(ctx, "compensating teardown: delete realm failed", "realm", realmName, "error", err.Error())
 	}
+}
+
+// platformAutomationRotationNamespace is a fixed namespace UUID used to
+// derive a deterministic TS-1 rotation_id from an Idempotency-Key
+// (mintRotationID) — never sent to Keycloak or Token Service itself, just
+// a stable seed so a retry of the SAME failed/in-progress attempt (§9.2)
+// reuses the SAME rotation_id and lands on TS-1's own idempotent replay
+// path (§9.2 of the Token Service LLD) instead of minting a fresh,
+// unnecessary credential rotation on every retry.
+var platformAutomationRotationNamespace = uuid.MustParse("9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d")
+
+// mintRotationID derives a deterministic TS-1 rotation_id from
+// idempotencyKey so retries of the same provisioning attempt are
+// idempotent end-to-end, not just at this service's own ledger.
+func mintRotationID(idempotencyKey string) uuid.UUID {
+	return uuid.NewSHA1(platformAutomationRotationNamespace, []byte(idempotencyKey))
+}
+
+// dedicatedPlatformAutomationClientID is the literal Keycloak client name
+// used once a tenant has its own dedicated realm (§2.5) — frozen on the
+// Token Service side (domain.KeycloakClientPlatformAutomation there).
+const dedicatedPlatformAutomationClientID = "platform-automation"
+
+// sharedPlatformAutomationClientID returns the tenant-scoped Keycloak
+// client name used in the shared trial realm (RP-1) — a shared realm
+// cannot hold two clients named identically, so each trial tenant's
+// automation client is suffixed with its own tenant id (§2.5).
+func sharedPlatformAutomationClientID(tenantID uuid.UUID) string {
+	return dedicatedPlatformAutomationClientID + "-" + tenantID.String()
+}
+
+// bestEffortDeleteServiceAccountClient deletes clientID in realmName as
+// compensating cleanup (§9.3-style, scoped to just the client rather than
+// the whole realm) — either an orphan left behind by a partial mint failure
+// (mintPlatformAutomation) or the stale trial-realm client RP-3 conversion
+// leaves behind once the principal has moved to a fresh client in the
+// dedicated realm. Best-effort: the caller already has the primary result
+// to return, so a teardown failure here is only logged.
+func (s *ProvisioningService) bestEffortDeleteServiceAccountClient(ctx context.Context, realmName, clientID string) {
+	if err := s.keycloak.DeleteServiceAccountClientIfExists(ctx, realmName, clientID); err != nil {
+		s.log.WarnContext(ctx, "compensating teardown: delete service-account client failed", "realm", realmName, "client_id", clientID, "error", err.Error())
+	}
+}
+
+// mintPlatformAutomation mints the tenant's platform-automation
+// service-account client in realmName — authenticated via Keycloak's
+// client-jwt/jwks.url mechanism against Token Service's JWKS endpoint
+// (EXT-6, corrected from plain client-secret auth, which has no
+// rotation-overlap mechanism) — registers it with Token Service (TS-4),
+// and issues its first credential (TS-1) so the JWKS endpoint isn't empty.
+// No Keycloak-side "apply" step is needed at mint time: Keycloak fetches
+// the JWKS lazily on first real use, verified empirically to work with no
+// pre-warming. idempotencyKey seeds a deterministic rotation_id so a retry
+// of the same attempt does not mint an unnecessary fresh rotation. If
+// either Token Service call fails after CreateServiceAccountClient minted a
+// BRAND NEW Keycloak client this call (created == true), that client is
+// best-effort deleted before returning so a caller with no realm-level
+// compensating teardown (ProvisionTrial's shared realm) is not left with an
+// orphaned, never-registered client; a retry of the same idempotencyKey
+// then mints a fresh one rather than resuming against a client TS-4/TS-1
+// never actually learned about. A RESUMED client (created == false) is
+// never deleted on this signal alone — it predates this call, so it may
+// already be correctly registered and actively serving traffic from an
+// earlier, since-interrupted attempt; deleting it on an unrelated later
+// failure would risk breaking a working credential rather than just
+// cleaning up an orphan.
+//
+// Known gap (not fixable within this repo alone): if RegisterPrincipal
+// (TS-4) succeeds — carrying Token Service's principal record over to this
+// client — but IssueOrRotateCredential (TS-1) then fails and this client is
+// deleted as a fresh-create orphan, Token Service is left believing the
+// principal's keycloak_client_id is this now-deleted client. Token Service
+// has no revert-the-carry-over API for this service to call back into; the
+// window self-heals on the next successful retry of the same
+// idempotencyKey (RegisterPrincipal's carry-over re-points the principal to
+// whatever client that retry mints), matching this service's general
+// idempotent-replay recovery model, but persists indefinitely if no retry
+// ever happens.
+func (s *ProvisioningService) mintPlatformAutomation(ctx context.Context, idempotencyKey string, tenantID uuid.UUID, realmName, clientID string) (principalID uuid.UUID, err error) {
+	sub, created, err := s.keycloak.CreateServiceAccountClient(ctx, realmName, clientID, s.tokenService.JWKSURLFor(tenantID))
+	if err != nil {
+		return uuid.Nil, err
+	}
+	reg, err := s.tokenService.RegisterPrincipal(ctx, tenantID, port.RegisterPrincipalRequest{
+		PrincipalSub: sub, KeycloakClientID: clientID,
+	})
+	if err != nil {
+		if created {
+			s.bestEffortDeleteServiceAccountClient(ctx, realmName, clientID)
+		}
+		return uuid.Nil, err
+	}
+	if _, err := s.tokenService.IssueOrRotateCredential(ctx, tenantID, reg.PrincipalID, port.IssueCredentialRequest{
+		RotationID: mintRotationID(idempotencyKey),
+	}); err != nil {
+		if created {
+			s.bestEffortDeleteServiceAccountClient(ctx, realmName, clientID)
+		}
+		return uuid.Nil, err
+	}
+	return reg.PrincipalID, nil
 }
 
 // resolveUserCreateConflict handles a domain.ErrUserEmailConflict from
@@ -197,6 +303,17 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 		return nil, err
 	}
 
+	// §2.5/RP-17: mint the tenant's platform-automation principal in the
+	// shared trial realm before the local commit — one more Keycloak-effect
+	// step in this flow's effect-first sequence (§9.1). Tenant-scoped
+	// clientId: the shared realm cannot hold two clients named identically.
+	automationClientID := sharedPlatformAutomationClientID(req.TenantID)
+	principalID, err := s.mintPlatformAutomation(ctx, idempotencyKey, req.TenantID, s.sharedRealm, automationClientID)
+	if err != nil {
+		s.failIdempotency(ctx, idempotencyKey)
+		return nil, err
+	}
+
 	result := &ProvisionTrialResult{
 		TenantID: req.TenantID, Realm: s.sharedRealm, Strategy: string(domain.RealmStrategyShared),
 		KeycloakUserID: kcUserID, EmailVerificationSent: true,
@@ -205,7 +322,8 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 	err = s.tx.RunInTx(ctx, func(ctx context.Context) error {
 		if err := s.realms.Upsert(ctx, &domain.TenantRealm{
 			TenantID: req.TenantID, RealmName: s.sharedRealm, Strategy: domain.RealmStrategyShared,
-			Status: domain.RealmStatusActive,
+			Status:                    domain.RealmStatusActive,
+			ServiceAccountPrincipalID: &principalID, ServiceAccountKeycloakClientID: &automationClientID,
 		}); err != nil {
 			return err
 		}
@@ -334,15 +452,27 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 		return nil, err
 	}
 
+	// §2.5/RP-17: mint the tenant's platform-automation principal in the
+	// new dedicated realm before the local commit — same compensating
+	// teardown as the two Keycloak-effect steps above on failure.
+	principalID, err := s.mintPlatformAutomation(ctx, idempotencyKey, req.TenantID, realmName, dedicatedPlatformAutomationClientID)
+	if err != nil {
+		s.bestEffortDeleteRealm(ctx, realmName)
+		s.failIdempotency(ctx, idempotencyKey)
+		return nil, err
+	}
+
 	result := &ProvisionDirectResult{
 		TenantID: req.TenantID, Realm: realmName, Strategy: string(domain.RealmStrategyDedicated),
 		KeycloakShard: shard, OIDCClients: clients,
 	}
 
+	automationClientID := dedicatedPlatformAutomationClientID
 	err = s.tx.RunInTx(ctx, func(ctx context.Context) error {
 		if err := s.realms.Upsert(ctx, &domain.TenantRealm{
 			TenantID: req.TenantID, RealmName: realmName, Strategy: domain.RealmStrategyDedicated,
 			KeycloakShard: &shard, Status: domain.RealmStatusActive, ConvertedAt: nowPtr(),
+			ServiceAccountPrincipalID: &principalID, ServiceAccountKeycloakClientID: &automationClientID,
 		}); err != nil {
 			return err
 		}
@@ -492,6 +622,23 @@ func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string
 		return nil, domain.NewError(domain.ErrConversionFailed, "register oidc clients failed").WithDetails(map[string]any{"error": err.Error()})
 	}
 
+	// §2.5/RP-17: carry the platform-automation principal across into the
+	// new dedicated realm — the trial-realm client cannot itself move
+	// realms, so this mints a fresh dedicated-realm client and re-registers
+	// it against the SAME Token Service principal (TS-4's carry-over
+	// upsert, §25 rev 1.1 of the Token Service LLD, updates principal_sub
+	// in place rather than creating a second principal). Placed here,
+	// before the user-migration loop begins, so a failure can still safely
+	// trigger the realmMayHaveMigratedUsers-gated teardown below.
+	principalID, err := s.mintPlatformAutomation(ctx, idempotencyKey, tenantID, realmName, dedicatedPlatformAutomationClientID)
+	if err != nil {
+		if !realmMayHaveMigratedUsers {
+			s.bestEffortDeleteRealm(ctx, realmName)
+		}
+		s.failIdempotency(ctx, idempotencyKey)
+		return nil, domain.NewError(domain.ErrConversionFailed, "mint platform-automation principal failed").WithDetails(map[string]any{"error": err.Error()})
+	}
+
 	sourceUsers, err := s.keycloak.ListUsersByTenant(ctx, current.RealmName, tenantID)
 	if err != nil {
 		if !realmMayHaveMigratedUsers {
@@ -534,12 +681,31 @@ func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string
 		WebauthnReenrollRequired: webauthnReenroll, SharedSessionsTerminated: true,
 	}
 
+	// Captured before the tx closure below overwrites current.RealmName/
+	// current.ServiceAccountKeycloakClientID with the new dedicated realm's
+	// — needed after a successful commit to retire the shared-realm client
+	// the principal has now moved off of (§2.5). Reads the persisted
+	// client id rather than re-deriving it via sharedPlatformAutomationClientID:
+	// current.ServiceAccountKeycloakClientID is what Convert actually stored
+	// as this tenant's shared-realm client at mint time, so this stays
+	// correct even if the naming convention ever changes or a row was
+	// populated out-of-band; falls back to the derived name only for a
+	// legacy/never-minted row where the field is nil.
+	oldRealmName := current.RealmName
+	oldClientID := sharedPlatformAutomationClientID(tenantID)
+	if current.ServiceAccountKeycloakClientID != nil {
+		oldClientID = *current.ServiceAccountKeycloakClientID
+	}
+
+	automationClientID := dedicatedPlatformAutomationClientID
 	err = s.tx.RunInTx(ctx, func(ctx context.Context) error {
 		current.Strategy = domain.RealmStrategyDedicated
 		current.RealmName = realmName
 		current.KeycloakShard = &shard
 		current.Status = domain.RealmStatusActive
 		current.ConvertedAt = nowPtr()
+		current.ServiceAccountPrincipalID = &principalID
+		current.ServiceAccountKeycloakClientID = &automationClientID
 		if err := s.realms.Update(ctx, current); err != nil {
 			return err
 		}
@@ -574,11 +740,54 @@ func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string
 		return nil, err
 	}
 
+	// The conversion has fully committed — the principal now lives on
+	// realmName's client, so the old shared-realm client is retired
+	// (best-effort; a failure here leaves a harmless cleanup item, not an
+	// inconsistency, since the committed row already points at the new
+	// client). Synchronous, adding one Keycloak round-trip to this
+	// response — deliberately, mirroring ForceLogoutRealm's identical
+	// non-fatal-but-synchronous shape earlier in this same method, so a
+	// completed HTTP response always reflects every best-effort side
+	// effect this call attempted, not just the ones an async worker
+	// happened to get to first.
+	s.bestEffortDeleteServiceAccountClient(ctx, oldRealmName, oldClientID)
+
 	body := marshalIdempotencyResult(ctx, s.log, "convert", result)
 	if err := s.idempotency.Complete(ctx, idempotencyKey, body); err != nil {
 		s.log.WarnContext(ctx, "convert: idempotency complete failed", "tenant_id", tenantID, "error", err.Error())
 	}
 	return result, nil
+}
+
+// RefreshServiceAccountKeys implements RP-17's standalone rotate/revoke/
+// break-glass path (§2.5, corrected 2026-09-18/EXT-6 from an "apply a
+// caller-supplied secret" shape): the caller (operator/O&M tooling, or the
+// caller-facing side of a rotate/revoke) has already issued or revoked a
+// credential directly against Token Service's own TS-1/TS-2, and calls this
+// so the tenant's realm actually notices — Keycloak does not self-refresh a
+// jwks.url client's cached keys, verified empirically, so a new key is
+// unrecognized and a removed key keeps authenticating until this runs.
+// Serves both the rotate-apply and the revoke-enforce case with one action.
+// No RunInTx/outbox — this mutates no tracked local field, it is a pure
+// Keycloak-effect call (closer to RP-9/RP-15/RP-16's shape than
+// RP-1/2/3's). Fail-closed on a Keycloak-unreachable error rather than
+// RP-8's local-intent-first reconciler pattern: a stale key cache is
+// security-sensitive (a delayed reconciler retry risks leaving a
+// compromised key live longer than necessary), and the caller can simply
+// retry the call itself. Realm-scoped, not client-scoped: for RP-1's shared
+// trial realm this refreshes every trial tenant's automation client
+// sharing that realm — harmless (extra re-fetches only), not optimized for
+// in v1.
+func (s *ProvisioningService) RefreshServiceAccountKeys(ctx context.Context, tenantID uuid.UUID) error {
+	realm, err := s.realms.FindByTenantID(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	if realm.ServiceAccountKeycloakClientID == nil {
+		return domain.NewError(domain.ErrServiceAccountNotProvisioned, "tenant has no platform-automation principal minted yet").
+			WithDetails(map[string]any{"tenant_id": tenantID})
+	}
+	return s.keycloak.ClearServiceAccountKeysCache(ctx, realm.RealmName)
 }
 
 // CreateInvitedUserRequest is the RP-5 request body (§5.2, F5 — RP applies
@@ -701,6 +910,22 @@ func (s *ProvisioningService) RevertConversion(ctx context.Context, idempotencyK
 		}
 	}
 
+	// §2.5/RP-17: the dedicated realm just torn down (or already gone on a
+	// resumed attempt) took its "platform-automation" client with it, so the
+	// tenant is left with no working principal at all once back on the
+	// shared realm — mint a fresh tenant-scoped client there and carry the
+	// SAME Token Service principal over to it (TS-4's carry-over upsert),
+	// mirroring Convert's mint-on-the-way-in. Without this, the local row
+	// would keep pointing at a client/realm that no longer exists, and
+	// RP-17's RefreshServiceAccountKeys would silently no-op against it
+	// instead of surfacing the tenant's missing credential.
+	sharedClientID := sharedPlatformAutomationClientID(tenantID)
+	principalID, err := s.mintPlatformAutomation(ctx, idempotencyKey, tenantID, s.sharedRealm, sharedClientID)
+	if err != nil {
+		s.failIdempotency(ctx, idempotencyKey)
+		return nil, domain.NewError(domain.ErrConversionFailed, "mint platform-automation principal failed").WithDetails(map[string]any{"error": err.Error()})
+	}
+
 	result := &RevertConversionResult{TenantID: tenantID, Realm: s.sharedRealm, Strategy: string(domain.RealmStrategyShared)}
 	newTrialEndsAt := time.Now().UTC().AddDate(0, 0, newTrialDurationDays)
 	err = s.tx.RunInTx(ctx, func(ctx context.Context) error {
@@ -710,6 +935,8 @@ func (s *ProvisioningService) RevertConversion(ctx context.Context, idempotencyK
 		current.ConvertedAt = nil
 		current.TrialEndsAt = &newTrialEndsAt
 		current.Status = domain.RealmStatusActive
+		current.ServiceAccountPrincipalID = &principalID
+		current.ServiceAccountKeycloakClientID = &sharedClientID
 		if err := s.realms.Update(ctx, current); err != nil {
 			return err
 		}

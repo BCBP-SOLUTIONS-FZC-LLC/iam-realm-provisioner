@@ -7,12 +7,12 @@ import (
 	"github.com/google/uuid"
 )
 
-// TestNilServiceFallsBackToStub501 exercises every one of the 16 RP-*
+// TestNilServiceFallsBackToStub501 exercises every one of the 17 RP-*
 // routes with every core service left nil — InternalHandler's documented
 // incremental-wiring behavior (handlers.go, internal_handler.go's doc
 // comment): a nil service falls back to StubHandlers' uniform 501
 // not_implemented rather than panicking, so the router can be brought up
-// before every phase has landed. This also exercises StubHandlers' 16
+// before every phase has landed. This also exercises StubHandlers' 17
 // methods directly, since NewStubHandlers() only ever renders 501s.
 func TestNilServiceFallsBackToStub501(t *testing.T) {
 	stub := NewInternalHandler(nil, nil, nil, nil, nil)
@@ -43,6 +43,7 @@ func TestNilServiceFallsBackToStub501(t *testing.T) {
 		{"RP-14 suspend", http.MethodPost, suspendPath(tenantID), withHeader(operatorHeaders(), "Idempotency-Key", "k14"), ""},
 		{"RP-15 delete user", http.MethodDelete, deleteUserPath(tenantID, userID), sysHeaders(), ""},
 		{"RP-16 revoke sessions", http.MethodPost, revokeSessionsPath(tenantID, userID), sysHeaders(), ""},
+		{"RP-17 refresh service-account keys", http.MethodPost, refreshKeysPath(tenantID), sysHeaders(), ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

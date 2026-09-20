@@ -61,7 +61,7 @@ func (r *Router) Handler() http.Handler { return r.engine }
 
 // NewRouter builds and wires every route this service exposes: the
 // unauthenticated infra probes, the docs surface, and the mesh-only
-// /api/v1/internal/* provisioning API (RP-1..RP-16).
+// /api/v1/internal/* provisioning API (RP-1..RP-17).
 func NewRouter(cfg RouterConfig) *Router {
 	errorLogger = cfg.GinConfig.Logger
 
@@ -209,7 +209,7 @@ func registerDocsRoutes(r *gin.Engine, cfg RouterConfig) {
 	r.GET("/asyncapi.yaml", secHeaders, authMiddleware, AsyncAPIYAMLHandler)
 }
 
-// ── Provisioning API — /api/v1/internal/* (RP-1..RP-16) ──────────────────
+// ── Provisioning API — /api/v1/internal/* (RP-1..RP-17) ──────────────────
 
 func registerInternalRoutes(r *gin.Engine, cfg RouterConfig) {
 	h := cfg.Handlers
@@ -247,6 +247,7 @@ func registerInternalRoutes(r *gin.Engine, cfg RouterConfig) {
 	internal.POST("/tenants/:id/suspend", idem, RequireOperatorRole(), h.Suspend)           // RP-14
 	internal.DELETE("/tenants/:id/users/:keycloak_user_id", h.DeleteUser)                   // RP-15
 	internal.POST("/tenants/:id/users/:keycloak_user_id/revoke-sessions", h.RevokeSessions) // RP-16
+	internal.POST("/tenants/:id/service-account/keys/refresh", h.RefreshServiceAccountKeys) // RP-17
 
 	// Operator-only, whole-estate scan — not tenant-scoped (§5.1).
 	internal.POST("/audit/idp-region-portability", RequireOperatorRole(), h.PortabilityAudit) // RP-13

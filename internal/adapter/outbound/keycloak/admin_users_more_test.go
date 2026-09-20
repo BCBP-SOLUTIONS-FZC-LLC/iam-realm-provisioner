@@ -179,6 +179,24 @@ func TestFindUserByEmail_ListError(t *testing.T) {
 	assert.Equal(t, domain.ErrKeycloakUnavailable, de.Code)
 }
 
+func TestFindUserByEmail_TokenError(t *testing.T) {
+	a := newFakeAdmin(t, []tokenResponse{failTokenResponse()}, nil)
+	_, err := a.FindUserByEmail(context.Background(), "acme", "a@example.com")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "find_user_by_email: token")
+}
+
+func TestFindUserByEmail_NonUUIDID_ParseError(t *testing.T) {
+	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
+		mux.HandleFunc("GET "+realmPath("acme", "users"), func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, `[{"id":"not-a-uuid"}]`)
+		})
+	})
+	_, err := a.FindUserByEmail(context.Background(), "acme", "a@example.com")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "find_user_by_email: parse id")
+}
+
 // --- MigrateUser / partialImportUser ---
 
 func TestMigrateUser_Success_WithTotpAndWebauthn(t *testing.T) {

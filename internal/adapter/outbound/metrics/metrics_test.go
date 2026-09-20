@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -15,6 +16,18 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// gincommon's metrics.Init is a sync.Once singleton — once
+	// ObservabilityMiddlewares runs below, gincommonLabels() returns
+	// non-empty for the rest of this process, forever. This is the one and
+	// only point where gincommonLabels()'s "not bootstrapped yet" nil-return
+	// branch (its own doc comment's stated contract) can be observed, so
+	// check it here rather than in a Test* function that could run after
+	// bootstrap in any order.
+	if got := gincommonLabels(); got != nil {
+		fmt.Fprintf(os.Stderr, "gincommonLabels() must return nil before gincommon.ObservabilityMiddlewares has run, got %v\n", got)
+		os.Exit(1)
+	}
+
 	// ObservabilityMiddlewares is gincommon's public metrics-init API.
 	// Call it before Register() so collectors pick up {service, version}
 	// const labels and land on gincommon's registerer — the same order

@@ -687,6 +687,44 @@ paths:
       summary: RP-4 — Revert trial-to-dedicated conversion
       tags:
       - Provisioning
+  /tenants/{id}/service-account/keys/refresh:
+    post:
+      description: 'Clears the tenant''s realm-scoped Keycloak keys cache so a just-issued/rotated
+        credential is recognized and a just-revoked one stops authenticating (EXT-6,
+        §2.5) — Keycloak''s jwks.url client-jwt authenticator does not self-refresh.
+        No Keycloak-side apply happens at mint time (RP-1/RP-2/RP-3): Keycloak fetches
+        the JWKS lazily on first use. No Idempotency-Key: clearing an already-fresh
+        cache is a harmless no-op. Fail-closed on Keycloak-unreachable.'
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "404":
+          description: tenant_realm_not_found
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "422":
+          description: service_account_not_provisioned
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "502":
+          description: keycloak_unavailable
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - SystemRole: []
+      - TenantID: []
+      summary: RP-17 — Refresh a service-account's Keycloak key cache
+      tags:
+      - ServiceAccount
   /tenants/{id}/suspend:
     post:
       consumes:

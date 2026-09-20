@@ -3,16 +3,13 @@ package http
 import (
 	"net/http"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/pkg/requestctx"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
-
-// systemPrincipalUserID is the reserved iam-system caller identity RP→O&M
-// calls (and O&M/Billing→RP calls) use (§18.3: x-user-id=…00a1).
-const systemPrincipalUserID = "00000000-0000-0000-0000-0000000000a1"
 
 // bridgedIdentity is the primitive-typed view of the gateway-injected
 // identity used by the bridge helper.
@@ -30,7 +27,7 @@ type bridgedIdentity struct {
 // honored specially (§18.3).
 func parseBridgedIdentity(in bridgedIdentity) (rc *requestctx.RequestContext, errMsg string) {
 	var userID uuid.UUID
-	if in.UserIDStr == systemPrincipalUserID || in.UserIDStr == "iam-system" {
+	if in.UserIDStr == domain.SystemActorID || in.UserIDStr == "iam-system" {
 		userID = uuid.Nil
 	} else {
 		id, err := uuid.Parse(in.UserIDStr)

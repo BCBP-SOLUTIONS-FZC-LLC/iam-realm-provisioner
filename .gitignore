@@ -37,4 +37,8 @@ bin/
 # Editor/IDE
 # .idea/
 # .vscode/
-server
+
+# stray root-level binary from an ad-hoc `go build ./cmd/server` outside
+# make build's bin/ convention — anchored so it doesn't also shadow the
+# real cmd/server source directory the way the old bare `server` pattern did
+/server

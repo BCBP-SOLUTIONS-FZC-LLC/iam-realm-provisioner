@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
 )
 
@@ -22,6 +24,7 @@ type serviceDeps struct {
 	realms          *fakeTenantRealmRepository
 	idempotency     *fakeIdempotencyStore
 	keycloak        *fakeKeycloakAdmin
+	tokenService    *fakeTokenServiceClient
 	tx              *fakeTxRunner
 	idpConfigs      *fakeIdpConfigRepository
 	idpValidations  *fakeIdpValidationRepository
@@ -31,10 +34,29 @@ type serviceDeps struct {
 }
 
 func newServiceDeps() *serviceDeps {
+	keycloak := &fakeKeycloakAdmin{
+		CreateServiceAccountClientFn: func(ctx context.Context, realmName, clientID, jwksURL string) (uuid.UUID, bool, error) {
+			return uuid.New(), true, nil
+		},
+		ClearServiceAccountKeysCacheFn:       func(ctx context.Context, realmName string) error { return nil },
+		DeleteServiceAccountClientIfExistsFn: func(ctx context.Context, realmName, clientID string) error { return nil },
+	}
+	tokenService := &fakeTokenServiceClient{
+		RegisterPrincipalFn: func(ctx context.Context, tenantID uuid.UUID, req port.RegisterPrincipalRequest) (*port.RegisterPrincipalResult, error) {
+			return &port.RegisterPrincipalResult{PrincipalID: uuid.New(), Created: true, RecordVersion: 1}, nil
+		},
+		IssueOrRotateCredentialFn: func(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
+			return &port.IssueCredentialResult{Version: 1, Secret: "test-secret", OpenBaoPath: "iam/serviceaccount/test/v1", RecordVersion: 1}, nil
+		},
+		JWKSURLForFn: func(tenantID uuid.UUID) string {
+			return "http://token-service.test/api/v1/internal/tenants/" + tenantID.String() + "/service-accounts/platform-automation/jwks.json"
+		},
+	}
 	return &serviceDeps{
 		realms:          &fakeTenantRealmRepository{rows: map[uuid.UUID]*domain.TenantRealm{}},
 		idempotency:     &fakeIdempotencyStore{rows: map[string]*domain.ProvisioningOperation{}},
-		keycloak:        &fakeKeycloakAdmin{},
+		keycloak:        keycloak,
+		tokenService:    tokenService,
 		tx:              &fakeTxRunner{pub: &fakeEventPublisher{}},
 		idpConfigs:      &fakeIdpConfigRepository{rows: map[idpConfigKey]*domain.IdpConfig{}},
 		idpValidations:  &fakeIdpValidationRepository{},
@@ -49,7 +71,7 @@ func newServiceDeps() *serviceDeps {
 // just with fakes standing in for adapters.
 func (d *serviceDeps) handler() Handlers {
 	return NewInternalHandler(
-		service.NewProvisioningService(d.realms, d.idempotency, d.keycloak, d.tx, "trial", []string{"kc-shard-1"}),
+		service.NewProvisioningService(d.realms, d.idempotency, d.keycloak, d.tokenService, d.tx, "trial", []string{"kc-shard-1"}),
 		service.NewLifecycleService(d.realms, d.idempotency, d.keycloak, d.tx, "trial"),
 		service.NewMfaService(d.realms, d.keycloak, d.orgMembership),
 		service.NewIdpService(d.realms, d.idpConfigs, d.idpValidations, d.idempotency, d.openbao, d.keycloak),
@@ -72,7 +94,7 @@ func (d *serviceDeps) putRealm(r *domain.TenantRealm) uuid.UUID {
 // internal route (RequireSystemRole) requires.
 func sysHeaders() map[string]string {
 	return map[string]string{
-		"x-user-id":      systemPrincipalUserID,
+		"x-user-id":      domain.SystemActorID,
 		"x-tenant-id":    uuid.New().String(),
 		"x-tenant-roles": "iam-system",
 		"Content-Type":   "application/json",

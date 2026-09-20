@@ -66,6 +66,62 @@ func TestRevertConversion_Success(t *testing.T) {
 	assert.Equal(t, domain.EventTrialReactivated, pub.events[0].Type)
 }
 
+// §2.5/RP-17: RevertConversion deletes the dedicated realm (and the
+// platform-automation client that lived in it), so the tenant must get a
+// fresh tenant-scoped client minted back in the shared realm — otherwise
+// the row would keep pointing at a client/realm that no longer exists.
+func TestRevertConversion_Success_ReMintsSharedRealmServiceAccount(t *testing.T) {
+	svc, kc, realms, _, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	convertedAt := time.Now().UTC().Add(-24 * time.Hour)
+	seedDedicatedRealm(realms, tenantID, &convertedAt)
+	kc.ListUsersByTenantFn = func(ctx context.Context, realmName string, tid uuid.UUID) ([]uuid.UUID, error) { return nil, nil }
+	kc.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error { return nil }
+	var gotRealm, gotClientID string
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID, jwksURL string) (uuid.UUID, bool, error) {
+		gotRealm, gotClientID = realmName, clientID
+		return uuid.New(), true, nil
+	}
+
+	_, err := svc.RevertConversion(context.Background(), "rev-remint", tenantID, "", 7, 14)
+	require.NoError(t, err)
+	assert.Equal(t, "trial", gotRealm)
+	assert.Equal(t, "platform-automation-"+tenantID.String(), gotClientID)
+
+	row, err := realms.FindByTenantID(context.Background(), tenantID)
+	require.NoError(t, err)
+	require.NotNil(t, row.ServiceAccountPrincipalID)
+	require.NotNil(t, row.ServiceAccountKeycloakClientID)
+	assert.Equal(t, "platform-automation-"+tenantID.String(), *row.ServiceAccountKeycloakClientID)
+}
+
+// A mint failure fails the whole revert — the local row is left untouched
+// (still dedicated) rather than committing a revert with no working
+// platform-automation credential.
+func TestRevertConversion_MintPlatformAutomationFails_NoLocalCommit(t *testing.T) {
+	svc, kc, realms, idem, pub := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	convertedAt := time.Now().UTC().Add(-24 * time.Hour)
+	seedDedicatedRealm(realms, tenantID, &convertedAt)
+	kc.ListUsersByTenantFn = func(ctx context.Context, realmName string, tid uuid.UUID) ([]uuid.UUID, error) { return nil, nil }
+	kc.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error { return nil }
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID, jwksURL string) (uuid.UUID, bool, error) {
+		return uuid.Nil, false, domain.NewError(domain.ErrKeycloakUnavailable, "boom")
+	}
+
+	_, err := svc.RevertConversion(context.Background(), "rev-mint-fail", tenantID, "", 7, 14)
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrConversionFailed, de.Code)
+	assert.Empty(t, pub.events)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["rev-mint-fail"].Status)
+
+	row, err := realms.FindByTenantID(context.Background(), tenantID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.RealmStrategyDedicated, row.Strategy, "row must be untouched on a mint failure")
+}
+
 func TestRevertConversion_NotDedicated_Returns400(t *testing.T) {
 	svc, _, realms, idem, _ := newProvisioningTestService(t)
 	tenantID := uuid.New()
@@ -271,10 +327,11 @@ func TestRevertConversion_UpdateFails_MarksIdempotencyFailed(t *testing.T) {
 // still lands and the call still succeeds — just with no event enqueued.
 func TestRevertConversion_NoEventPublisherInContext_StillCommitsLocally(t *testing.T) {
 	kc := &mockKeycloakAdmin{}
+	ts := wirePlatformAutomationHappyPath(kc)
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx := newMockTxRunnerNoPublisher()
-	svc := service.NewProvisioningService(realms, idem, kc, tx, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
 	tenantID := uuid.New()
 	convertedAt := time.Now().UTC().Add(-time.Hour)
 	seedDedicatedRealm(realms, tenantID, &convertedAt)

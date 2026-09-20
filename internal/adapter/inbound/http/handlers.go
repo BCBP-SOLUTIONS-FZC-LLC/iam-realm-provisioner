@@ -6,27 +6,28 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Handlers is the full RP-1..RP-16 handler surface router.go binds to
+// Handlers is the full RP-1..RP-17 handler surface router.go binds to
 // routes. Phase 0/1 wires StubHandlers (returns 501 for every endpoint so
 // the service boots and passes health checks before the provisioning
 // services land); Phase 3/4 replace it with the real InternalHandler.
 type Handlers interface {
-	ProvisionTrial(c *gin.Context)    // RP-1
-	ProvisionDirect(c *gin.Context)   // RP-2
-	Convert(c *gin.Context)           // RP-3
-	RevertConversion(c *gin.Context)  // RP-4
-	CreateInvitedUser(c *gin.Context) // RP-5
-	ConfigureIdp(c *gin.Context)      // RP-6
-	RemoveIdp(c *gin.Context)         // RP-7
-	ApplyRealmConfig(c *gin.Context)  // RP-8
-	ResetMFA(c *gin.Context)          // RP-9
-	Reactivate(c *gin.Context)        // RP-10
-	GetRealm(c *gin.Context)          // RP-11
-	ExpireTrial(c *gin.Context)       // RP-12
-	PortabilityAudit(c *gin.Context)  // RP-13
-	Suspend(c *gin.Context)           // RP-14
-	DeleteUser(c *gin.Context)        // RP-15
-	RevokeSessions(c *gin.Context)    // RP-16
+	ProvisionTrial(c *gin.Context)            // RP-1
+	ProvisionDirect(c *gin.Context)           // RP-2
+	Convert(c *gin.Context)                   // RP-3
+	RevertConversion(c *gin.Context)          // RP-4
+	CreateInvitedUser(c *gin.Context)         // RP-5
+	ConfigureIdp(c *gin.Context)              // RP-6
+	RemoveIdp(c *gin.Context)                 // RP-7
+	ApplyRealmConfig(c *gin.Context)          // RP-8
+	ResetMFA(c *gin.Context)                  // RP-9
+	Reactivate(c *gin.Context)                // RP-10
+	GetRealm(c *gin.Context)                  // RP-11
+	ExpireTrial(c *gin.Context)               // RP-12
+	PortabilityAudit(c *gin.Context)          // RP-13
+	Suspend(c *gin.Context)                   // RP-14
+	DeleteUser(c *gin.Context)                // RP-15
+	RevokeSessions(c *gin.Context)            // RP-16
+	RefreshServiceAccountKeys(c *gin.Context) // RP-17
 }
 
 // StubHandlers implements Handlers with a uniform 501 not_implemented
@@ -87,5 +88,8 @@ func (s StubHandlers) DeleteUser(c *gin.Context) { s.notImplemented(c) }
 
 // RevokeSessions responds 501 (RP-16 not wired to this handler set).
 func (s StubHandlers) RevokeSessions(c *gin.Context) { s.notImplemented(c) }
+
+// RefreshServiceAccountKeys responds 501 (RP-17 not wired to this handler set).
+func (s StubHandlers) RefreshServiceAccountKeys(c *gin.Context) { s.notImplemented(c) }
 
 var _ Handlers = StubHandlers{}

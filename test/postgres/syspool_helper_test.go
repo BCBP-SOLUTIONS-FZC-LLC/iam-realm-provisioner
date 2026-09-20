@@ -30,7 +30,8 @@ func setupSysPool(t testing.TB, rawPool *dbseed.Pool) *pgcommon.Pool {
 	_, err := rawPool.Exec(ctx, `
 		GRANT SELECT, INSERT, UPDATE, DELETE ON
 			tenant_realms, keycloak_idp_configs, keycloak_idp_config_validations,
-			realm_config_reconciliations, provisioning_operations, processed_events
+			realm_config_reconciliations, provisioning_operations, processed_events,
+			outbox_events
 		TO realm_provisioner_migrator`)
 	require.NoError(t, err)
 

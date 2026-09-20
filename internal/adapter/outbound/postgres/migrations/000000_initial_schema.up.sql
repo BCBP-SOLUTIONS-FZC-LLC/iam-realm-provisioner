@@ -130,6 +130,15 @@ CREATE TABLE public.tenant_realms (
   suspension_source      text,
   exported_at            timestamptz,
   export_s3_key          text,
+  -- §2.5/RP-17: the tenant's platform-automation service-account principal,
+  -- once minted at RP-1/RP-2/RP-3 — NULL until then. keycloak_client_id is
+  -- the literal 'platform-automation' for a dedicated realm, or that name
+  -- suffixed with tenant_id for the shared trial realm (a shared realm
+  -- cannot hold two clients with the same clientId). principal_id is
+  -- Token Service's own row id (TS-4), not a local FK — Token Service owns
+  -- that table, not this one.
+  service_account_principal_id     uuid,
+  service_account_keycloak_client_id text,
   record_version         bigint NOT NULL DEFAULT 1 CHECK (record_version > 0),
   created_at             timestamptz NOT NULL DEFAULT now(),
   updated_at             timestamptz NOT NULL DEFAULT now(),

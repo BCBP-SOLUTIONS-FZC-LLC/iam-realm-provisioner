@@ -125,6 +125,37 @@ func TestTick_QueryFailureLogsWarnAndKeepsRunning(t *testing.T) {
 	}
 }
 
+// TestTick_ReFiresOnTicker pins the periodic re-fire itself, distinct from
+// the "populate before the first scrape" initial emit above — shrinks
+// exporterInterval for this one case so the ticker fires in well under a
+// second instead of the real 5 minutes.
+func TestTick_ReFiresOnTicker(t *testing.T) {
+	old := exporterInterval
+	exporterInterval = 5 * time.Millisecond
+	t.Cleanup(func() { exporterInterval = old })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls int32
+	done := make(chan struct{})
+	go func() {
+		tick(ctx, "test_gauge", &fakeLogger{}, func() error {
+			atomic.AddInt32(&calls, 1)
+			return nil
+		})
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool { return atomic.LoadInt32(&calls) >= 3 }, time.Second, time.Millisecond,
+		"the ticker must re-fire emit repeatedly, not just the initial pre-scrape call")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("tick did not return after ctx was canceled")
+	}
+}
+
 // TestSetGaugeVec_NoReset_RetainsLabelsAbsentFromLatestCounts pins
 // realm_active_gauge's own contract: a plain re-poll must never drop a
 // label the query didn't return this time, because the exporter relies on

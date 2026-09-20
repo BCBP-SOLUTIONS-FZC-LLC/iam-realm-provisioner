@@ -9,27 +9,30 @@ type ErrorCode string
 
 // ErrorCode values (§17).
 const (
-	ErrInvalidRealmStrategy       ErrorCode = "invalid_realm_strategy"        // 400
-	ErrInvalidIdpProtocol         ErrorCode = "invalid_idp_protocol"          // 400
-	ErrUnsupportedRealmSetting    ErrorCode = "unsupported_realm_setting"     // 400
-	ErrIdpRegionPortabilityFailed ErrorCode = "idp_region_portability_failed" // 400
-	ErrMissingIdempotencyKey      ErrorCode = "missing_idempotency_key"       // 400
-	ErrIdpWarningsUnacknowledged  ErrorCode = "idp_warnings_unacknowledged"   // 422
-	ErrTenantRealmNotFound        ErrorCode = "tenant_realm_not_found"        // 404
-	ErrIdpConfigNotFound          ErrorCode = "idp_config_not_found"          // 404
-	ErrKeycloakUserNotFound       ErrorCode = "keycloak_user_not_found"       // 404
-	ErrIdpRequiresDedicatedRealm  ErrorCode = "idp_requires_dedicated_realm"  // 409
-	ErrRealmAlreadyDedicated      ErrorCode = "realm_already_dedicated"       // 409
-	ErrRevertWindowExpired        ErrorCode = "revert_window_expired"         // 409
-	ErrTenantOffboarded           ErrorCode = "tenant_offboarded"             // 409
-	ErrOperationInProgress        ErrorCode = "operation_in_progress"         // 409
-	ErrOptimisticLockConflict     ErrorCode = "optimistic_lock_conflict"      // 409
-	ErrUserEmailConflict          ErrorCode = "user_email_conflict"           // 409
-	ErrKeycloakUnavailable        ErrorCode = "keycloak_unavailable"          // 502
-	ErrConversionFailed           ErrorCode = "conversion_failed"             // 502
-	ErrOrgMembershipUnavailable   ErrorCode = "org_membership_unavailable"    // 503
-	ErrObjectStoreUnavailable     ErrorCode = "object_store_unavailable"      // 503
-	ErrDBUnavailable              ErrorCode = "db_unavailable"                // 503
+	ErrInvalidRealmStrategy           ErrorCode = "invalid_realm_strategy"             // 400
+	ErrInvalidIdpProtocol             ErrorCode = "invalid_idp_protocol"               // 400
+	ErrUnsupportedRealmSetting        ErrorCode = "unsupported_realm_setting"          // 400
+	ErrIdpRegionPortabilityFailed     ErrorCode = "idp_region_portability_failed"      // 400
+	ErrMissingIdempotencyKey          ErrorCode = "missing_idempotency_key"            // 400
+	ErrIdpWarningsUnacknowledged      ErrorCode = "idp_warnings_unacknowledged"        // 422
+	ErrTenantRealmNotFound            ErrorCode = "tenant_realm_not_found"             // 404
+	ErrIdpConfigNotFound              ErrorCode = "idp_config_not_found"               // 404
+	ErrKeycloakUserNotFound           ErrorCode = "keycloak_user_not_found"            // 404
+	ErrIdpRequiresDedicatedRealm      ErrorCode = "idp_requires_dedicated_realm"       // 409
+	ErrRealmAlreadyDedicated          ErrorCode = "realm_already_dedicated"            // 409
+	ErrRevertWindowExpired            ErrorCode = "revert_window_expired"              // 409
+	ErrTenantOffboarded               ErrorCode = "tenant_offboarded"                  // 409
+	ErrOperationInProgress            ErrorCode = "operation_in_progress"              // 409
+	ErrOptimisticLockConflict         ErrorCode = "optimistic_lock_conflict"           // 409
+	ErrUserEmailConflict              ErrorCode = "user_email_conflict"                // 409
+	ErrServiceAccountRotationInFlight ErrorCode = "service_account_rotation_in_flight" // 409
+	ErrServiceAccountNotProvisioned   ErrorCode = "service_account_not_provisioned"    // 422
+	ErrKeycloakUnavailable            ErrorCode = "keycloak_unavailable"               // 502
+	ErrConversionFailed               ErrorCode = "conversion_failed"                  // 502
+	ErrOrgMembershipUnavailable       ErrorCode = "org_membership_unavailable"         // 503
+	ErrObjectStoreUnavailable         ErrorCode = "object_store_unavailable"           // 503
+	ErrDBUnavailable                  ErrorCode = "db_unavailable"                     // 503
+	ErrTokenServiceUnavailable        ErrorCode = "token_service_unavailable"          // 503
 
 	// ErrInvalidRequest is additive to the frozen §17 taxonomy -- a generic
 	// malformed-JSON/failed-binding-validation 400, distinct from the
@@ -48,28 +51,31 @@ const (
 
 // httpStatus maps every ErrorCode to its frozen HTTP status (§17).
 var httpStatus = map[ErrorCode]int{
-	ErrInvalidRequest:             400,
-	ErrInvalidRealmStrategy:       400,
-	ErrInvalidIdpProtocol:         400,
-	ErrUnsupportedRealmSetting:    400,
-	ErrIdpRegionPortabilityFailed: 400,
-	ErrMissingIdempotencyKey:      400,
-	ErrIdpWarningsUnacknowledged:  422,
-	ErrTenantRealmNotFound:        404,
-	ErrIdpConfigNotFound:          404,
-	ErrKeycloakUserNotFound:       404,
-	ErrIdpRequiresDedicatedRealm:  409,
-	ErrRealmAlreadyDedicated:      409,
-	ErrRevertWindowExpired:        409,
-	ErrTenantOffboarded:           409,
-	ErrOperationInProgress:        409,
-	ErrOptimisticLockConflict:     409,
-	ErrUserEmailConflict:          409,
-	ErrKeycloakUnavailable:        502,
-	ErrConversionFailed:           502,
-	ErrOrgMembershipUnavailable:   503,
-	ErrObjectStoreUnavailable:     503,
-	ErrDBUnavailable:              503,
+	ErrInvalidRequest:                 400,
+	ErrInvalidRealmStrategy:           400,
+	ErrInvalidIdpProtocol:             400,
+	ErrUnsupportedRealmSetting:        400,
+	ErrIdpRegionPortabilityFailed:     400,
+	ErrMissingIdempotencyKey:          400,
+	ErrIdpWarningsUnacknowledged:      422,
+	ErrServiceAccountNotProvisioned:   422,
+	ErrTenantRealmNotFound:            404,
+	ErrIdpConfigNotFound:              404,
+	ErrKeycloakUserNotFound:           404,
+	ErrIdpRequiresDedicatedRealm:      409,
+	ErrRealmAlreadyDedicated:          409,
+	ErrRevertWindowExpired:            409,
+	ErrTenantOffboarded:               409,
+	ErrOperationInProgress:            409,
+	ErrOptimisticLockConflict:         409,
+	ErrUserEmailConflict:              409,
+	ErrServiceAccountRotationInFlight: 409,
+	ErrKeycloakUnavailable:            502,
+	ErrConversionFailed:               502,
+	ErrOrgMembershipUnavailable:       503,
+	ErrObjectStoreUnavailable:         503,
+	ErrDBUnavailable:                  503,
+	ErrTokenServiceUnavailable:        503,
 }
 
 // Error is this service's domain error type: a stable code, an HTTP status

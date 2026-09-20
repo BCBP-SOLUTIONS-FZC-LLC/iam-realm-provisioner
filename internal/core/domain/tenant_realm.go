@@ -22,10 +22,18 @@ type TenantRealm struct {
 	SuspensionSource     *SuspensionSource
 	ExportedAt           *time.Time
 	ExportS3Key          *string
-	RecordVersion        int64
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
-	DeletedAt            *time.Time
+	// ServiceAccountPrincipalID/ServiceAccountKeycloakClientID record the
+	// tenant's platform-automation principal (§2.5, RP-17) once minted at
+	// RP-1/RP-2/RP-3 — nil until then. KeycloakClientID is the literal
+	// base name "platform-automation" for a dedicated realm, or that name
+	// suffixed with the tenant's UUID for the shared trial realm (a shared
+	// realm cannot hold two clients with the same clientId).
+	ServiceAccountPrincipalID      *uuid.UUID
+	ServiceAccountKeycloakClientID *string
+	RecordVersion                  int64
+	CreatedAt                      time.Time
+	UpdatedAt                      time.Time
+	DeletedAt                      *time.Time
 }
 
 // IsOffboarded reports whether the realm has reached the terminal state

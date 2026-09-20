@@ -143,6 +143,22 @@ func TestTenantConsumer_UnknownEventType_Acknowledged(t *testing.T) {
 	assert.Len(t, dedup.marked, 1, "unknown types must still be recorded in processed_events so redelivery does not storm")
 }
 
+// An unknown event type still fails loudly if ackUnknown's own
+// mark-processed write fails — the wrap-and-return branch in Handle's
+// default case, distinct from the known-event-type mark-processed test
+// below.
+func TestTenantConsumer_UnknownEventType_MarkProcessedFailurePropagates(t *testing.T) {
+	repo := &fakeRealmRepo{}
+	dedup := newStubDedup()
+	dedup.markProcessErr = errors.New("dedup write failed")
+	c := NewTenantConsumer(repo, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+
+	env := envelope(t, "TrialExpired", map[string]any{})
+	err := c.Handle(context.Background(), env)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tenant consumer")
+}
+
 func TestTenantConsumer_IsProcessedErrorPropagates(t *testing.T) {
 	repo := &fakeRealmRepo{}
 	dedup := newStubDedup()
