@@ -1,14 +1,29 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "TenantReactivatedPayload",
-  "description": "Payload of TenantReactivated (LLD §7.5, RP-D13) as PRODUCED by this service — RP-10's paid branch, source=operator, reverting a billing-lapse or RP-14 operator suspension back to active. Billing's own TenantReactivated (source=billing) is a distinct message on the billing.events topic, consumed on billing-realm-q — not validated by this schema.",
   "type": "object",
-  "required": ["tenant_id", "realm", "source"],
+  "required": [
+    "tenant_id",
+    "realm",
+    "source"
+  ],
   "additionalProperties": true,
   "properties": {
-    "tenant_id": { "type": "string", "format": "uuid" },
-    "realm": { "type": "string" },
-    "source": { "type": "string", "enum": ["operator"] },
-    "reason": { "type": "string" }
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "realm": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "operator"
+      ]
+    },
+    "reason": {
+      "type": "string"
+    }
   }
 }

@@ -79,7 +79,7 @@ func (h *InternalHandler) Reactivate(c *gin.Context) {
 	}
 	var req reactivateRequest
 	_ = c.ShouldBindJSON(&req) //nolint:errcheck // body is optional (reason only) — a missing/empty body just leaves req zero-valued
-	result, err := h.Lifecycle.Reactivate(c.Request.Context(), idempotencyKey(c), tenantID, domain.ReactivationSourceOperator, req.Reason, nil)
+	result, err := h.Lifecycle.Reactivate(c.Request.Context(), idempotencyKey(c), tenantID, domain.ReactivationSourceOperator, truncateReason(req.Reason, 500), nil)
 	if err != nil {
 		HandleError(c, err)
 		return
@@ -126,7 +126,7 @@ func (h *InternalHandler) ExpireTrial(c *gin.Context) {
 // ── RP-14: emergency operator suspension ─────────────────────────────────
 
 type suspendRequest struct {
-	Reason string `json:"reason" binding:"required"`
+	Reason string `json:"reason" binding:"required,max=500"`
 }
 
 // Suspend handles RP-14 (POST /tenants/:id/suspend).

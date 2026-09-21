@@ -12,12 +12,15 @@ import (
 // ── RP-6 ─────────────────────────────────────────────────────────────────
 
 type configureIdpRequest struct {
-	IdpAlias         string         `json:"idp_alias" binding:"required"`
-	Protocol         string         `json:"protocol" binding:"required"`
-	DisplayName      string         `json:"display_name" binding:"required"`
-	Config           map[string]any `json:"config"`
-	Secret           string         `json:"secret"`
-	Acknowledgements []string       `json:"ack"`
+	IdpAlias    string         `json:"idp_alias" binding:"required,max=128"`
+	Protocol    string         `json:"protocol" binding:"required,max=16"`
+	DisplayName string         `json:"display_name" binding:"required,max=256"`
+	Config      map[string]any `json:"config"`
+	// Secret can be a SAML signing certificate or RSA private key in PEM
+	// form (legitimately several KB) — bounded generously, well below the
+	// global request-body cap, not to the size of a typical OIDC client secret.
+	Secret           string   `json:"secret" binding:"max=8192"`
+	Acknowledgements []string `json:"ack" binding:"omitempty,max=20,dive,max=64"`
 }
 
 // ConfigureIdp handles RP-6 (PUT /tenants/:id/idp).
@@ -134,7 +137,7 @@ func (h *InternalHandler) PortabilityAudit(c *gin.Context) {
 // ── RP-8 ─────────────────────────────────────────────────────────────────
 
 type applyRealmConfigRequest struct {
-	SettingKey   string `json:"setting_key" binding:"required"`
+	SettingKey   string `json:"setting_key" binding:"required,max=128"`
 	DesiredValue any    `json:"desired_value"`
 }
 

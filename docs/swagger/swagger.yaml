@@ -18,6 +18,7 @@ definitions:
     properties:
       desired_value: {}
       setting_key:
+        maxLength: 128
         type: string
     required:
     - setting_key
@@ -27,17 +28,26 @@ definitions:
       ack:
         items:
           type: string
+        maxItems: 20
         type: array
       config:
         additionalProperties: {}
         type: object
       display_name:
+        maxLength: 256
         type: string
       idp_alias:
+        maxLength: 128
         type: string
       protocol:
+        maxLength: 16
         type: string
       secret:
+        description: |-
+          Secret can be a SAML signing certificate or RSA private key in PEM
+          form (legitimately several KB) — bounded generously, well below the
+          global request-body cap, not to the size of a typical OIDC client secret.
+        maxLength: 8192
         type: string
     required:
     - display_name
@@ -47,11 +57,14 @@ definitions:
   http.convertRequest:
     properties:
       billing_subscription_id:
+        maxLength: 128
         type: string
       payment_method_id:
         description: ignored — Billing/PCI domain, §5.2.1
+        maxLength: 128
         type: string
       plan:
+        maxLength: 32
         type: string
     required:
     - plan
@@ -59,12 +72,15 @@ definitions:
   http.createInvitedUserRequest:
     properties:
       email:
+        maxLength: 254
         type: string
       full_name:
+        maxLength: 256
         type: string
       required_actions:
         items:
           type: string
+        maxItems: 10
         type: array
     required:
     - email
@@ -73,20 +89,27 @@ definitions:
   http.provisionDirectRequest:
     properties:
       admin_email:
+        maxLength: 254
         type: string
       admin_name:
+        maxLength: 256
         type: string
       billing_subscription_id:
+        maxLength: 128
         type: string
       hashed_password_seed:
+        maxLength: 512
         type: string
       plan:
+        maxLength: 32
         type: string
       tenant_id:
         type: string
       tenant_name:
+        maxLength: 256
         type: string
       tenant_slug:
+        maxLength: 63
         type: string
     required:
     - admin_email
@@ -99,18 +122,24 @@ definitions:
   http.provisionTrialRequest:
     properties:
       admin_email:
+        maxLength: 254
         type: string
       admin_name:
+        maxLength: 256
         type: string
       hashed_password_seed:
+        maxLength: 512
         type: string
       plan:
+        maxLength: 32
         type: string
       tenant_id:
         type: string
       tenant_name:
+        maxLength: 256
         type: string
       tenant_slug:
+        maxLength: 63
         type: string
     required:
     - admin_email
@@ -133,6 +162,7 @@ definitions:
   http.suspendRequest:
     properties:
       reason:
+        maxLength: 500
         type: string
     required:
     - reason

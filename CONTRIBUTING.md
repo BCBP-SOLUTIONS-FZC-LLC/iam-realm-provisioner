@@ -67,7 +67,7 @@ deploy/               ← Helm chart, AWS IAM policy, OpenBao policy, Prometheus
 test/                 ← unit/, postgres/ (RLS, tagged `integration`), integration/ (Keycloak+SQS, tagged `integration`), e2e/ (tagged `e2e`)
 ```
 
-**Dependency rule:** `domain` ← `port` ← `service` ← `adapter` ← `cmd`. Nothing in `core/` may import an adapter package, Gin, pgx, gocloak, or an AWS SDK. `core/service` may additionally import `pkg/requestctx` and the `metrics` package (a cross-cutting observability leaf, not a "real" adapter). Enforced in CI by `go-arch-lint` (`.go-arch-lint.yml`) plus two custom greps in `.github/scripts/arch-lint.sh` for the two invariants below.
+**Dependency rule:** `domain` ← `port` ← `service` ← `adapter` ← `cmd`. Nothing in `core/` may import an adapter package, Gin, pgx, gocloak, or an AWS SDK. `core/service` may additionally import `pkg/requestctx` and the `metrics` package (a cross-cutting observability leaf, not a "real" adapter). Enforced in CI by `go-arch-lint` (`.go-arch-lint.yml`) plus five custom greps in `.github/scripts/arch-lint.sh`: the two invariants below, plus observability/database/events architectural-invariant checks requiring logs/metrics/traces, database connections, and SNS/SQS/outbox writes to flow through `platform-gincommon`/`platform-pgcommon`/`platform-events` respectively.
 
 For layering details and the request-flow diagrams, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -170,7 +170,7 @@ go test ./test/integration/... -tags=integration -run TestKeycloakAdmin_TenantID
 
 ### Coverage gate
 
-CI enforces a 70% global statement-coverage gate on the merged `coverage.out` (unit + postgres + integration suites, `./internal/...` + `./pkg/...`). See `.github/scripts/coverage-gate.sh`.
+CI enforces a 95% global statement-coverage gate on the merged `coverage.out` (unit + postgres + integration suites, `./cmd/...` + `./internal/...` + `./pkg/...`). See `.github/scripts/coverage-gate.sh`.
 
 ```bash
 make cover-func   # per-function summary in terminal
@@ -181,7 +181,7 @@ make cover        # HTML report
 
 ```bash
 make lint       # golangci-lint (.golangci.yml)
-make arch-lint  # go-arch-lint + RP-INV-1 + RLS-6 greps (.go-arch-lint.yml, .github/scripts/arch-lint.sh)
+make arch-lint  # go-arch-lint + RP-INV-1 + RLS-6 greps + observability/database/events architectural-invariant greps (.go-arch-lint.yml, .github/scripts/arch-lint.sh)
 ```
 
 ## Guardrails and forbidden patterns

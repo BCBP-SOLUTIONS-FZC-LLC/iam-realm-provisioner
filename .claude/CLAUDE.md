@@ -30,7 +30,7 @@ make fmt                # go fmt ./...
 make fmt-check          # Verify gofmt formatting without modifying files (mirrors CI)
 make vet                # go vet ./...
 make lint               # golangci-lint (via go tool golangci-lint)
-make arch-lint          # go-arch-lint dependency-rule enforcement (§3.4) + RP-INV-1/RLS-6 greps
+make arch-lint          # go-arch-lint dependency-rule enforcement (§3.4) + RP-INV-1/RLS-6 greps + observability/database/events architectural-invariant greps (gincommon-only, pgcommon-only, platform-events-only)
 make metrics-registry-lint # Enterprise Platform Observability Standard: no unratified platform_* metric sources a live alert/recording-rule/SLO
 make metric-naming-lint # Enterprise Platform Observability Standard: naming/suffix/label/registry-compliance rules against every registered metric
 make mod-verify         # go mod verify (check module download integrity)
@@ -64,7 +64,7 @@ make schema-register    # Register this service's 9 event schemas to the shared 
 make schema-verify      # Pre-deploy check: fail if any of the 9 schemas is missing from Glue (requires AWS)
 make schema-prune       # Dry-run: list orphaned Glue schemas (requires AWS; excludes O&M's TenantCreated/TrialStarted)
 make swag               # Generate Swagger docs (docs/swagger/) from handler annotations — re-run + commit on change
-make swag-check         # Fails if docs/swagger/ is stale relative to handler annotations (regenerate-and-diff, not yet wired into any workflow)
+make swag-check         # Fails if docs/swagger/ is stale relative to handler annotations (regenerate-and-diff; wired into validate-quality.yml)
 ```
 
 **Testcontainers note:** Postgres, Keycloak, and OpenBao integration tests spin up real containers via `testcontainers-go`. Each `test/postgres/*.go` test calls `t.Parallel()` and spins its own container, capped at `TEST_POSTGRES_PARALLEL` (default 4) rather than `GOMAXPROCS`-wide. Each `test/integration/*.go` Keycloak test also calls `t.Parallel()` and spins its own container — a JVM/Quarkus image, far heavier than Postgres — capped tighter at `TEST_INTEGRATION_PARALLEL` (default 2); left uncapped this defaults to `GOMAXPROCS` and OOM-kills containers on dev/CI boxes with <16GB of Docker memory. The OpenBao tests in the same package (`openbao_test.go`) share that cap and additionally drive a real Kubernetes-auth login by stubbing the TokenReview endpoint the container calls out to (no real Kubernetes cluster is available). Docker must be running for anything beyond `test-unit`.
@@ -113,7 +113,7 @@ Cross-cutting discipline: Keycloak-effect-first, then local commit (§9.1, see a
 
 ## Operations
 
-Security (Keycloak admin role set — `create-realm` on master, `realm-admin` composite on managed realms; credential protection via OpenBao, never env/image/git; per-tenant IdP secrets, never a Postgres pointer; network isolation, mesh-only); observability (Enterprise Platform Observability Standard three-tier metrics — `iam_realm_provisioner_*` Tier 3, authoritative, + three shadow-emitted `platform_*` Tier 1 candidates pending Platform Observability Registry ratification — tracing, structured logging, dashboards, alerts); configuration (all env vars, fail-fast checks, realm-template versioning + drift detection); deployment (topology, two workloads from one image, 6 CronJobs, Helm chart layout, CI/CD pipeline); testing strategy (unit/integration/contract/e2e/RLS/load); GDPR/data-lifecycle (minimal PII, erasure on trial hard-delete and offboarding, export-before-delete invariant); integration points with O&M/Billing/Signup BFF. Full detail in **[`.claude/operations.md`](operations.md)**.
+Security (Keycloak admin role set — `create-realm` on master, `realm-admin` composite on managed realms; credential protection via OpenBao, never env/image/git; per-tenant IdP secrets, never a Postgres pointer; network isolation, mesh-only); observability (Enterprise Platform Observability Standard three-tier metrics — `iam_realm_provisioner_*` Tier 3, authoritative, + seven shadow-emitted `platform_*` Tier 1 candidates pending Platform Observability Registry ratification — tracing, structured logging, dashboards, alerts); configuration (all env vars, fail-fast checks, realm-template versioning + drift detection); deployment (topology, two workloads from one image, 6 CronJobs, Helm chart layout, CI/CD pipeline); testing strategy (unit/integration/contract/e2e/RLS/load); GDPR/data-lifecycle (minimal PII, erasure on trial hard-delete and offboarding, export-before-delete invariant); integration points with O&M/Billing/Signup BFF. Full detail in **[`.claude/operations.md`](operations.md)**.
 
 ## See Also
 

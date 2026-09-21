@@ -22,18 +22,19 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
-  # 90% - matches coverage-gate.sh's own default (kept explicit here so the
-  # threshold is visible without reading both files). The measured merged
-  # total sits at ~92.2%, with a practical ceiling around ~92.6%: of the
-  # remaining uncovered statements, ~95% are pure infrastructure-wiring code
-  # in cmd/server/main.go, cmd/reconciler/main.go's run(), and
-  # exporters.go's runBusinessExporters - composition-root functions that
-  # only a live Postgres/Keycloak/AWS connection exercises, not unit- or
-  # testcontainer-reachable. 90% leaves headroom below the measured number
+  # 95% - matches coverage-gate.sh's own default (kept explicit here so the
+  # threshold is visible without reading both files). A prior pass judged
+  # cmd/server/main.go/cmd/reconciler/main.go's run() unreachable without a
+  # live Postgres/Keycloak/AWS connection; composition-root integration
+  # tests (cmd/server/main_integration_test.go, cmd/reconciler/
+  # main_integration_test.go) proved otherwise, using signal.Notify's
+  # pre-empt-default-terminate behavior to safely signal-test main() in
+  # process against a real testcontainers Postgres. That took the measured
+  # merged total to ~97.8%. 95% leaves headroom below the measured number
   # for testcontainer-run variance without masking a real regression.
-  # Ratchet this up if the composition roots are ever refactored into
-  # smaller, mockable units; never lower it to make a failing PR pass.
-  COVERAGE_THRESHOLD: '90'
+  # Ratchet this up over time as more tests are added; never lower it to
+  # make a failing PR pass.
+  COVERAGE_THRESHOLD: '95'
 
 jobs:
   test:

@@ -5,17 +5,21 @@
 # iam-delegation) — not an aspiration, a floor. Ratcheted to 90% once real
 # suites landed across every package (postgres/keycloak testcontainer
 # coverage, full handler/service/eventbus/consumer coverage) took the
-# measured total to ~92.2%; the buffer below that keeps testcontainer-run
-# variance from flaking an otherwise-good PR. The remaining gap to 100% is
-# overwhelmingly composition-root wiring (cmd/server/main.go,
-# cmd/reconciler/main.go's run(), exporters.go's runBusinessExporters) that
-# only a live Postgres/Keycloak/AWS connection exercises — not something
-# more unit/testcontainer tests can close. Ratchet this threshold up only
-# if that wiring is refactored into smaller, mockable units; never lower it
-# to make a failing PR pass.
+# measured total to ~92.2%. A prior pass judged the remaining gap —
+# composition-root wiring in cmd/server/main.go/cmd/reconciler/main.go's
+# run() — unreachable without a live Postgres/Keycloak/AWS connection; it
+# turned out to be reachable after all; signal.Notify intercepts
+# SIGINT/SIGTERM before the OS default-terminate action, which makes a
+# signal-handling, panic-on-failure main() safely testable in-process
+# against a real testcontainers Postgres (see cmd/server/
+# main_integration_test.go and cmd/reconciler/main_integration_test.go's own
+# doc comments), closing most of that gap and taking the measured total to
+# ~97.8%. Ratcheted to 95%; the buffer below that keeps testcontainer-run
+# variance from flaking an otherwise-good PR. Ratchet this up over time as
+# more tests are added; never lower it to make a failing PR pass.
 set -euo pipefail
 
-THRESHOLD="${COVERAGE_THRESHOLD:-90}"
+THRESHOLD="${COVERAGE_THRESHOLD:-95}"
 
 test -f coverage.out || {
   echo "::error file=coverage.out,title=Coverage gate::coverage.out missing - run 'make test-ci' before the coverage gate"

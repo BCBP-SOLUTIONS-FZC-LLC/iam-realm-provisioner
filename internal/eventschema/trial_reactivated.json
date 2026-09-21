@@ -1,12 +1,20 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "TrialReactivatedPayload",
-  "description": "Payload of TrialReactivated (LLD §7.5). Emitted by RP-10's trial branch — re-enabling a disabled trial user within the 30-day grace window (TRIAL_GRACE_DAYS).",
   "type": "object",
-  "required": ["tenant_id", "new_trial_ends_at"],
+  "required": [
+    "tenant_id",
+    "new_trial_ends_at"
+  ],
   "additionalProperties": true,
   "properties": {
-    "tenant_id": { "type": "string", "format": "uuid" },
-    "new_trial_ends_at": { "type": "string", "format": "date-time" }
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "new_trial_ends_at": {
+      "type": "string",
+      "format": "date-time"
+    }
   }
 }

@@ -122,6 +122,20 @@ var (
 	// MfaResetTotal counts RP-9 MFA-reset calls by result.
 	MfaResetTotal *prometheus.CounterVec
 
+	// ServiceAccountRegisterTotal counts the RP-1/RP-2/RP-3
+	// automation-principal mint-tail attempts (mint Keycloak client +
+	// Token Service TS-4/TS-1) by result — "warn" is the non-blocking
+	// Token-Service-unreachable-at-mint-time outcome, distinct from
+	// "fail" (§8.14 Part 1, planned RP-D17).
+	ServiceAccountRegisterTotal *prometheus.CounterVec
+
+	// ServiceAccountKeyRefreshTotal counts RP-17 calls by result.
+	ServiceAccountKeyRefreshTotal *prometheus.CounterVec
+
+	// ServiceAccountBackfillTotal counts RP-C5 backfill-reconciler
+	// per-tenant attempts by result (§8.14 Part 4, RP-D19).
+	ServiceAccountBackfillTotal *prometheus.CounterVec
+
 	// TemplateDrift is the report-only count of dedicated realms whose
 	// realm_template_version differs from REALM_TEMPLATE_VERSION.
 	TemplateDrift *prometheus.GaugeVec
@@ -187,6 +201,44 @@ var (
 	// scraped from rls_violation_log, by violation_type. Shadow-emitted
 	// alongside the still-authoritative RLSViolationsTotal.
 	RLSViolationsPlatformTotal *prometheus.CounterVec
+
+	// PlatformMessagesReceivedTotal, PlatformMessagesProcessedTotal, and
+	// PlatformMessagesFailedTotal are Tier 1 candidates named verbatim as
+	// Canonical (not even registry-proposed) in the standard's own Tier 1
+	// examples — see PlatformRegistry (registry.go, Status: Proposed here
+	// since this service is the one submitting them, not because the
+	// names themselves are in question). Shadow-emitted by wrapping this
+	// service's own three SQS consumer Handle() functions
+	// (cmd/server/main.go's instrumentConsumer) — the shared
+	// platform-events library's own events_consumed_total/etc. are a
+	// different, non-canonical naming scheme this service does not own
+	// and cannot rename from here; these three are this repo's own
+	// independent observation of the same received/processed/failed
+	// lifecycle, by consumer.
+
+	// PlatformMessagesReceivedTotal is documented above this var block.
+	PlatformMessagesReceivedTotal *prometheus.CounterVec
+	// PlatformMessagesProcessedTotal is documented above this var block.
+	PlatformMessagesProcessedTotal *prometheus.CounterVec
+	// PlatformMessagesFailedTotal is documented above this var block.
+	PlatformMessagesFailedTotal *prometheus.CounterVec
+
+	// PlatformDLQMessagesTotal is a Tier 1 candidate
+	// (platform_dlq_messages_total, Canonical per the standard's own Tier
+	// 1 examples) observing — never altering — the existing SQS-redrive
+	// outcome: a platform-events events.WithDeadLetterHandler callback
+	// (cmd/server/main.go's dlqHandler) fires once per message at
+	// ApproximateReceiveCount > 4 (one delivery before the queue's own
+	// maxReceiveCount=5 redrive-policy threshold, §7.1) purely to record
+	// this counter, then deliberately returns a non-nil error so the
+	// message is left visible for its normal, pre-existing redelivery —
+	// on the next attempt SQS's own redrive policy moves it to `-dlq`
+	// exactly as it always has. Never wired to fire twice for the same
+	// message: platform-events routes to this handler only while
+	// ApproximateReceiveCount > 4, and the 6th delivery (receive count 6)
+	// is intercepted by SQS itself before this service's consumer loop
+	// ever sees it again.
+	PlatformDLQMessagesTotal *prometheus.CounterVec
 )
 
 // gincommonLabels returns a copy of gincommon's {service, version} const
@@ -337,6 +389,24 @@ func registerMetrics(environment string) {
 		ConstLabels: labels,
 	}, []string{"result"})
 
+	ServiceAccountRegisterTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        prefix + "service_account_register_total",
+		Help:        "RP-1/RP-2/RP-3 automation-principal mint-tail attempts by result (success|warn|failure).",
+		ConstLabels: labels,
+	}, []string{"result"})
+
+	ServiceAccountKeyRefreshTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        prefix + "service_account_key_refresh_total",
+		Help:        "RP-17 service-account key-cache refresh calls by result.",
+		ConstLabels: labels,
+	}, []string{"result"})
+
+	ServiceAccountBackfillTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        prefix + "service_account_backfill_total",
+		Help:        "RP-C5 automation-principal backfill reconciler per-tenant attempts by result.",
+		ConstLabels: labels,
+	}, []string{"result"})
+
 	TemplateDrift = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name:        prefix + "template_drift",
 		Help:        "Report-only count of dedicated realms whose realm_template_version differs from the current REALM_TEMPLATE_VERSION, by realm_version.",
@@ -380,6 +450,30 @@ func registerMetrics(environment string) {
 		ConstLabels: platformLabels,
 	}, []string{"violation_type"})
 
+	PlatformMessagesReceivedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        "platform_messages_received_total",
+		Help:        "SQS messages received by an inbound consumer, before dedup/decode, by consumer.",
+		ConstLabels: platformLabels,
+	}, []string{"consumer"})
+
+	PlatformMessagesProcessedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        "platform_messages_processed_total",
+		Help:        "SQS messages whose consumer Handle() returned nil (including a deliberate no-op ack), by consumer.",
+		ConstLabels: platformLabels,
+	}, []string{"consumer"})
+
+	PlatformMessagesFailedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        "platform_messages_failed_total",
+		Help:        "SQS messages whose consumer Handle() returned a non-nil error (left visible for SQS redelivery), by consumer.",
+		ConstLabels: platformLabels,
+	}, []string{"consumer"})
+
+	PlatformDLQMessagesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        "platform_dlq_messages_total",
+		Help:        "Messages observed at the dead-letter threshold (ApproximateReceiveCount > 4) immediately before SQS's own redrive policy moves them to the queue's -dlq sibling, by consumer.",
+		ConstLabels: platformLabels,
+	}, []string{"consumer"})
+
 	gincommon.MetricsRegisterer().MustRegister(
 		ProvisionTotal,
 		UsersMigratedTotal,
@@ -397,6 +491,9 @@ func registerMetrics(environment string) {
 		UserDeleteTotal,
 		SessionRevokeTotal,
 		MfaResetTotal,
+		ServiceAccountRegisterTotal,
+		ServiceAccountKeyRefreshTotal,
+		ServiceAccountBackfillTotal,
 		TemplateDrift,
 		RLSViolationsTotal,
 		UnknownEventAcknowledged,
@@ -404,6 +501,10 @@ func registerMetrics(environment string) {
 		DependencyRequestDuration,
 		DuplicateMessagesTotal,
 		RLSViolationsPlatformTotal,
+		PlatformMessagesReceivedTotal,
+		PlatformMessagesProcessedTotal,
+		PlatformMessagesFailedTotal,
+		PlatformDLQMessagesTotal,
 	)
 
 	// Pre-initialize labels so dashboards show 0 rather than "no data".
@@ -411,4 +512,10 @@ func registerMetrics(environment string) {
 	RLSViolationsTotal.WithLabelValues("cross_tenant_access")
 	RLSViolationsPlatformTotal.WithLabelValues("missing_or_invalid_guc")
 	RLSViolationsPlatformTotal.WithLabelValues("cross_tenant_access")
+	for _, consumer := range []string{"membership", "tenant", "billing"} {
+		PlatformMessagesReceivedTotal.WithLabelValues(consumer)
+		PlatformMessagesProcessedTotal.WithLabelValues(consumer)
+		PlatformMessagesFailedTotal.WithLabelValues(consumer)
+		PlatformDLQMessagesTotal.WithLabelValues(consumer)
+	}
 }

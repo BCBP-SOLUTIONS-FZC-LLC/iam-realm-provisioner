@@ -66,6 +66,10 @@ func TestTokenErrorPropagates(t *testing.T) {
 		},
 		"DeleteIdp":        func() error { return a.DeleteIdp(ctx, "r", "idp1") },
 		"ApplyRealmConfig": func() error { return a.ApplyRealmConfig(ctx, "r", "local_accounts_enabled", true) },
+		"FindUserByEmail": func() error {
+			_, err := a.FindUserByEmail(ctx, "r", "a@example.com")
+			return err
+		},
 	}
 
 	for name, call := range cases {

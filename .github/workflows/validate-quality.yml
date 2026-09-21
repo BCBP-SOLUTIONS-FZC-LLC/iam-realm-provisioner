@@ -99,6 +99,15 @@ jobs:
       - name: Metric naming convention check
         run: bash .github/scripts/check-metric-naming.sh
 
+      # Regenerates docs/swagger/{docs.go,swagger.json,swagger.yaml} from
+      # the current @Summary/@Router handler annotations and fails if that
+      # produces a diff — the same drift this caught locally once already
+      # (RP-17/RP-18 shipped without a regenerate-and-commit). Matches
+      # make swag-check's own script; not previously wired into any
+      # workflow.
+      - name: Swagger staleness check
+        run: bash .github/scripts/check-swagger-stale.sh
+
       - name: Format check
         run: |
           unformatted=$(gofmt -l cmd/ internal/ pkg/ test/ 2>/dev/null || true)

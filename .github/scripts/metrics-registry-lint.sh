@@ -19,6 +19,14 @@ RULE_FILES=(
   deploy/monitoring/app-alerts.yml
   deploy/monitoring/slo-rules.yml
   deploy/helm/templates/prometheusrule.yaml
+  # HPA + the prometheus-adapter rule that feeds it a custom-metrics-API
+  # series — the standard's own "Update:... HPA metric references" /
+  # "MUST NOT source... an HPA reference" (rule 12) applies here too, not
+  # only to alerts/recording-rules/SLOs. Neither file references a
+  # platform_*/domain-shared name today (both key off gincommon's own
+  # http_requests_total), so this is a forward-looking guard.
+  deploy/helm/templates/hpa.yaml
+  deploy/monitoring/prometheus-adapter-rule.yaml
 )
 
 if [ ! -f "$REGISTRY_GO" ]; then

@@ -1,16 +1,39 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "TenantSuspendedPayload",
-  "description": "Payload of TenantSuspended (LLD §7.5, §8.8, §8.12). Emitted by the RP-C3 lapse sweep (source=billing_lapse, cancelled->suspended) or RP-14 emergency operator suspension (source=operator, no cancelled_at). source is always present (O&M OQ-7 contract).",
   "type": "object",
-  "required": ["tenant_id", "realm", "suspended_at", "source"],
+  "required": [
+    "tenant_id",
+    "realm",
+    "suspended_at",
+    "source"
+  ],
   "additionalProperties": true,
   "properties": {
-    "tenant_id": { "type": "string", "format": "uuid" },
-    "realm": { "type": "string" },
-    "cancelled_at": { "type": "string", "format": "date-time" },
-    "suspended_at": { "type": "string", "format": "date-time" },
-    "source": { "type": "string", "enum": ["billing_lapse", "operator"] },
-    "reason": { "type": "string" }
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "realm": {
+      "type": "string"
+    },
+    "cancelled_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "suspended_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "billing_lapse",
+        "operator"
+      ]
+    },
+    "reason": {
+      "type": "string"
+    }
   }
 }

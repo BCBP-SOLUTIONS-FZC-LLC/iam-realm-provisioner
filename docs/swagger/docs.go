@@ -1170,7 +1170,8 @@ const docTemplate = `{
             "properties": {
                 "desired_value": {},
                 "setting_key": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 128
                 }
             }
         },
@@ -1184,6 +1185,7 @@ const docTemplate = `{
             "properties": {
                 "ack": {
                     "type": "array",
+                    "maxItems": 20,
                     "items": {
                         "type": "string"
                     }
@@ -1193,16 +1195,21 @@ const docTemplate = `{
                     "additionalProperties": {}
                 },
                 "display_name": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 256
                 },
                 "idp_alias": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 128
                 },
                 "protocol": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 16
                 },
                 "secret": {
-                    "type": "string"
+                    "description": "Secret can be a SAML signing certificate or RSA private key in PEM\nform (legitimately several KB) — bounded generously, well below the\nglobal request-body cap, not to the size of a typical OIDC client secret.",
+                    "type": "string",
+                    "maxLength": 8192
                 }
             }
         },
@@ -1213,14 +1220,17 @@ const docTemplate = `{
             ],
             "properties": {
                 "billing_subscription_id": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 128
                 },
                 "payment_method_id": {
                     "description": "ignored — Billing/PCI domain, §5.2.1",
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 128
                 },
                 "plan": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 32
                 }
             }
         },
@@ -1232,13 +1242,16 @@ const docTemplate = `{
             ],
             "properties": {
                 "email": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 254
                 },
                 "full_name": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 256
                 },
                 "required_actions": {
                     "type": "array",
+                    "maxItems": 10,
                     "items": {
                         "type": "string"
                     }
@@ -1257,28 +1270,35 @@ const docTemplate = `{
             ],
             "properties": {
                 "admin_email": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 254
                 },
                 "admin_name": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 256
                 },
                 "billing_subscription_id": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 128
                 },
                 "hashed_password_seed": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 512
                 },
                 "plan": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 32
                 },
                 "tenant_id": {
                     "type": "string"
                 },
                 "tenant_name": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 256
                 },
                 "tenant_slug": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 63
                 }
             }
         },
@@ -1294,25 +1314,31 @@ const docTemplate = `{
             ],
             "properties": {
                 "admin_email": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 254
                 },
                 "admin_name": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 256
                 },
                 "hashed_password_seed": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 512
                 },
                 "plan": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 32
                 },
                 "tenant_id": {
                     "type": "string"
                 },
                 "tenant_name": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 256
                 },
                 "tenant_slug": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 63
                 }
             }
         },
@@ -1339,7 +1365,8 @@ const docTemplate = `{
             ],
             "properties": {
                 "reason": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 500
                 }
             }
         },

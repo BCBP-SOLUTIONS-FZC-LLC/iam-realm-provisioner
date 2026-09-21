@@ -19,7 +19,13 @@ export APP_NAME APP_ENV BUILD_VERSION
 # Black-box service/domain suite (package unit_test) — see CONTRIBUTING
 # "Test layout" for what belongs here vs. TEST_INTERNAL_PKGS below.
 TEST_UNIT_PKGS     := ./test/unit/...
-TEST_POSTGRES_PKGS := ./test/postgres/...
+# cmd/server and cmd/reconciler each carry one integration-tagged,
+# Postgres-only composition-root test (main_integration_test.go, plus
+# cmd/server's exporters_integration_test.go) exercising main()/run() end
+# to end against a real testcontainers Postgres — no Keycloak needed, so
+# they belong in the lighter "postgres" tier, not test-integration's
+# heavier Postgres+Keycloak suite.
+TEST_POSTGRES_PKGS := ./test/postgres/... ./cmd/server/... ./cmd/reconciler/...
 TEST_INT_PKGS      := ./test/integration/...
 TEST_E2E_PKGS      := ./test/e2e/...
 TEST_LOAD_PKGS     := ./test/load/...
@@ -357,10 +363,13 @@ docker-down:
 # never register, diff, verify, or prune (§7.3.1, RP-D5).
 SCHEMA_GOV_IMAGE ?= ghcr.io/bcbp-solutions-fzc-llc/platform-schemagov:0.4
 
-# schema-pull: pull the platform-schemagov Docker image.
+# schema-pull: pull the platform-schemagov Docker image. --platform=linux/amd64
+# is required — the image ships amd64-only (no arm64/v8 manifest), so a bare
+# `docker pull` on Apple Silicon fails with "no matching manifest"; every
+# other SCHEMA_GOV_IMAGE invocation below needs the same flag on `docker run`.
 .PHONY: schema-pull
 schema-pull:
-	docker pull "$(SCHEMA_GOV_IMAGE)"
+	docker pull --platform=linux/amd64 "$(SCHEMA_GOV_IMAGE)"
 
 # extract-schemas: derive internal/eventschema/*.json from api/asyncapi.yaml.
 # api/asyncapi.yaml is the single source of truth for event payload schemas.
@@ -369,7 +378,7 @@ schema-pull:
 .PHONY: extract-schemas
 extract-schemas:
 	@echo "Extracting event schemas from api/asyncapi.yaml..."
-	docker run --rm \
+	docker run --rm --platform=linux/amd64 \
 	  -v "$(CURDIR)":/workspace \
 	  "$(SCHEMA_GOV_IMAGE)" extract \
 	  --asyncapi   api/asyncapi.yaml \
@@ -384,7 +393,7 @@ extract-schemas:
 # and deliberately carry none yet (see ARCHITECTURE.md).
 .PHONY: schema-validate
 schema-validate: extract-schemas
-	docker run --rm \
+	docker run --rm --platform=linux/amd64 \
 	  -v "$(CURDIR)":/workspace \
 	  "$(SCHEMA_GOV_IMAGE)" validate \
 	  --asyncapi   api/asyncapi.yaml \
@@ -399,7 +408,7 @@ schema-diff:
 	  echo "Usage: make schema-diff CURRENT=<current.json> PROPOSED=<proposed.json> [SCHEMA_NAME=<name>]"; \
 	  exit 1; \
 	}
-	docker run --rm \
+	docker run --rm --platform=linux/amd64 \
 	  -v "$(CURDIR)":/workspace \
 	  "$(SCHEMA_GOV_IMAGE)" diff \
 	  --current     "$(CURRENT)" \
@@ -420,7 +429,7 @@ schema-register:
 	}
 	@rm -rf .tmp/glue-schemas
 	@bash .github/scripts/stage-produced-event-schemas.sh .tmp/glue-schemas
-	docker run --rm \
+	docker run --rm --platform=linux/amd64 \
 	  -v "$(CURDIR)":/workspace \
 	  -e AWS_ACCESS_KEY_ID \
 	  -e AWS_SECRET_ACCESS_KEY \
@@ -472,7 +481,7 @@ schema-prune:
 	  echo "GLUE_REGISTRY_TENANT_NAME is not set — add it to .env or pass on the command line"; \
 	  exit 1; \
 	}
-	docker run --rm \
+	docker run --rm --platform=linux/amd64 \
 	  -v "$(CURDIR)":/workspace \
 	  -e AWS_ACCESS_KEY_ID \
 	  -e AWS_SECRET_ACCESS_KEY \

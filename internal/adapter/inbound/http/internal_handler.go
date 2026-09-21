@@ -44,12 +44,12 @@ var _ Handlers = (*InternalHandler)(nil)
 
 type provisionTrialRequest struct {
 	TenantID           uuid.UUID `json:"tenant_id" binding:"required"`
-	TenantName         string    `json:"tenant_name" binding:"required"`
-	TenantSlug         string    `json:"tenant_slug" binding:"required"`
-	AdminEmail         string    `json:"admin_email" binding:"required,email"`
-	AdminName          string    `json:"admin_name" binding:"required"`
-	HashedPasswordSeed string    `json:"hashed_password_seed"`
-	Plan               string    `json:"plan" binding:"required"`
+	TenantName         string    `json:"tenant_name" binding:"required,max=256"`
+	TenantSlug         string    `json:"tenant_slug" binding:"required,max=63"`
+	AdminEmail         string    `json:"admin_email" binding:"required,email,max=254"`
+	AdminName          string    `json:"admin_name" binding:"required,max=256"`
+	HashedPasswordSeed string    `json:"hashed_password_seed" binding:"max=512"`
+	Plan               string    `json:"plan" binding:"required,max=32"`
 }
 
 // ProvisionTrial handles RP-1 (POST /tenants/provision-trial).
@@ -97,13 +97,13 @@ func (h *InternalHandler) ProvisionTrial(c *gin.Context) {
 
 type provisionDirectRequest struct {
 	TenantID              uuid.UUID `json:"tenant_id" binding:"required"`
-	TenantName            string    `json:"tenant_name" binding:"required"`
-	TenantSlug            string    `json:"tenant_slug" binding:"required"`
-	AdminEmail            string    `json:"admin_email" binding:"required,email"`
-	AdminName             string    `json:"admin_name" binding:"required"`
-	HashedPasswordSeed    string    `json:"hashed_password_seed"`
-	Plan                  string    `json:"plan" binding:"required"`
-	BillingSubscriptionID string    `json:"billing_subscription_id"`
+	TenantName            string    `json:"tenant_name" binding:"required,max=256"`
+	TenantSlug            string    `json:"tenant_slug" binding:"required,max=63"`
+	AdminEmail            string    `json:"admin_email" binding:"required,email,max=254"`
+	AdminName             string    `json:"admin_name" binding:"required,max=256"`
+	HashedPasswordSeed    string    `json:"hashed_password_seed" binding:"max=512"`
+	Plan                  string    `json:"plan" binding:"required,max=32"`
+	BillingSubscriptionID string    `json:"billing_subscription_id" binding:"max=128"`
 }
 
 // ProvisionDirect handles RP-2 (POST /tenants/provision-direct).
@@ -155,9 +155,9 @@ func (h *InternalHandler) ProvisionDirect(c *gin.Context) {
 // ── RP-3 ─────────────────────────────────────────────────────────────────
 
 type convertRequest struct {
-	Plan                  string `json:"plan" binding:"required"`
-	BillingSubscriptionID string `json:"billing_subscription_id"`
-	PaymentMethodID       string `json:"payment_method_id"` // ignored — Billing/PCI domain, §5.2.1
+	Plan                  string `json:"plan" binding:"required,max=32"`
+	BillingSubscriptionID string `json:"billing_subscription_id" binding:"max=128"`
+	PaymentMethodID       string `json:"payment_method_id" binding:"max=128"` // ignored — Billing/PCI domain, §5.2.1
 }
 
 // Convert handles RP-3 (POST /tenants/:id/convert).
@@ -239,7 +239,7 @@ func (h *InternalHandler) RevertConversion(c *gin.Context) {
 	}
 	var req revertConversionRequest
 	_ = c.ShouldBindJSON(&req) //nolint:errcheck // body is optional (reason only) — a missing/empty body just leaves req zero-valued
-	result, err := h.Provisioning.RevertConversion(c.Request.Context(), idempotencyKey(c), tenantID, req.Reason, 7, 14)
+	result, err := h.Provisioning.RevertConversion(c.Request.Context(), idempotencyKey(c), tenantID, truncateReason(req.Reason, 500), 7, 14)
 	if err != nil {
 		HandleError(c, err)
 		return
@@ -250,9 +250,9 @@ func (h *InternalHandler) RevertConversion(c *gin.Context) {
 // ── RP-5 ─────────────────────────────────────────────────────────────────
 
 type createInvitedUserRequest struct {
-	Email           string   `json:"email" binding:"required,email"`
-	FullName        string   `json:"full_name" binding:"required"`
-	RequiredActions []string `json:"required_actions"`
+	Email           string   `json:"email" binding:"required,email,max=254"`
+	FullName        string   `json:"full_name" binding:"required,max=256"`
+	RequiredActions []string `json:"required_actions" binding:"omitempty,max=10,dive,max=64"`
 }
 
 // CreateInvitedUser handles RP-5 (POST /tenants/:id/users).
@@ -379,6 +379,23 @@ func (h *InternalHandler) RefreshServiceAccountKeys(c *gin.Context) {
 // ── helpers ────────────────────────────────────────────────────────────
 
 func idempotencyKey(c *gin.Context) string { return c.GetHeader("Idempotency-Key") }
+
+// truncateReason bounds an optional, informational-only free-text field
+// (e.g. "reason" on RP-4/RP-10, whose handlers deliberately discard
+// ShouldBindJSON's error so a missing/malformed body still succeeds with a
+// zero-valued struct) to maxLen runes. A `binding:"max=N"` struct tag would
+// be silently ineffective on those two handlers specifically, since the
+// JSON decode step that populates the struct runs before validation and
+// its result is never inspected — this runs after binding instead, so an
+// oversized value is capped rather than flowing into the audit trail
+// unbounded.
+func truncateReason(s string, maxLen int) string {
+	r := []rune(s)
+	if len(r) <= maxLen {
+		return s
+	}
+	return string(r[:maxLen])
+}
 
 // validTenantSlug rejects a slug that would corrupt the realm name this
 // service derives from it ("tenant-"+slug, RP-2's dedicatedRealmName) once

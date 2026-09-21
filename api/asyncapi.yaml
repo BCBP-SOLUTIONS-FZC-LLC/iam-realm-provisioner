@@ -452,7 +452,7 @@ components:
 
     TrialTenantProvisionedPayload:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       required: [tenant_id, realm, keycloak_user_id]
       properties:
         tenant_id: { type: string, format: uuid }
@@ -461,7 +461,7 @@ components:
 
     TenantRealmReadyPayload:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       required: [tenant_id, realm, keycloak_shard, oidc_clients]
       properties:
         tenant_id: { type: string, format: uuid }
@@ -471,7 +471,7 @@ components:
 
     TenantConvertedPayload:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       required: [tenant_id, realm, plan, users_migrated, direct_signup]
       properties:
         tenant_id: { type: string, format: uuid }
@@ -483,7 +483,7 @@ components:
 
     DirectPaidSignupPayload:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       required: [tenant_id, realm, direct_signup]
       properties:
         tenant_id: { type: string, format: uuid }
@@ -492,7 +492,7 @@ components:
 
     TrialExpiredPayload:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       required: [tenant_id, trial_ends_at, grace_ends_at]
       properties:
         tenant_id: { type: string, format: uuid }
@@ -501,7 +501,7 @@ components:
 
     TrialReactivatedPayload:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       required: [tenant_id, new_trial_ends_at]
       properties:
         tenant_id: { type: string, format: uuid }
@@ -509,7 +509,7 @@ components:
 
     TenantSuspendedPayload:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       required: [tenant_id, realm, suspended_at, source]
       properties:
         tenant_id: { type: string, format: uuid }
@@ -521,7 +521,7 @@ components:
 
     TenantOffboardedPayload:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       required: [tenant_id, realm, export_s3_key, offboarded_at]
       properties:
         tenant_id: { type: string, format: uuid }
@@ -531,7 +531,7 @@ components:
 
     TenantReactivatedPayload:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       required: [tenant_id, realm, source]
       properties:
         tenant_id: { type: string, format: uuid }
