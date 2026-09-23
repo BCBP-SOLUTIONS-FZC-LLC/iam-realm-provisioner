@@ -552,7 +552,7 @@ sequenceDiagram
         OB -->>- Runner: unpublished batch
         loop for each envelope
             Runner ->>+ Codec: Encode — publish-time GlueCodec
-            Note over Codec: Prepends 18-byte Glue header {0x03,0x00,schema_version_UUID}<br/>from registry GLUE_REGISTRY_TENANT_NAME (shared "iam-tenant-events" registry, §7.3.1).<br/>NoopCodec pass-through when unset (dev).
+            Note over Codec: Prepends 18-byte Glue header {0x03,0x00,schema_version_UUID}.<br/>UUID from an in-memory cache, resolved ONCE at startup via glue:GetSchemaByDefinition<br/>with this build's embedded schema (shared "iam-tenant-events" registry, §7.3.1) —<br/>never "latest", no refresher, no per-event Glue call.<br/>NoopCodec pass-through when GLUE_REGISTRY_TENANT_NAME is unset (dev).
             Codec -->>- Runner: encoded bytes
             Runner ->>+ SNS: Publish(TopicArn=SNS_TOPIC_TENANT_ARN,<br/>MessageAttributes{EventType, TenantID, Source, EventID, Subject})
             SNS -->>- Runner: MessageID
@@ -588,6 +588,9 @@ sequenceDiagram
     SNS_B ->>+ Q3: filter EventType IN [TenantReactivated]
     Q3 -->>- C3: message
     C3 ->> C3: RunInTx { EnableRealm outside tx, then MarkProcessed(consumer='billing') } — Keycloak-effect-first
+
+    Note over Q1,C3: Every queue runs the same pipeline before the handlers above (consumerOptions + inboundHandler):<br/>GlueDecodeCodec strips the Glue header → instrumentConsumer (platform_messages_*) →<br/>validateConsumed against eventschema.ConsumedByConsumer (per consumer — billing's TenantReactivated is Billing's)<br/>violation → consumed_schema_violations_total++ and an error, the handler is never called
+    Note over Q1,C3: A message that keeps failing: deliveries 1-4 → handler, 5th → dlqHandler<br/>(platform_dlq_messages_total++, returns an error so it is not deleted) → SQS RedrivePolicy moves it to -dlq
 ```
 
 **Published: `iam.tenant.events`, 9 event types** — `TrialTenantProvisioned`, `TenantRealmReady`, `TenantConverted`, `DirectPaidSignup`, `TrialExpired`, `TrialReactivated`, `TenantSuspended`, `TenantOffboarded`, `TenantReactivated{source=operator}`. O&M produces `TenantCreated`/`TrialStarted` on the *same* topic (co-producer, disjoint schema names, RP-D5). `TenantOffboarded` is emitted **only after** the S3 export has succeeded and the realm has been deleted (`export_s3_key` always references a durable object, RP-EVT-4); O&M consumes it for its own GDPR wipe and this service does not re-emit it. The envelope carries `{id (UUID v7), source=iam-realm-provisioner, tenant_id, trace_id, specversion, time, subject, actor, dataschema, data}` — `tenant_id` lives on the envelope, never inside `data`.
@@ -599,6 +602,8 @@ sequenceDiagram
 | `membership-realm-q` | `iam.membership.events` | `DepartmentMembershipGranted`, `DepartmentMembershipLevelChanged`, `TenantRoleGranted`, `TenantRoleRevoked` | MFA-role sync (`MfaService.SyncRequiresMfa`) — unconditional assign-if-absent on grant, revoke on `TenantRoleRevoked` only after `OrgMembershipClient.HasResidualMFARequirement` (O&M's I-8) confirms no residual requirement. I-8 failure is **fail-open via SQS redelivery** (the message is not deleted), so MFA is never silently dropped. |
 | `tenant-realm-q` | `iam.tenant.events` | `TrialStarted` | Record local `trial_ends_at` (RP-4) — this service never queries O&M for expired trials, it's push-only |
 | `billing-realm-q` | `billing.events` | `TenantReactivated` (`source=billing`) | Re-enable a suspended dedicated realm (no-op if not suspended) |
+
+Each queue's handler runs inside `inboundHandler` (`cmd/server/inbound_schema.go`): `platform_messages_*` counters → **consumed-schema validation** → the consumer's `Handle`. The Glue-decoded payload is validated against this service's own extracted consumed-message schema (`eventschema.ConsumedByConsumer`, keyed per consumer — billing's `TenantReactivated` is Billing's, never this service's own produced one). No Glue call; unknown types pass through to `ackUnknown`. A violation never reaches the handler or `processed_events`; it is returned as an error, so SQS retries it until the queue's RedrivePolicy moves it to `-dlq` (arch-lint's events invariant keeps DLQ handling inside platform-events), and it pages via `iam_realm_provisioner_consumed_schema_violations_total`.
 
 Where the dedup mark is written follows what the handler touches: `TenantConsumer` and `BillingConsumer` write to Postgres, so their projection update and `processed_events` insert commit in **one** `RunInTx` — a failure on either side rolls both back so redelivery retries the whole handler (`BillingConsumer`'s Keycloak `EnableRealm` call itself stays outside that transaction, Keycloak-effect-first). `MembershipConsumer` writes nothing locally; it still marks processed inside `RunInTx` after success, matching `iam-org-membership`. Unknown event types are silently ack'd, counted, and recorded in `processed_events` so a producer adding a type cannot storm the queue. This service **never self-consumes** the nine events it produces, and Billing-produced `TenantReactivated{source=billing}` arrives on a **different** topic than the operator-produced `TenantReactivated{source=operator}` this service itself emits (RP-D13) — the two are never confused. The domain migration `ALTER`s `outbox_events.payload` from JSONB to `text` (a PgBouncer simple-query bytea-hex workaround) and adds a normalize trigger, so `cmd/server/main.go` runs `outbox.ApplySchema` **before** the domain migration (MIG-2, inverted vs. some siblings) — `outbox_events` must already exist for the `ALTER` to apply.
 
@@ -633,7 +638,7 @@ graph LR
     subgraph prom["Prometheus  →  /metrics on dedicated METRICS_PORT (never shares a listener)"]
         p1["http_requests_total{method,route,status_class}\nhttp_request_duration_seconds · http_active_requests\n(platform-gincommon, free)"]
         p2["events_* / outbox_* / sqs_*\n(platform-events, incl. outbox_dead_letters_total)"]
-        p3["iam_realm_provisioner_* Tier 3 (service-specific) instruments —\nAUTHORITATIVE for every alert/SLO\n(internal/adapter/outbound/metrics/metrics.go), §25 frozen prefix:\nprovision_total{kind,result} · users_migrated_total\nrealm_active_gauge{strategy} · keycloak_call_duration_seconds{op}\nkeycloak_call_failures_total{op} · admin_token_refresh_total{trigger}\nidp_validation_total{outcome} · mfa_role_sync_total{action}\nrealm_config_pending_gauge · trial_expiry_processed/deferred_total\nlapse_processed_total{transition} · realm_export_total{result}\nuser_delete_total{result} · session_revoke_total{result}\nmfa_reset_total{result} · template_drift{realm_version}\nrls_violations_total{violation_type} · unknown_event_acknowledged_total{topic,event_type}\nprocessed_events_duplicates_total{consumer}"]
+        p3["iam_realm_provisioner_* Tier 3 (service-specific) instruments —\nAUTHORITATIVE for every alert/SLO\n(internal/adapter/outbound/metrics/metrics.go), §25 frozen prefix:\nprovision_total{kind,result} · users_migrated_total\nrealm_active_gauge{strategy} · keycloak_call_duration_seconds{op}\nkeycloak_call_failures_total{op} · admin_token_refresh_total{trigger}\nidp_validation_total{outcome} · mfa_role_sync_total{action}\nrealm_config_pending_gauge · trial_expiry_processed/deferred_total\nlapse_processed_total{transition} · realm_export_total{result}\nuser_delete_total{result} · session_revoke_total{result}\nmfa_reset_total{result} · template_drift{realm_version}\nrls_violations_total{violation_type} · unknown_event_acknowledged_total{topic=source topic,event_type}\nconsumed_schema_violations_total{consumer,event_type} · processed_events_duplicates_total{consumer}"]
         p4["platform_* Tier 1 (cross-domain) candidates — Status: Proposed,\nshadow-emitted only, NOT wired into any alert/SLO pending\nPlatform Observability Registry ratification (rules 11/12):\nconst labels: domain=iam, service=realm-provisioner, environment\nplatform_dependency_request_seconds{dependency,operation,outcome}\nplatform_duplicate_messages_total{consumer}\nplatform_rls_violations_total{violation_type}\nplatform_messages_received/processed/failed_total{consumer}\nplatform_dlq_messages_total{consumer}\nsee internal/adapter/outbound/metrics/registry.go's PlatformRegistry"]
     end
 
@@ -662,7 +667,7 @@ graph LR
 
     subgraph alerts["Alert routing (deploy/monitoring/app-alerts.yml)"]
         a1["Warning: keycloak_call_failures_total rate > 5% / 5m\ntrial_expiry_deferred_total > 0 sustained 1h\nrealm_config_pending_gauge > 0 sustained 30m (RP-INV-6)\noutbox_dead_letters_total increase > 0 / 30m\n{membership,billing,tenant}-realm-q DLQ depth > 0"]
-        a2["Critical: realm_export_total{result=fail} > 0\n(offboarding blocked — export-before-delete invariant)"]
+        a2["Critical: realm_export_total{result=fail} > 0\n(offboarding blocked — export-before-delete invariant)\nconsumed_schema_violations_total rate > 0 / 5m\n(consumed contract break — events of that type dropped)"]
         a3["Informational: admin_token_refresh_total{trigger=401} spike\n(possible credential rotation)"]
     end
 

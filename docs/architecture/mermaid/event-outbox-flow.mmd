@@ -29,7 +29,7 @@ sequenceDiagram
         OB -->>- Runner: unpublished batch
         loop for each envelope
             Runner ->>+ Codec: Encode — publish-time GlueCodec
-            Note over Codec: Prepends 18-byte Glue header {0x03,0x00,schema_version_UUID}<br/>from registry GLUE_REGISTRY_TENANT_NAME (shared "iam-tenant-events" registry, §7.3.1).<br/>NoopCodec pass-through when unset (dev).
+            Note over Codec: Prepends 18-byte Glue header {0x03,0x00,schema_version_UUID}.<br/>UUID from an in-memory cache, resolved ONCE at startup via glue:GetSchemaByDefinition<br/>with this build's embedded schema (shared "iam-tenant-events" registry, §7.3.1) —<br/>never "latest", no refresher, no per-event Glue call.<br/>NoopCodec pass-through when GLUE_REGISTRY_TENANT_NAME is unset (dev).
             Codec -->>- Runner: encoded bytes
             Runner ->>+ SNS: Publish(TopicArn=SNS_TOPIC_TENANT_ARN,<br/>MessageAttributes{EventType, TenantID, Source, EventID, Subject})
             SNS -->>- Runner: MessageID
@@ -65,3 +65,6 @@ sequenceDiagram
     SNS_B ->>+ Q3: filter EventType IN [TenantReactivated]
     Q3 -->>- C3: message
     C3 ->> C3: RunInTx { EnableRealm outside tx, then MarkProcessed(consumer='billing') } — Keycloak-effect-first
+
+    Note over Q1,C3: Every queue runs the same pipeline before the handlers above (consumerOptions + inboundHandler):<br/>GlueDecodeCodec strips the Glue header → instrumentConsumer (platform_messages_*) →<br/>validateConsumed against eventschema.ConsumedByConsumer (per consumer — billing's TenantReactivated is Billing's)<br/>violation → consumed_schema_violations_total++ and an error, the handler is never called
+    Note over Q1,C3: A message that keeps failing: deliveries 1-4 → handler, 5th → dlqHandler<br/>(platform_dlq_messages_total++, returns an error so it is not deleted) → SQS RedrivePolicy moves it to -dlq

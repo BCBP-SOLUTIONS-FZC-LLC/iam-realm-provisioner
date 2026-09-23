@@ -133,7 +133,7 @@ iam-realm-provisioner/
 │   │   ├── domain/                    # Entities, value objects, ErrorCode taxonomy (§17), event payload structs — no deps beyond google/uuid
 │   │   ├── port/                      # KeycloakAdmin (RP-INV-1's sole seam, incl. §2.5 service-account methods), repositories, IdempotencyStore, ProcessedEventsStore, OpenBaoClient, OrgMembershipClient, ObjectStore, SubscriptionLapseReader, TokenServiceClient
 │   │   └── service/                   # ProvisioningService, LifecycleService, IdpService, RealmConfigService, MfaService
-│   ├── eventschema/                   # Embedded JSON Schema draft-07, one per produced event + asyncapi_drift_test.go
+│   ├── eventschema/                   # Embedded JSON Schema draft-07: 9 produced + 6 consumed, + asyncapi_drift_test.go
 │   └── adapter/
 │       ├── inbound/
 │       │   ├── http/                  # Gin handlers (RP-1..RP-17), DTOs, middleware, router.go, /asyncapi
@@ -141,7 +141,7 @@ iam-realm-provisioner/
 │       └── outbound/
 │           ├── keycloak/              # gocloak-backed KeycloakAdmin — RP-INV-1's ONLY implementation
 │           ├── postgres/              # Repository impls + single consolidated 000000_initial_schema migration
-│           ├── eventbus/              # Outbox publisher (single topic iam-tenant-events) + Glue/Noop/Validating codecs
+│           ├── eventbus/              # Outbox publisher (single topic iam-tenant-events) + Glue (version by definition)/GlueDecode/Noop/Validating codecs
 │           ├── openbao/               # KV v2 client, Kubernetes-auth (pod ServiceAccount → OpenBao role → policy)
 │           ├── orgmembership/         # HTTP client for O&M's I-8 residual-MFA check + I-16 subscription-lapse poll (RP-C3)
 │           ├── tokenservice/          # HTTP client for Token Service's TS-1/TS-3/TS-4 handshake (§2.5, RP-17/RP-18)
@@ -183,7 +183,7 @@ RLS-6 (no non-`SET LOCAL` write to `app.tenant_id`) is checked separately, inlin
 |---|---|---|
 | **Primary store** | PostgreSQL, database `provisioner` on shared RDS (Multi-AZ, PgBouncer transaction pooling in prod) | `FORCE ROW LEVEL SECURITY` on the 5 tenant-scoped tables; GUC `app.tenant_id` bound transaction-locally |
 | **Events** | AWS SNS + transactional outbox (`platform-events`) | One topic, `iam-tenant-events` — **not** a `RoutingPublisher`; this service is a co-producer with Org & Membership, disjoint event names |
-| **Inbound queues** | AWS SQS, 3 queues | `membership-realm-q`, `tenant-realm-q`, `billing-realm-q`, each with its own `-dlq` (`maxReceiveCount=5`), dedup via `processed_events` |
+| **Inbound queues** | AWS SQS, 3 queues | `membership-realm-q`, `tenant-realm-q`, `billing-realm-q`, each with its own `-dlq` (`maxReceiveCount=5`), dedup via `processed_events`. Every message: Glue header stripped (`GlueDecodeCodec`) → counted → payload validated against the consumer's own consumed-message schema → handler; `dlqHandler` observes the 5th delivery before SQS redrives to `-dlq` |
 | **Secrets** | OpenBao KV v2 | Per-tenant IdP secrets at `secret/data/iam/realm-provisioner/idp/<tenant_id>/<idp_alias>`; Kubernetes auth (pod ServiceAccount token → role → policy) |
 | **Realm exports** | AWS S3 (KMS-encrypted) | Offboarding — export-before-delete invariant (RP-EVT-4) |
 | **Admin-token cache** | In-process, single-flight | LLD §6.2 specifies a shared Valkey tier (`rp:kcadmin:token`); not implemented in this repo — correctness unaffected, only the token-endpoint call rate rises per replica (RP-D4) |
@@ -284,6 +284,8 @@ This service publishes to **`iam-tenant-events`** via a transactional outbox —
   "data": { "tenant_id": "f0e1d2c3-...", "realm": "trial", "keycloak_user_id": "a1b2c3d4-..." }
 }
 ```
+
+**Wire format:** with `GLUE_REGISTRY_TENANT_NAME` set, `data` is a base64 string of `[0x03][0x00][16-byte schema version UUID]` + the JSON payload and `dataschema` holds that UUID — wire a decoder (`events.WithConsumerCodec`; stripping the 18-byte header is enough). The UUID is the version matching the publishing build's embedded schema (resolved by definition at its startup), so it changes only when a build with a changed schema is deployed.
 
 **Co-producer note:** Org & Membership also publishes on this same topic (`TenantCreated`/`TrialStarted`) — disjoint event names, no collision risk (RP-D5). Handle an unrecognized `type` gracefully (log + skip). **Idempotency:** record the envelope `id` (UUID v7) against your own consumer name before committing any side effect, mirroring this service's own `processed_events` composite PK `(event_id, consumer)` pattern — delivery is at-least-once. **Ordering:** do not assume SNS preserves delivery order; handle via upsert-style projections.
 
@@ -577,6 +579,8 @@ docker compose exec postgres psql -U postgres -d provisioner -c \
 | `outbox_events` row has `last_error` containing `404 NotFound` | Topic ARN mismatch | Verify against `aws sns list-topics` output |
 | `outbox_events` empty after a write | Row was published and pruned, or the write never committed | Re-check the HTTP response code — a `2xx` guarantees the row was committed |
 | Messages keep reappearing after `receive-message` | Normal — visibility timeout, not deletion | Use `delete-message` |
+| Server panics at startup with `resolve glue schema ... by definition` | This build's schema definition isn't registered in floci's Glue registry (e.g. a schema changed since floci started) | `make docker-down && make docker-up` to re-run `init-floci.sh`, or unset `GLUE_REGISTRY_TENANT_NAME` for plain JSON |
+| An inbound event ends up in `*-realm-q-dlq` and `iam_realm_provisioner_consumed_schema_violations_total` rose | Payload fails the consumer's consumed-message schema (`internal/eventschema`) | Fix the producer payload, or `api/asyncapi.yaml` + `make extract-schemas` if our schema is wrong |
 | RP-6/RP-7 (IdP configure/remove) return `500` locally | OpenBao's Kubernetes-auth login has no real Kubernetes cluster to call out to in `docker-compose.yml` | Expected in local dev — seed OpenBao manually (`bao login <root token from docker compose logs openbao>`), or rely on `test/integration/openbao_test.go`, which exercises the real login flow with a stubbed TokenReview response |
 
 ---
@@ -619,7 +623,7 @@ Coverage is measured over `./cmd/...`, `./internal/...`, `./pkg/...` (`COVER_PKG
 | `AWS_ENDPOINT_URL` | `http://localhost:4572` | — | Floci endpoint override (leave unset in production) |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | `test` / `test` | — | Floci dev credentials (IRSA in production) |
 | `SNS_TOPIC_TENANT_ARN` | `arn:aws:sns:...` | — | **Required outside dev.** `iam-tenant-events` topic ARN — events queue in the outbox but never publish without it |
-| `GLUE_REGISTRY_TENANT_NAME` | `iam-tenant-events` | — | **Required outside dev.** Unset → `NoopCodec` (plain JSON) |
+| `GLUE_REGISTRY_TENANT_NAME` | `iam-tenant-events` | — | **Required outside dev.** Unset → `NoopCodec` (plain JSON). Set → each produced schema's version UUID is resolved once at startup by definition (`glue:GetSchemaByDefinition`); a pod whose schema isn't registered yet fails startup until `schema-registry.yml` registers it |
 | `SQS_MEMBERSHIP_REALM_QUEUE_URL` / `SQS_TENANT_REALM_QUEUE_URL` / `SQS_BILLING_REALM_QUEUE_URL` | `https://sqs.../membership-realm-q` | — | The 3 inbound queues — an unset URL disables that one consumer with a `WARN`, not a startup failure |
 | `OUTBOX_POLL_INTERVAL` / `OUTBOX_BATCH_SIZE` / `OUTBOX_MAX_ATTEMPTS` / `OUTBOX_DRAIN_TIMEOUT` / `OUTBOX_RETENTION_DAYS` | `500ms` / `50` / `5` / `30s` / `8` | same | Outbox runner tunables |
 | `PROCESSED_EVENTS_TTL_DAYS` | `8` | `8` | Consumer dedup retention (deliberately > the 7-day SQS message lifetime) |
@@ -679,7 +683,7 @@ Coverage is measured over `./cmd/...`, `./internal/...`, `./pkg/...` (`COVER_PKG
 Follows the Enterprise Platform Observability Standard's three-tier hierarchy (`internal/adapter/outbound/metrics/metrics.go`'s package doc has the full per-metric rationale; `internal/adapter/outbound/metrics/registry.go`'s `PlatformRegistry` carries the full ratification packets — semantic definition, labels and their allowed values, cardinality, aggregation expectations):
 
 - **Tier 1 `platform_*`, all `Status: Proposed`** (shared across every domain, `{domain="iam", service="realm-provisioner", environment}` labels; submitted to the Platform Observability Registry, **not yet ratified** — shadow-emitted only, per the standard's governance rules 11/12 not wired into any alert/dashboard/SLO/HPA): `platform_dependency_request_seconds{dependency,operation,outcome}`, `platform_duplicate_messages_total{consumer}`, `platform_rls_violations_total{violation_type}`, `platform_messages_received_total{consumer}`, `platform_messages_processed_total{consumer}`, `platform_messages_failed_total{consumer}`, `platform_dlq_messages_total{consumer}`.
-- **Tier 3 `iam_realm_provisioner_`-prefixed** (§25 frozen names — this repo's sole authoritative alerting/SLO source; RP-INV-1 — sole Keycloak Admin API caller — means no Tier 2 domain-shared metric currently applies): `provision_total{kind,result}`, `users_migrated_total`, `realm_active_gauge{strategy}`, `keycloak_call_duration_seconds{op}`, `keycloak_call_failures_total{op}`, `admin_token_refresh_total{trigger}` (`proactive`\|`401`), `idp_validation_total{outcome}`, `mfa_role_sync_total{action}`, `realm_config_pending_gauge`, `trial_expiry_processed_total`, `trial_expiry_deferred_total`, `lapse_processed_total{transition}`, `realm_export_total{result}`, `user_delete_total{result}`, `session_revoke_total{result}`, `mfa_reset_total{result}`, `template_drift{realm_version}`, `rls_violations_total{violation_type}`, `unknown_event_acknowledged_total{topic,event_type}`, `processed_events_duplicates_total{consumer}`.
+- **Tier 3 `iam_realm_provisioner_`-prefixed** (§25 frozen names — this repo's sole authoritative alerting/SLO source; RP-INV-1 — sole Keycloak Admin API caller — means no Tier 2 domain-shared metric currently applies): `provision_total{kind,result}`, `users_migrated_total`, `realm_active_gauge{strategy}`, `keycloak_call_duration_seconds{op}`, `keycloak_call_failures_total{op}`, `admin_token_refresh_total{trigger}` (`proactive`\|`401`), `idp_validation_total{outcome}`, `mfa_role_sync_total{action}`, `realm_config_pending_gauge`, `trial_expiry_processed_total`, `trial_expiry_deferred_total`, `lapse_processed_total{transition}`, `realm_export_total{result}`, `user_delete_total{result}`, `session_revoke_total{result}`, `mfa_reset_total{result}`, `template_drift{realm_version}`, `rls_violations_total{violation_type}`, `unknown_event_acknowledged_total{topic,event_type}` (`topic` = source topic), `consumed_schema_violations_total{consumer,event_type}` (consumed payload failed its schema — critical alert), `processed_events_duplicates_total{consumer}`.
 
 The three Tier 1 candidates keep emitting in parallel with their Tier 3 counterpart indefinitely, pending governance ratification (no removal date on the Tier 3 side — it stays authoritative until/unless a candidate is ratified). CI-enforced Go tests (`TestNamingConvention_ConformsToPlatformObservabilityStandard`, `TestPlatformRegistry_EntriesAreWellFormed`) check naming/registry/label-vocabulary compliance on every build; `.github/scripts/metrics-registry-lint.sh` fails the build if a `Proposed` metric is used as a live alert/recording-rule/SLO source. Plus passthrough `http_*` (`platform-gincommon`), `events_*`/`outbox_*`/`sqs_*` (`platform-events`, incl. `outbox_dead_letters_total`), and `pgcommon_*` pool/query instruments.
 

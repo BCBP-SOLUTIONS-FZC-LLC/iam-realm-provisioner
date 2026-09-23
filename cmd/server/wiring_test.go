@@ -92,20 +92,19 @@ func fakeGlueClient() *glue.Client {
 }
 
 func TestBuildGlueCodec_EmptyRegistryName_ReturnsNoopCodec(t *testing.T) {
-	codec, err := buildGlueCodec(context.Background(), fakeGlueClient(), "", nil, &fakeLogger{})
+	codec, err := buildGlueCodec(context.Background(), fakeGlueClient(), "", nil)
 	require.NoError(t, err)
 	assert.IsType(t, events.NoopCodec{}, codec)
 }
 
 // A non-empty registryName with zero schemaNames never calls Glue (the
-// prefetch loop has nothing to iterate), so this exercises the full
-// success path — construction, WithLogger, StartRefresher — without any
-// real AWS reachability.
+// resolve loop has nothing to iterate), so this exercises the full
+// success path without any real AWS reachability.
 func TestBuildGlueCodec_NonEmptyRegistryName_NoSchemas_Succeeds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	codec, err := buildGlueCodec(ctx, fakeGlueClient(), "iam-tenant-events", nil, &fakeLogger{})
+	codec, err := buildGlueCodec(ctx, fakeGlueClient(), "iam-tenant-events", nil)
 	require.NoError(t, err)
 	assert.NotNil(t, codec)
 }
@@ -123,7 +122,7 @@ func TestBuildGlueCodec_PrefetchFails_PropagatesError(t *testing.T) {
 		RetryMaxAttempts: 1, // fail fast — no retry backoff on a deliberately closed port
 	})
 
-	codec, err := buildGlueCodec(context.Background(), unreachable, "iam-tenant-events", []string{"TenantRealmCreated"}, &fakeLogger{})
+	codec, err := buildGlueCodec(context.Background(), unreachable, "iam-tenant-events", []string{"TenantRealmReady"})
 	require.Error(t, err)
 	assert.Nil(t, codec)
 }

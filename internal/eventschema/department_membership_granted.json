@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DepartmentMembershipGrantedPayload",
+  "type": "object",
+  "required": [
+    "user_id",
+    "tenant_id",
+    "department_id",
+    "level",
+    "actor_id"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "user_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "department_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "level": {
+      "type": "string",
+      "enum": [
+        "preparator",
+        "reviewer",
+        "approver"
+      ]
+    },
+    "actor_id": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

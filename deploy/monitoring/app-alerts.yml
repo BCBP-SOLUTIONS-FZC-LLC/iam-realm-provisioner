@@ -324,6 +324,27 @@ groups:
             (recorded in processed_events). This is forward-compat
             behavior, but the producer has added a type we should be handling.
 
+      # ── Consumed-schema contract break (critical) — Tier 3 authoritative ──
+      #    cmd/server/inbound_schema.go rejects a payload failing its
+      #    consumed-message schema before the handler; SQS retries it until
+      #    redrive to -dlq (counted once per delivery), so every event of
+      #    that type from that producer is being dropped.
+      - alert: IAMRealmProvisionerConsumedSchemaViolation
+        expr: |
+          sum by (consumer, event_type) (rate(iam_realm_provisioner_consumed_schema_violations_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Consumed {{ $labels.event_type }} events on {{ $labels.consumer }} violate their schema"
+          description: >-
+            iam-realm-provisioner is rejecting {{ $labels.event_type }}
+            events on the {{ $labels.consumer }} consumer because the payload
+            fails its consumed-message schema (internal/eventschema). Either
+            the producer broke its contract or api/asyncapi.yaml is stale.
+            Inspect the -dlq message, fix the wrong side, then redrive.
+
   - name: iam_realm_provisioner_tenant_isolation
     rules:
 

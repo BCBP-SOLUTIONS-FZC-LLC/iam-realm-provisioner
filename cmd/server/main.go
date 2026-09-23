@@ -33,6 +33,7 @@ import (
 	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
 	s3adapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/s3"
 	tokenserviceclient "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/tokenservice"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
@@ -180,7 +181,7 @@ func main() {
 	for name := range eventschemaByType() {
 		schemaNames = append(schemaNames, name)
 	}
-	snsCodec, err := buildGlueCodec(ctx, glueClient, os.Getenv("GLUE_REGISTRY_TENANT_NAME"), schemaNames, log)
+	snsCodec, err := buildGlueCodec(ctx, glueClient, os.Getenv("GLUE_REGISTRY_TENANT_NAME"), schemaNames)
 	if err != nil {
 		panic(fmt.Sprintf("init glue codec: %v", err))
 	}
@@ -277,11 +278,12 @@ func main() {
 		concurrency string
 		defaultConc int
 		label       string
+		consumer    string // frozen §25 processed_events.consumer value
 		handler     events.Handler
 	}{
-		{"SQS_MEMBERSHIP_REALM_QUEUE_URL", "SQS_MEMBERSHIP_REALM_CONCURRENCY", 4, "membership-realm-q", membershipConsumer.Handle},
-		{"SQS_TENANT_REALM_QUEUE_URL", "SQS_TENANT_REALM_CONCURRENCY", 4, "tenant-realm-q", tenantConsumer.Handle},
-		{"SQS_BILLING_REALM_QUEUE_URL", "SQS_BILLING_REALM_CONCURRENCY", 2, "billing-realm-q", billingConsumer.Handle},
+		{"SQS_MEMBERSHIP_REALM_QUEUE_URL", "SQS_MEMBERSHIP_REALM_CONCURRENCY", 4, "membership-realm-q", string(domain.ConsumerMembership), membershipConsumer.Handle},
+		{"SQS_TENANT_REALM_QUEUE_URL", "SQS_TENANT_REALM_CONCURRENCY", 4, "tenant-realm-q", string(domain.ConsumerTenant), tenantConsumer.Handle},
+		{"SQS_BILLING_REALM_QUEUE_URL", "SQS_BILLING_REALM_CONCURRENCY", 2, "billing-realm-q", string(domain.ConsumerBilling), billingConsumer.Handle},
 	}
 	for _, cc := range consumerCfgs {
 		url := os.Getenv(cc.envVar)
@@ -289,12 +291,15 @@ func main() {
 			log.Warn(cc.label+" consumer disabled — queue URL unset", nil)
 			continue
 		}
+		validator, err := consumedValidator(cc.consumer)
+		if err != nil {
+			panic(fmt.Sprintf("compile %s consumed schemas: %v", cc.label, err))
+		}
 		cons, err := events.NewSQSConsumerWithClient(
 			events.SQSConfig{QueueURL: url, Region: envOr("AWS_REGION", "ap-south-1"), Logger: log},
 			sqsClient,
-			cc.handler,
-			events.WithConsumerCodec(eventbusadapter.GlueDecodeCodec{}),
-			events.WithConcurrency(envInt(cc.concurrency, cc.defaultConc)),
+			inboundHandler(cc.consumer, cc.handler, validator, log),
+			consumerOptions(cc.consumer, envInt(cc.concurrency, cc.defaultConc))...,
 		)
 		if err != nil {
 			panic(fmt.Sprintf("build %s consumer: %v", cc.label, err))

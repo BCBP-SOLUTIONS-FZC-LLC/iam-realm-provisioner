@@ -32,8 +32,22 @@ info:
 
     Schema versioning: the authoritative version identifier is the 16-byte
     UUID in the Glue wire-format header. The same UUID is echoed into the
-    envelope JSON as `dataschema`. In dev/test (NoopCodec) there is no Glue
-    header and `dataschema` is absent.
+    envelope JSON as `dataschema`. It is resolved once at startup by content
+    — glue:GetSchemaByDefinition with the binary's own embedded schema — so
+    every event carries the version that actually describes it, fixed for
+    the life of the pod: registering a newer version does NOT change what
+    running pods stamp (and an older build, e.g. after a rollback, keeps
+    stamping its own). A pod whose schema definition isn't registered yet
+    fails startup until schema-registry.yml registers it. In dev/test
+    (NoopCodec) there is no Glue header and `dataschema` is absent.
+
+    Consumed-message payloads (tagged `consumed` below) are validated against
+    this service's own extracted schemas (internal/eventschema,
+    eventschema.ConsumedByConsumer — keyed per queue, since
+    `TenantReactivated` differs by producer) before the handler runs. A
+    violation is never processed; it is retried until the queue's
+    RedrivePolicy moves it to -dlq, and counted by
+    iam_realm_provisioner_consumed_schema_violations_total.
 
   license:
     name: Proprietary
@@ -594,8 +608,16 @@ components:
     BillingTenantReactivatedPayload:
       type: object
       additionalProperties: true
-      required: [tenant_id, source]
+      description: |
+        Billing owns this schema (HLD §9.5); no Billing producer schema is
+        available to diff against, so this consumer-side contract requires
+        only what BillingConsumer actually reads — tenant_id. source is
+        expected to be "billing" (RP-D13) but is deliberately NOT enforced:
+        a mismatch would reject every reactivation to the DLQ and leave the
+        tenant's realm disabled. Tighten only after confirming Billing's
+        published schema.
+      required: [tenant_id]
       properties:
         tenant_id: { type: string, format: uuid }
-        source: { type: string, const: "billing" }
+        source: { type: string, description: 'Expected "billing" (RP-D13); not enforced — see above.' }
         reason: { type: string }

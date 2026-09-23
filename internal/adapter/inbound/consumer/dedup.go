@@ -31,17 +31,28 @@ func skipDuplicate(ctx context.Context, dedup port.ProcessedEventsStore, consume
 	return false, nil
 }
 
+// sourceTopic maps each inbound consumer to the SNS topic its queue is
+// subscribed to (§7.1) — the `topic` label value of
+// unknown_event_acknowledged_total, so the alert names the topic whose
+// producer added the type (a bounded 3-value set).
+var sourceTopic = map[domain.ProcessedEventsConsumer]string{
+	domain.ConsumerMembership: "iam.membership.events",
+	domain.ConsumerTenant:     "iam.tenant.events",
+	domain.ConsumerBilling:    "billing.events",
+}
+
 // ackUnknown is the O&M forward-compat path: an event type with no wired
 // handler is logged, counted, and recorded in processed_events inside a
 // RunInTx so redelivery does not storm the same unknown type. platform-events
 // has no processed-events API — Envelope.ID + INSERT ON CONFLICT DO NOTHING
 // is the library's documented consumer pattern.
 func ackUnknown(ctx context.Context, tx port.TxRunner, dedup port.ProcessedEventsStore, log port.Logger, consumer domain.ProcessedEventsConsumer, env events.Envelope[json.RawMessage]) error {
+	topic := sourceTopic[consumer]
 	if metrics.UnknownEventAcknowledged != nil {
-		metrics.UnknownEventAcknowledged.WithLabelValues(string(consumer), env.Type).Inc()
+		metrics.UnknownEventAcknowledged.WithLabelValues(topic, env.Type).Inc()
 	}
 	log.Info("unknown event type — silently acknowledging", map[string]any{
-		"event_type": env.Type, "event_id": env.ID, "consumer": string(consumer),
+		"event_type": env.Type, "event_id": env.ID, "consumer": string(consumer), "topic": topic,
 	})
 	return markProcessedInTx(ctx, tx, dedup, consumer, env.ID)
 }

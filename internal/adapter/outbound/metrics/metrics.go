@@ -161,6 +161,18 @@ var (
 	// so it stays service-specific by the standard's own classification.
 	UnknownEventAcknowledged *prometheus.CounterVec
 
+	// ConsumedSchemaViolationsTotal counts inbound SQS deliveries whose
+	// payload failed this service's consumed-message schema
+	// (internal/eventschema.ConsumedByConsumer, cmd/server/inbound_schema.go)
+	// and were rejected before the handler and processed_events — once per
+	// handler delivery, so one bad message counts up to 4 times
+	// (dlqHandler takes the 5th) before SQS redrives it to -dlq. Any nonzero rate means a producer
+	// broke its contract (or api/asyncapi.yaml is stale) and every event of
+	// that type is being dropped — pages (deploy/monitoring/app-alerts.yml).
+	// Tier 3: the authoritative, alertable signal; labels are bounded by
+	// the 3 consumers x their 6 consumed types.
+	ConsumedSchemaViolationsTotal *prometheus.CounterVec
+
 	// ProcessedEventsDuplicates counts SQS redeliveries filtered by the
 	// processed_events composite PK (IDEMP-4).
 	//
@@ -209,7 +221,7 @@ var (
 	// since this service is the one submitting them, not because the
 	// names themselves are in question). Shadow-emitted by wrapping this
 	// service's own three SQS consumer Handle() functions
-	// (cmd/server/main.go's instrumentConsumer) — the shared
+	// (cmd/server/wiring.go's instrumentConsumer, via inbound_schema.go's inboundHandler) — the shared
 	// platform-events library's own events_consumed_total/etc. are a
 	// different, non-canonical naming scheme this service does not own
 	// and cannot rename from here; these three are this repo's own
@@ -227,7 +239,7 @@ var (
 	// (platform_dlq_messages_total, Canonical per the standard's own Tier
 	// 1 examples) observing — never altering — the existing SQS-redrive
 	// outcome: a platform-events events.WithDeadLetterHandler callback
-	// (cmd/server/main.go's dlqHandler) fires once per message at
+	// (cmd/server/wiring.go's dlqHandler, wired by consumerOptions) fires once per message at
 	// ApproximateReceiveCount > 4 (one delivery before the queue's own
 	// maxReceiveCount=5 redrive-policy threshold, §7.1) purely to record
 	// this counter, then deliberately returns a non-nil error so the
@@ -425,6 +437,12 @@ func registerMetrics(environment string) {
 		ConstLabels: labels,
 	}, []string{"topic", "event_type"})
 
+	ConsumedSchemaViolationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        prefix + "consumed_schema_violations_total",
+		Help:        "Inbound deliveries rejected before the handler because the payload failed its consumed-message schema (retried until SQS redrives to -dlq), by consumer and event type — any nonzero rate means a producer contract break.",
+		ConstLabels: labels,
+	}, []string{"consumer", "event_type"})
+
 	ProcessedEventsDuplicates = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name:        prefix + "processed_events_duplicates_total",
 		Help:        "SQS redeliveries filtered by processed_events composite PK (IDEMP-4).",
@@ -497,6 +515,7 @@ func registerMetrics(environment string) {
 		TemplateDrift,
 		RLSViolationsTotal,
 		UnknownEventAcknowledged,
+		ConsumedSchemaViolationsTotal,
 		ProcessedEventsDuplicates,
 		DependencyRequestDuration,
 		DuplicateMessagesTotal,

@@ -30,13 +30,17 @@ moves those two schemas elsewhere. See "Pruning orphaned schemas" below.
 
 ## The contract
 
-The service reads its 9 event schemas from AWS Glue at startup
-(`eventbus.NewGlueCodec` / the `ValidatingCodec`, `internal/adapter/outbound/eventbus/glue_codec.go`,
-pre-fetches every schema-version UUID it needs to encode outbound events).
-Startup fails readiness if any of the 9 is missing — the pod will not accept
-traffic. This is intentional; publishing an event whose header points at a
-non-existent Glue schema version would silently poison every consumer
-downstream (LLD §7.3.1).
+The service resolves its 9 event schemas' version UUIDs from AWS Glue once
+at startup (`eventbus.NewGlueCodec`, `internal/adapter/outbound/eventbus/glue_codec.go`)
+**by definition**: `glue:GetSchemaByDefinition` with each embedded
+`internal/eventschema/*.json` file, sent in the exact compact form
+`schema-gov register` uploads. Each build therefore stamps the version that
+actually describes its payloads — not the registry's latest — and the UUID
+is fixed for the life of the pod (there is no refresher). Startup fails
+readiness if any of the 9 definitions isn't registered (or isn't
+`AVAILABLE`) — the pod will not accept traffic. This is intentional;
+publishing an event whose header points at a version that doesn't describe
+it would silently mislead every consumer downstream (LLD §7.3.1).
 
 The 9 expected schema names in the registry — **PascalCase**, per LLD §7.3.1
 and the frozen name inventory (§25):
@@ -103,7 +107,7 @@ Failure modes and fixes:
   ```
 
 - The IAM role running `aws glue get-schema` returns `AccessDenied`.
-  Ensure the caller can `glue:GetSchemaVersion` (see `deploy/iam/policy.json`
+  Ensure the caller can `glue:GetSchemaVersion` / `glue:GetSchemaByDefinition` (see `deploy/iam/policy.json`
   sid `GlueSchemaRegistryReadOnly` for the pod's own runtime role; the CI
   pipeline's AWS credentials additionally need `glue:CreateSchema` /
   `glue:RegisterSchemaVersion` / `glue:DeleteSchema`, provisioned separately
@@ -114,18 +118,27 @@ Failure modes and fixes:
 `NewGlueCodec` returns an error of the form:
 
 ```
-prefetch glue schema "TrialTenantProvisioned" in registry "iam-tenant-events":
-<underlying AWS error> — run `make schema-verify` to confirm the 9 expected
-schemas exist
+resolve glue schema "TrialTenantProvisioned" in registry "iam-tenant-events"
+by definition: <underlying AWS error> — this binary's schema version isn't
+registered yet: wait for schema-registry.yml to register it, or run
+`make schema-verify`
 ```
+
+The most common cause is a deploy that outran `schema-registry.yml` for a
+release that changed a schema: the pod CrashLoops until registration lands,
+then starts cleanly on its own. A definition that differs from every
+registered version (e.g. an `internal/eventschema` file edited without
+running `make extract-schemas`) never resolves.
 
 The pod fails readiness (`/readyz` — LLD §7.3.1) before opening the HTTP
 port. Kubernetes will restart-loop it (CrashLoopBackOff). Nothing publishes
 to `iam-tenant-events` during this state — the outbox continues to accumulate
 rows.
 
-**Mitigation:** roll back the Helm release with `helm rollback` and register
-the missing schema, then re-deploy. Do NOT set `GLUE_REGISTRY_TENANT_NAME=""`
+**Mitigation:** if schema-registry.yml is still running for this release,
+wait — the pod recovers on its own once it finishes. Otherwise register the
+missing schema (`make schema-register`) or roll back the Helm release with
+`helm rollback`, then re-deploy. Do NOT set `GLUE_REGISTRY_TENANT_NAME=""`
 in an attempt to fall through to the `NoopCodec` in a real environment — that
 publishes unversioned JSON and permanently corrupts the audit trail for the
 duration. `NoopCodec` is a local-dev/test fallback only.

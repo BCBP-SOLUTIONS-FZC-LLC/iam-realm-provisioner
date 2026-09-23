@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/glue"
 
@@ -23,21 +22,15 @@ func eventschemaByType() map[string][]byte {
 	return eventschema.ByEventType
 }
 
-// buildGlueCodec returns a GlueCodec pre-fetching schemaNames from
-// registryName (refreshed every 5 minutes so a new schema version takes
-// effect without a pod restart), or a NoopCodec (plain JSON) when
+// buildGlueCodec returns a GlueCodec whose schema version UUIDs are
+// resolved once, by definition, from registryName — fixed for the life of
+// the process, so no refresher — or a NoopCodec (plain JSON) when
 // registryName is empty (dev/test without a Glue registry configured).
-func buildGlueCodec(ctx context.Context, glueClient *glue.Client, registryName string, schemaNames []string, log port.Logger) (events.Codec, error) {
+func buildGlueCodec(ctx context.Context, glueClient *glue.Client, registryName string, schemaNames []string) (events.Codec, error) {
 	if registryName == "" {
 		return events.NoopCodec{}, nil
 	}
-	gc, err := eventbusadapter.NewGlueCodec(ctx, glueClient, registryName, schemaNames)
-	if err != nil {
-		return nil, err
-	}
-	gc.WithLogger(log)
-	gc.StartRefresher(ctx, 5*time.Minute)
-	return gc, nil
+	return eventbusadapter.NewGlueCodec(ctx, glueClient, registryName, schemaNames)
 }
 
 // buildSNSPublisher returns an SNS publisher for topicARN carrying codec
@@ -78,6 +71,26 @@ func instrumentConsumer(consumer string, handler events.Handler) events.Handler 
 			metrics.PlatformMessagesProcessedTotal.WithLabelValues(consumer).Inc()
 		}
 		return err
+	}
+}
+
+// dlqObserveReceiveCount is the ApproximateReceiveCount above which
+// platform-events routes a delivery to dlqHandler instead of the consumer
+// handler — one short of the inbound queues' own RedrivePolicy
+// maxReceiveCount=5 (§7.1, scripts/init-floci.sh), so the observer fires on
+// the 5th and last delivery before SQS redrives the message to -dlq.
+const dlqObserveReceiveCount = 4
+
+// consumerOptions is the option set every inbound SQS consumer is built
+// with: the decode-only Glue codec (upstream producers' Glue-framed
+// payloads), the queue's concurrency, and the dead-letter observer
+// (dlqHandler at dlqObserveReceiveCount).
+func consumerOptions(consumer string, concurrency int) []events.ConsumerOption {
+	return []events.ConsumerOption{
+		events.WithConsumerCodec(eventbusadapter.GlueDecodeCodec{}),
+		events.WithConcurrency(concurrency),
+		events.WithMaxReceiveCount(dlqObserveReceiveCount),
+		events.WithDeadLetterHandler(dlqHandler(consumer)),
 	}
 }
 

@@ -82,7 +82,7 @@ Envelope `source = "iam-realm-provisioner"`. Cron-originated events (RP-C1/RP-C3
 | `TenantOffboarded` | RP-C3 (post-export-confirmed delete) | `tenant_id`, `realm`, `export_s3_key`, `offboarded_at` |
 | `TenantReactivated` | RP-10 (dedicated-strategy reactivate) | `tenant_id`, `realm`, `source`, `reason?` |
 
-Every payload is validated against an embedded JSON Schema (`internal/eventschema/*.json`) at outbox-enqueue time (shape only — wire encoding via the Glue codec happens later, at SNS-publish time). `internal/eventschema/asyncapi_drift_test.go` asserts `api/asyncapi.yaml`'s `iamTenantEvents` channel names exactly these 9 events and no others.
+Every payload is validated against an embedded JSON Schema (`internal/eventschema/*.json`, `ByEventType`) at outbox-enqueue time (shape only — wire encoding via the Glue codec happens later, at SNS-publish time, with the version UUID `GlueCodec` resolved once at startup by definition — `glue:GetSchemaByDefinition`, never "latest", no refresher). `internal/eventschema/asyncapi_drift_test.go` asserts `api/asyncapi.yaml`'s `iamTenantEvents` channel names exactly these 9 events and no others.
 
 ### Consumed — 3 SQS queues, 5 distinct event types (§7.1)
 
@@ -93,6 +93,8 @@ Every payload is validated against an embedded JSON Schema (`internal/eventschem
 | `billing-realm-q` | `TenantReactivated` | Billing's `billing.events` (same event *name* as this service's own produced `TenantReactivated`, but a different topic/producer — no self-consumption) | `LifecycleService`-equivalent reactivation — re-enables a `suspended` dedicated realm only; no-op otherwise (still recorded in `processed_events`) |
 
 Each queue has a `-dlq` sibling, `maxReceiveCount=5`. Dedup via `processed_events` PK `(event_id, consumer)`, `consumer ∈ {membership, tenant, billing}`.
+
+**Inbound pipeline** (`cmd/server/inbound_schema.go`'s `inboundHandler`, options from `wiring.go`'s `consumerOptions`): `GlueDecodeCodec` strips the Glue header → `instrumentConsumer` (`platform_messages_*{consumer}`) → `validateConsumed` → `Handle`. `validateConsumed` checks the payload against the consumer's own consumed-message schema (`eventschema.ConsumedByConsumer` — 6 schemas, per consumer, so billing's `TenantReactivated` uses `billing_tenant_reactivated.json`, never the produced one); unknown types pass to `ackUnknown` (`unknown_event_acknowledged_total{topic=<source topic>,event_type}`); a violation increments `iam_realm_provisioner_consumed_schema_violations_total{consumer,event_type}` (critical alert) and is returned as an error. Failing messages reach the handler on deliveries 1–4; `dlqHandler` takes the 5th (`platform_dlq_messages_total{consumer}`, returns an error so the message isn't deleted), then SQS redrives to `-dlq`. No straight-to-DLQ `SendMessage` (arch-lint events invariant).
 
 ### AsyncAPI & Schema Drift
 

@@ -4,9 +4,14 @@
 // schema per published event type (§7.5, §25) — the 9 frozen event names.
 // These are payload-only schemas (they describe the shape of the
 // envelope's `data` field, not the envelope itself); see api/asyncapi.yaml
-// for the full documented contract including the envelope and the 4
-// consumed message types, which are not validated by this package — this
-// service only produces the 9 schemas embedded here.
+// for the full documented contract including the envelope.
+//
+// The directory also holds the 6 consumed-message schemas schema-gov
+// extracts from api/asyncapi.yaml (department_membership_*, tenant_role_*,
+// trial_started, billing_tenant_reactivated). They are NOT in ByEventType
+// — never registered in Glue (stage-produced-event-schemas.sh skips them)
+// nor used to validate outbound events — and are exposed separately as
+// ConsumedByConsumer, which the inbound SQS consumers validate against.
 package eventschema
 
 import _ "embed"
@@ -68,4 +73,57 @@ var ByEventType = map[string][]byte{
 	"TenantSuspended":        TenantSuspended,
 	"TenantOffboarded":       TenantOffboarded,
 	"TenantReactivated":      TenantReactivated,
+}
+
+// DepartmentMembershipGranted is the consumed (O&M-owned) DepartmentMembershipGranted payload schema.
+//
+//go:embed department_membership_granted.json
+var DepartmentMembershipGranted []byte
+
+// DepartmentMembershipLevelChanged is the consumed (O&M-owned) DepartmentMembershipLevelChanged payload schema.
+//
+//go:embed department_membership_level_changed.json
+var DepartmentMembershipLevelChanged []byte
+
+// TenantRoleGranted is the consumed (O&M-owned) TenantRoleGranted payload schema.
+//
+//go:embed tenant_role_granted.json
+var TenantRoleGranted []byte
+
+// TenantRoleRevoked is the consumed (O&M-owned) TenantRoleRevoked payload schema.
+//
+//go:embed tenant_role_revoked.json
+var TenantRoleRevoked []byte
+
+// TrialStarted is the consumed (O&M-owned) TrialStarted payload schema.
+//
+//go:embed trial_started.json
+var TrialStarted []byte
+
+// BillingTenantReactivated is the consumed (Billing-owned) TenantReactivated
+// payload schema — a different message from this service's own produced
+// TenantReactivated (RP-D13), riding a different topic.
+//
+//go:embed billing_tenant_reactivated.json
+var BillingTenantReactivated []byte
+
+// ConsumedByConsumer maps each inbound consumer (the frozen §25
+// processed_events.consumer value) to the payload schema for every envelope
+// type it handles. Keyed per consumer, not globally, because envelope types
+// are not unique across producers: billing-realm-q's TenantReactivated is
+// Billing's, and must never be validated against this service's own
+// produced TenantReactivated in ByEventType (source=operator).
+var ConsumedByConsumer = map[string]map[string][]byte{
+	"membership": {
+		"DepartmentMembershipGranted":      DepartmentMembershipGranted,
+		"DepartmentMembershipLevelChanged": DepartmentMembershipLevelChanged,
+		"TenantRoleGranted":                TenantRoleGranted,
+		"TenantRoleRevoked":                TenantRoleRevoked,
+	},
+	"tenant": {
+		"TrialStarted": TrialStarted,
+	},
+	"billing": {
+		"TenantReactivated": BillingTenantReactivated,
+	},
 }

@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TrialStartedPayload",
+  "type": "object",
+  "required": [
+    "tenant_id",
+    "plan",
+    "trial_ends_at"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "plan": {
+      "type": "string",
+      "enum": [
+        "starter",
+        "pro",
+        "enterprise"
+      ]
+    },
+    "trial_ends_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
