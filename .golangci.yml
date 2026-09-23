@@ -127,6 +127,13 @@ linters:
           - gosec
         path: _test\.go
         text: G104
+      # test/e2e's doRequest reads and closes every response body before
+      # returning the *http.Response (doJSON/decodeErrorBody wrap it), so the
+      # callers only read StatusCode/headers — bodyclose cannot see through
+      # the helper and flags every call site.
+      - linters:
+          - bodyclose
+        path: test/e2e/
       - linters:
           - revive
         path: cmd/

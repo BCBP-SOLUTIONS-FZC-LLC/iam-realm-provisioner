@@ -180,6 +180,20 @@ jobs:
             --output   /tmp/schema-prune-metrics.json
           echo "::notice title=Shared registry::TenantCreated/TrialStarted above (if listed) are owned by iam-org-membership — expected, not orphaned. Never pass --execute against them (schema-prune.yml hard-blocks this)."
 
+      # Stages this service's 9 produced schemas under their PascalCase Glue
+      # name (internal/eventschema/*.json is snake_case) — schema-gov
+      # usage-check/diff/register take a schema's name from its file stem and
+      # need the name every other reference to these events uses
+      # (eventschema.ByEventType, LLD §25, api/asyncapi.yaml, the EventType
+      # metric label), matching iam-org-membership's identically-named
+      # script/step. Runs before usage-check: with the snake_case stems no
+      # event ever matched an asyncapi message, so lifecycle enforcement
+      # silently no-op'd.
+      - name: Stage produced Glue schemas
+        run: |
+          rm -rf .tmp/glue-schemas
+          bash .github/scripts/stage-produced-event-schemas.sh .tmp/glue-schemas
+
       # Source selection (v0.4+):
       #   PROMETHEUS_URL set → --source prometheus  (no AWS needed)
       #   not set            → --source disabled   (enforce-lifecycle no-ops)
@@ -206,7 +220,7 @@ jobs:
             -e AWS_REGION="${{ vars.AWS_REGION }}" \
             -e GITHUB_ACTIONS \
             "${{ env.SCHEMA_GOV_IMAGE }}" usage-check \
-            --schema-dir  internal/eventschema \
+            --schema-dir  .tmp/glue-schemas \
             ${SOURCE_FLAGS} \
             --metric-name "${{ vars.USAGE_METRIC_NAME || 'EventsPublished' }}" \
             --dimension   "${{ vars.USAGE_METRIC_DIMENSION || 'EventType' }}" \
@@ -223,16 +237,6 @@ jobs:
             "${{ env.SCHEMA_GOV_IMAGE }}" enforce-lifecycle \
             --usage-file /tmp/schema-usage-metrics.json \
             --asyncapi   api/asyncapi.yaml
-
-      # Stages this service's 9 produced schemas under their PascalCase Glue
-      # name (internal/eventschema/*.json is snake_case) — schema-gov diff/
-      # register need the name every other reference to these events uses
-      # (eventschema.ByEventType, LLD §25, api/asyncapi.yaml), matching
-      # iam-org-membership's identically-named script/step.
-      - name: Stage produced Glue schemas
-        run: |
-          rm -rf .tmp/glue-schemas
-          bash .github/scripts/stage-produced-event-schemas.sh .tmp/glue-schemas
 
       # Fetches current Glue definition per-schema (aws CLI) then diffs via the
       # container. Runs MAX_PARALLEL diffs concurrently; output is buffered and
@@ -466,6 +470,12 @@ jobs:
             --output   /tmp/schema-prune-metrics.json
           echo "::notice title=Shared registry::TenantCreated/TrialStarted above (if listed) are owned by iam-org-membership — expected, not orphaned."
 
+      # Staged before usage-check — see the staging job's step comment.
+      - name: Stage produced Glue schemas
+        run: |
+          rm -rf .tmp/glue-schemas
+          bash .github/scripts/stage-produced-event-schemas.sh .tmp/glue-schemas
+
       # See the staging job's "Assess event usage" step for why PROMETHEUS_URL
       # is deliberately unset today.
       - name: Assess event usage
@@ -484,7 +494,7 @@ jobs:
             -e AWS_REGION="${{ vars.AWS_REGION }}" \
             -e GITHUB_ACTIONS \
             "${{ env.SCHEMA_GOV_IMAGE }}" usage-check \
-            --schema-dir  internal/eventschema \
+            --schema-dir  .tmp/glue-schemas \
             ${SOURCE_FLAGS} \
             --metric-name "${{ vars.USAGE_METRIC_NAME || 'EventsPublished' }}" \
             --dimension   "${{ vars.USAGE_METRIC_DIMENSION || 'EventType' }}" \
@@ -501,11 +511,6 @@ jobs:
             "${{ env.SCHEMA_GOV_IMAGE }}" enforce-lifecycle \
             --usage-file /tmp/schema-usage-metrics.json \
             --asyncapi   api/asyncapi.yaml
-
-      - name: Stage produced Glue schemas
-        run: |
-          rm -rf .tmp/glue-schemas
-          bash .github/scripts/stage-produced-event-schemas.sh .tmp/glue-schemas
 
       - name: Diff schemas against registry
         env:

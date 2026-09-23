@@ -28,8 +28,8 @@ make install-hooks     # Install .githooks/pre-commit standalone (also run by ma
 make tidy               # go mod tidy
 make fmt                # go fmt ./...
 make fmt-check          # Verify gofmt formatting without modifying files (mirrors CI)
-make vet                # go vet ./...
-make lint               # golangci-lint (via go tool golangci-lint)
+make vet                # go vet ./... — default build + every test build tag (integration,e2e,load)
+make lint               # golangci-lint (via go tool) — default build + every test build tag
 make arch-lint          # go-arch-lint dependency-rule enforcement (§3.4) + RP-INV-1/RLS-6 greps + observability/database/events architectural-invariant greps (gincommon-only, pgcommon-only, platform-events-only)
 make metrics-registry-lint # Enterprise Platform Observability Standard: no unratified platform_* metric sources a live alert/recording-rule/SLO
 make metric-naming-lint # Enterprise Platform Observability Standard: naming/suffix/label/registry-compliance rules against every registered metric
@@ -61,7 +61,7 @@ make migrate-create NAME=<x>  # Scaffold a new migration pair
 make clean              # Remove bin/ artefacts and coverage files
 make schema-validate    # platform-schemagov 8-pass AsyncAPI + event-schema validation (no AWS required)
 make schema-register    # Register this service's 9 event schemas to the shared iam-tenant-events Glue registry
-make schema-verify      # Pre-deploy check: fail if any of the 9 schemas is missing from Glue (requires AWS)
+make schema-verify      # Pre-deploy check: each of the 9 schema definitions registered + AVAILABLE (get-schema-by-definition, the pod's startup lookup; requires AWS)
 make schema-prune       # Dry-run: list orphaned Glue schemas (requires AWS; excludes O&M's TenantCreated/TrialStarted)
 make swag               # Generate Swagger docs (docs/swagger/) from handler annotations — re-run + commit on change
 make swag-check         # Fails if docs/swagger/ is stale relative to handler annotations (regenerate-and-diff; wired into validate-quality.yml)

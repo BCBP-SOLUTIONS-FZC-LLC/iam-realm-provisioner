@@ -83,17 +83,6 @@ func (f *fakeKeycloakServer) latencySnapshot() []time.Duration {
 	return out
 }
 
-// completionSnapshot returns a copy of the completion timestamps recorded
-// so far (one per fully-migrated user), used to measure achieved
-// throughput against the configured rate-limiter budget.
-func (f *fakeKeycloakServer) completionSnapshot() []time.Time {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]time.Time, len(f.completions))
-	copy(out, f.completions)
-	return out
-}
-
 func (f *fakeKeycloakServer) baseURL() string { return f.srv.URL }
 
 func writeJSON(w http.ResponseWriter, status int, body string) {

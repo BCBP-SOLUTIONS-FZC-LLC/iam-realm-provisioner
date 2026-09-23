@@ -66,6 +66,11 @@ TEST_INTERNAL_PKGS := ./cmd/... \
 
 COVER_PKG_LIST := $(shell $(GO) list ./cmd/... ./internal/... ./pkg/... 2>/dev/null | tr '\n' ',' | sed 's/,$$//')
 
+# Every build tag a test file here declares (integration: test/integration + test/postgres, e2e: test/e2e, load: test/load). vet and lint run a
+# second pass with all of them — CI's quality gate calls `make vet` /
+# `make lint`, so without it the tagged test files were never checked.
+ALL_TEST_TAGS := integration,e2e,load
+
 # -----------------------------
 # SETUP
 # -----------------------------
@@ -90,8 +95,8 @@ help:
 	@echo "  make tidy             - go mod tidy"
 	@echo "  make fmt              - go fmt ./..."
 	@echo "  make fmt-check        - verify gofmt formatting (mirrors CI)"
-	@echo "  make vet              - go vet all packages"
-	@echo "  make lint             - run golangci-lint (via go tool)"
+	@echo "  make vet              - go vet (default build + every test build tag)"
+	@echo "  make lint             - run golangci-lint (default build + every test build tag)"
 	@echo "  make arch-lint        - run go-arch-lint (dependency-rule enforcement, §3.4)"
 	@echo "  make metrics-registry-lint - enforce no unratified platform_* metric sources an alert/SLO"
 	@echo "  make metric-naming-lint - enforce Platform Observability Standard naming/suffix/label/registry rules"
@@ -128,7 +133,7 @@ help:
 	@echo "  make schema-validate  - validate AsyncAPI + event schemas — 8 passes (no AWS required)"
 	@echo "  make schema-diff      - diff two schema files: CURRENT=<path> PROPOSED=<path>"
 	@echo "  make schema-register  - register this service's 9 event schemas to Glue (requires AWS, or Floci for local dev)"
-	@echo "  make schema-verify    - pre-deploy check: fail if any of RP's 9 schemas is missing (requires AWS)"
+	@echo "  make schema-verify    - pre-deploy check: each produced schema definition registered + AVAILABLE (requires AWS)"
 	@echo "  make schema-prune     - dry-run: list orphaned Glue schemas (requires AWS; excludes O&M's TenantCreated/TrialStarted)"
 	@echo ""
 	@echo "Swagger:"
@@ -150,6 +155,7 @@ fmt:
 .PHONY: vet
 vet:
 	$(GO) vet ./...
+	$(GO) vet -tags=$(ALL_TEST_TAGS) ./...
 
 .PHONY: fmt-check
 fmt-check:
@@ -176,7 +182,8 @@ vuln-check:
 .PHONY: lint
 lint:
 	@echo "Running linter..."
-	$(GO) tool golangci-lint run
+	$(GO) tool golangci-lint run ./...
+	$(GO) tool golangci-lint run --build-tags=$(ALL_TEST_TAGS) ./...
 
 .PHONY: arch-lint
 arch-lint:
@@ -440,31 +447,41 @@ schema-register:
 	  --registry   "$(GLUE_REGISTRY_TENANT_NAME)" \
 	  --schema-dir .tmp/glue-schemas
 
-# schema-verify: fail if any of this service's 9 frozen PascalCase schema
-# names (internal/eventschema.ByEventType, LLD §7.3.1) is missing from the
-# Glue registry. Deliberately does NOT check for TenantCreated/TrialStarted —
-# those are O&M's schemas on the shared registry, not this service's to
-# verify. Requires GLUE_REGISTRY_TENANT_NAME and AWS credentials.
+# schema-verify: fail unless every produced schema has an AVAILABLE version
+# whose definition matches this checkout's file — the exact lookup GlueCodec
+# does at startup (GetSchemaByDefinition, compact + ASCII-escaped like
+# schema-gov register uploads it). Reads the same PascalCase staged copy
+# schema-register uploads, so it covers exactly the produced schemas. Surfaces
+# "pod would CrashLoop on NewGlueCodec" pre-deploy, which a name-only
+# get-schema check cannot. Requires GLUE_REGISTRY_TENANT_NAME, AWS credentials (or
+# AWS_ENDPOINT_URL for floci) and python3.
 .PHONY: schema-verify
 schema-verify:
 	@test -n "$(GLUE_REGISTRY_TENANT_NAME)" || { \
 	  echo "GLUE_REGISTRY_TENANT_NAME is not set — add it to .env or pass on the command line"; \
 	  exit 1; \
 	}
-	@missing=""; \
-	for name in TrialTenantProvisioned TenantRealmReady TenantConverted DirectPaidSignup TrialExpired TrialReactivated TenantSuspended TenantOffboarded TenantReactivated; do \
-	  if ! aws glue get-schema \
+	@rm -rf .tmp/glue-schemas-verify
+	@bash .github/scripts/stage-produced-event-schemas.sh .tmp/glue-schemas-verify >/dev/null
+	@failed=""; count=0; \
+	for file in .tmp/glue-schemas-verify/*.json; do \
+	  name=$$(basename "$$file" .json); count=$$((count + 1)); \
+	  def=$$(python3 -c 'import json,sys; sys.stdout.write(json.dumps(json.load(open(sys.argv[1])), separators=(",", ":")))' "$$file"); \
+	  status=$$(aws glue get-schema-by-definition \
 	      --schema-id "RegistryName=$(GLUE_REGISTRY_TENANT_NAME),SchemaName=$$name" \
-	      --region "$(AWS_REGION)" >/dev/null 2>&1; then \
-	    missing="$$missing $$name"; \
+	      --schema-definition "$$def" \
+	      --region "$(AWS_REGION)" --query Status --output text 2>/dev/null); \
+	  if [ "$$status" != "AVAILABLE" ]; then \
+	    failed="$$failed $$name($${status:-not-registered})"; \
 	  fi; \
 	done; \
-	if [ -n "$$missing" ]; then \
-	  echo "FAIL: missing Glue schemas in registry '$(GLUE_REGISTRY_TENANT_NAME)':$$missing"; \
-	  echo "     run 'make schema-register' to create them"; \
+	rm -rf .tmp/glue-schemas-verify; \
+	if [ -n "$$failed" ]; then \
+	  echo "FAIL: this checkout's schema definition is not registered+AVAILABLE in '$(GLUE_REGISTRY_TENANT_NAME)':$$failed"; \
+	  echo "     run 'make schema-register' (or wait for schema-registry.yml) to register it"; \
 	  exit 1; \
 	fi; \
-	echo "OK: all 9 iam-realm-provisioner schemas present in registry '$(GLUE_REGISTRY_TENANT_NAME)'"
+	echo "OK: all $$count iam-realm-provisioner schema definitions registered and AVAILABLE in '$(GLUE_REGISTRY_TENANT_NAME)'"
 
 # schema-prune: dry-run scan for orphaned Glue schemas (exist in Glue, not in
 # this repo). WARNING: the shared iam-tenant-events registry will always

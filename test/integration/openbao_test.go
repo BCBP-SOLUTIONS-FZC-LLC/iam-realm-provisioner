@@ -6,7 +6,7 @@
 // client_test.go's httptest-fake-backed unit suite. See
 // openbao_helpers_test.go's setupOpenBao doc comment for exactly how
 // Kubernetes-auth is exercised for real without a live Kubernetes cluster,
-// and why (openbao/openbao:latest's kubernetes-auth plugin does not honour
+// and why (openbao/openbao:latest's kubernetes-auth plugin does not honor
 // pem_keys as a TokenReview-skip the way older Vault docs describe).
 //
 // Requires Docker on the runner. Tag: integration.

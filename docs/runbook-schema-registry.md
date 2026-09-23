@@ -81,8 +81,12 @@ a non-issue for the registered name, not just a documentation claim.
 ## Pre-deploy checklist
 
 Run this once, in the target AWS account, before every promotion to a new
-environment. Fails loudly if any of this service's 9 schemas is missing —
-does **not** check for or care about `TenantCreated`/`TrialStarted`.
+environment. Runs the exact lookup the pod runs at startup —
+`get-schema-by-definition` with each of this service's 9 staged schema files
+(serialized the way `schema-gov register` uploads it), requiring `AVAILABLE`
+— so it also catches a schema registered from a *different* commit, which a
+name-only check cannot. Needs `aws` and `python3`. Does **not** check for or
+care about `TenantCreated`/`TrialStarted`.
 
 ```bash
 export GLUE_REGISTRY_TENANT_NAME=iam-tenant-events   # or the env-specific name
@@ -93,20 +97,22 @@ make schema-verify
 Expected output:
 
 ```
-OK: all 9 iam-realm-provisioner schemas present in registry 'iam-tenant-events'
+OK: all 9 iam-realm-provisioner schema definitions registered and AVAILABLE in 'iam-tenant-events'
 ```
 
 Failure modes and fixes:
 
-- `FAIL: missing Glue schemas in registry 'iam-tenant-events': TrialTenantProvisioned ...`
-  The registry does not yet have the schema(s). Register them:
+- `FAIL: this checkout's schema definition is not registered+AVAILABLE in 'iam-tenant-events': TrialTenantProvisioned(not-registered) ...`
+  No version has this checkout's definition (schema missing, or registered
+  from a different commit; `PENDING`/`FAILURE` means it exists but isn't
+  usable). Register them:
 
   ```bash
   make schema-register
   make schema-verify   # re-check
   ```
 
-- The IAM role running `aws glue get-schema` returns `AccessDenied`.
+- The IAM role running `aws glue get-schema-by-definition` returns `AccessDenied`.
   Ensure the caller can `glue:GetSchemaVersion` / `glue:GetSchemaByDefinition` (see `deploy/iam/policy.json`
   sid `GlueSchemaRegistryReadOnly` for the pod's own runtime role; the CI
   pipeline's AWS credentials additionally need `glue:CreateSchema` /

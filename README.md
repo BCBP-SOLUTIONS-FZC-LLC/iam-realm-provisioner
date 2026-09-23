@@ -374,7 +374,7 @@ make run         # start the server on :8080 (metrics on :9090)
 | `make setup` | Copy `.env-example` → `.env`; install `.githooks/pre-commit` |
 | `make install-hooks` | Install `.githooks/pre-commit` (tidy + fmt-check + vet + lint); also run by `make setup` |
 | `make tidy` / `make fmt` / `make fmt-check` / `make vet` | Go basics; `fmt-check` mirrors CI, does not modify files |
-| `make lint` | `golangci-lint` via `go tool` |
+| `make lint` | `golangci-lint` via `go tool` — default build plus every test build tag |
 | `make arch-lint` | `go-arch-lint` dependency-rule enforcement + RP-INV-1/RLS-6 greps + observability/database/events architectural-invariant greps (gincommon/pgcommon/platform-events-only) |
 | `make metrics-registry-lint` | Enterprise Platform Observability Standard: no unratified `platform_*` metric sources a live alert/recording-rule/SLO |
 | `make metric-naming-lint` | Enterprise Platform Observability Standard: naming/suffix/label/registry-compliance rules against every registered metric |
@@ -406,7 +406,7 @@ make run         # start the server on :8080 (metrics on :9090)
 | `make swag` | Generate Swagger docs into `docs/swagger/` from handler annotations — re-run and commit whenever they change |
 | `make swag-check` | Fails if regenerating Swagger docs from current handler annotations would change `docs/swagger/` (regenerate-and-diff, `.github/scripts/check-swagger-stale.sh`) — wired into `validate-quality.yml` |
 | `make schema-register` | Register this service's 9 event schemas to the shared Glue registry (requires `GLUE_REGISTRY_TENANT_NAME`) |
-| `make schema-verify` | Pre-deploy check that all 9 of this service's schemas exist in the target registry |
+| `make schema-verify` | Pre-deploy check that each of this service's 9 schema definitions is registered and `AVAILABLE` — the same lookup the pod runs at startup |
 | `make schema-prune` | Dry-run: list orphaned Glue schemas (add `EXECUTE=true` to delete — see `docs/runbook-schema-registry.md` for the shared-registry caveat with `iam-org-membership`) |
 
 ### Running a single test

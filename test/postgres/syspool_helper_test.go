@@ -15,7 +15,7 @@ import (
 // setupSysPool returns a pgcommon.Pool bound as realm_provisioner_migrator
 // (BYPASSRLS) — the pool the reconciler binary uses for cross-tenant sweeps
 // (CountsByShard, ListExpiredTrials, RP-C4's ListPending) per
-// database-schema.md's role catalogue. No GUCProvider is needed since
+// database-schema.md's role catalog. No GUCProvider is needed since
 // BYPASSRLS makes the tenant GUC irrelevant to visibility.
 //
 // The domain migration only GRANTs table privileges to realm_provisioner_app
