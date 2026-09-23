@@ -492,20 +492,34 @@ schema-verify:
 # is present in the registry, since the underlying platform-schemagov CLI
 # has no --exclude flag and prune --execute deletes every candidate it finds.
 # Requires GLUE_REGISTRY_TENANT_NAME and AWS credentials.
+# schema-prune compares Glue against the PascalCase staged copy: prune treats a
+# schema as orphaned when no FILE STEM in --schema-dir matches it, and the
+# committed files are snake_case — against them (or the default dir) it lists
+# every live schema as an orphan, which EXECUTE=true would delete.
 .PHONY: schema-prune
 schema-prune:
 	@test -n "$(GLUE_REGISTRY_TENANT_NAME)" || { \
 	  echo "GLUE_REGISTRY_TENANT_NAME is not set — add it to .env or pass on the command line"; \
 	  exit 1; \
 	}
+	@if [ "$(EXECUTE)" = "true" ]; then \
+	  echo "Refusing EXECUTE=true: $(GLUE_REGISTRY_TENANT_NAME) is shared with iam-org-membership, whose"; \
+	  echo "TenantCreated/TrialStarted have no file here, so prune --execute would delete them. Use"; \
+	  echo "schema-prune.yml, whose guard step blocks that. Dry-run (no EXECUTE) is safe."; \
+	  exit 1; \
+	fi
+	@rm -rf .tmp/glue-schemas
+	@bash .github/scripts/stage-produced-event-schemas.sh .tmp/glue-schemas >/dev/null
 	docker run --rm --platform=linux/amd64 \
 	  -v "$(CURDIR)":/workspace \
 	  -e AWS_ACCESS_KEY_ID \
 	  -e AWS_SECRET_ACCESS_KEY \
 	  -e AWS_SESSION_TOKEN \
 	  -e AWS_REGION="$(AWS_REGION)" \
+	  -e AWS_ENDPOINT_URL="$(AWS_ENDPOINT_URL)" \
 	  "$(SCHEMA_GOV_IMAGE)" prune \
 	  --registry   "$(GLUE_REGISTRY_TENANT_NAME)" \
+	  --schema-dir .tmp/glue-schemas \
 	  $(if $(filter true,$(EXECUTE)),--execute,)
 
 # -----------------------------

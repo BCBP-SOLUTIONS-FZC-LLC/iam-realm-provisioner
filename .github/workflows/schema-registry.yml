@@ -158,7 +158,21 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      # Dry-run prune: lists Glue schemas without a local repo file.
+      # Stages this service's 9 produced schemas under their PascalCase Glue
+      # name (internal/eventschema/*.json is snake_case) — schema-gov
+      # prune/usage-check/diff/register take a schema's name from its file stem and
+      # need the name every other reference to these events uses
+      # (eventschema.ByEventType, LLD §25, api/asyncapi.yaml, the EventType
+      # metric label), matching iam-org-membership's identically-named
+      # script/step. Runs before prune and usage-check: against the snake_case
+      # stems prune listed every live schema as an orphan, and no event ever
+      # matched an asyncapi message, so lifecycle enforcement silently no-op'd.
+      - name: Stage produced Glue schemas
+        run: |
+          rm -rf .tmp/glue-schemas
+          bash .github/scripts/stage-produced-event-schemas.sh .tmp/glue-schemas
+
+      # Dry-run prune: lists Glue schemas without a local (staged, PascalCase) file.
       # Never blocks CI — orphan remediation is a manual operator action via schema-prune.yml.
       #
       # EXPECTED FALSE POSITIVES: `TenantCreated` and `TrialStarted` will always
@@ -176,23 +190,10 @@ jobs:
             -e GITHUB_ACTIONS \
             "${{ env.SCHEMA_GOV_IMAGE }}" prune \
             --registry "${{ vars.GLUE_REGISTRY_TENANT_NAME }}" \
+            --schema-dir .tmp/glue-schemas \
             --env      staging \
             --output   /tmp/schema-prune-metrics.json
           echo "::notice title=Shared registry::TenantCreated/TrialStarted above (if listed) are owned by iam-org-membership — expected, not orphaned. Never pass --execute against them (schema-prune.yml hard-blocks this)."
-
-      # Stages this service's 9 produced schemas under their PascalCase Glue
-      # name (internal/eventschema/*.json is snake_case) — schema-gov
-      # usage-check/diff/register take a schema's name from its file stem and
-      # need the name every other reference to these events uses
-      # (eventschema.ByEventType, LLD §25, api/asyncapi.yaml, the EventType
-      # metric label), matching iam-org-membership's identically-named
-      # script/step. Runs before usage-check: with the snake_case stems no
-      # event ever matched an asyncapi message, so lifecycle enforcement
-      # silently no-op'd.
-      - name: Stage produced Glue schemas
-        run: |
-          rm -rf .tmp/glue-schemas
-          bash .github/scripts/stage-produced-event-schemas.sh .tmp/glue-schemas
 
       # Source selection (v0.4+):
       #   PROMETHEUS_URL set → --source prometheus  (no AWS needed)
@@ -454,6 +455,12 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION }}
 
+      # Staged before usage-check — see the staging job's step comment.
+      - name: Stage produced Glue schemas
+        run: |
+          rm -rf .tmp/glue-schemas
+          bash .github/scripts/stage-produced-event-schemas.sh .tmp/glue-schemas
+
       # See the staging job's "Detect orphaned schemas" step for the
       # O&M-shared-registry false-positive note (TenantCreated/TrialStarted).
       - name: Detect orphaned schemas
@@ -466,15 +473,10 @@ jobs:
             -e GITHUB_ACTIONS \
             "${{ env.SCHEMA_GOV_IMAGE }}" prune \
             --registry "${{ vars.GLUE_REGISTRY_TENANT_NAME }}" \
+            --schema-dir .tmp/glue-schemas \
             --env      production \
             --output   /tmp/schema-prune-metrics.json
           echo "::notice title=Shared registry::TenantCreated/TrialStarted above (if listed) are owned by iam-org-membership — expected, not orphaned."
-
-      # Staged before usage-check — see the staging job's step comment.
-      - name: Stage produced Glue schemas
-        run: |
-          rm -rf .tmp/glue-schemas
-          bash .github/scripts/stage-produced-event-schemas.sh .tmp/glue-schemas
 
       # See the staging job's "Assess event usage" step for why PROMETHEUS_URL
       # is deliberately unset today.
