@@ -53,6 +53,8 @@ TokenService.IssueOrRotateCredential(tenant_id, principal_id, {
 
 **RP-3's success additionally retires the old client; RP-4's re-mints one.** Once `Convert` commits, it best-effort deletes the tenant's now-stale shared-realm client (`DeleteServiceAccountClientIfExists`, reading the row's *persisted* `ServiceAccountKeycloakClientID` rather than re-deriving the name by convention). `RevertConversion` deletes the dedicated realm as part of undoing a conversion, which takes that realm's client down with it — so it calls `mintPlatformAutomation` again to mint a fresh one back in the shared realm before its own commit (see RP-4 below).
 
+**The automation principal's `sub` changes on every re-mint, and `principal_id` doesn't.** Each RP-3/RP-4 mint creates a new Keycloak service-account user in another realm, so it gets a new `sub`. Unlike `MigrateUser`'s human users, Keycloak can't pin a service-account user's `sub`, and the prior user dies with its client or realm. Token Service's TS-4 carry-over overwrites `principal_sub` on the same `principal_id` and re-emits `ServiceAccountRegistered`. Key rotation (TS-1 + RP-17) never touches the client or its user, so it never changes the `sub`. Consumers that record the automation actor long-term, like the Workflow Service's connector callbacks, read it through Token Service's TS-6 and keep `principal_id` (Token Service LLD TS-D17). They don't query this service.
+
 ## RP-1: Trial Provisioning
 
 ```
