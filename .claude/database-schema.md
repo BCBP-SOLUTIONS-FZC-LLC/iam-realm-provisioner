@@ -21,7 +21,7 @@ Three helper functions back RLS:
 
 ## Tables (§4.2-§4.5)
 
-**5 tenant-scoped tables, all under `FORCE ROW LEVEL SECURITY`:**
+**6 tenant-scoped tables, all under `FORCE ROW LEVEL SECURITY`:**
 
 | Table | Key columns / notable constraints |
 |---|---|
@@ -29,7 +29,8 @@ Three helper functions back RLS:
 | `keycloak_idp_configs` | Surrogate `id`. `tenant_id`, `idp_alias`, `protocol` (`idp_protocol`), `display_name`, `enabled`, `config jsonb` (**non-secret** protocol params only — the secret itself lives in OpenBao, never here), `status` (`idp_config_status`), `record_version`. `uq_idp_tenant_alias UNIQUE (tenant_id, idp_alias)`. |
 | `keycloak_idp_config_validations` | Surrogate `id`. Append-only, one row per §11.6 validation run: `tenant_id`, `idp_alias`, `validator_version`, `outcome` (`validation_outcome`), `checks jsonb` (per-check-ID outcome map), `acknowledgements jsonb` (WARN check IDs the admin explicitly acked), `validated_at`. No `record_version` (append-only, never updated). Index `idx_idp_validations_tenant (tenant_id, idp_alias, validated_at DESC)`. |
 | `realm_config_reconciliations` | Surrogate `id`. RP-C4's retry ledger: `tenant_id`, `setting_key`, `desired_value jsonb`, `status` (`recon_status`, default `pending`), `attempts`, `last_error`, `created_at`, `applied_at`. Index `idx_recon_pending (created_at) WHERE status='pending'`. |
-| `provisioning_operations` | PK `idempotency_key` (text, caller-supplied via the `Idempotency-Key` header) — **not** a UUID surrogate. `tenant_id`, `operation` (text — e.g. `provision_trial`, `convert`), `status` (`op_status`, default `in_progress`), `result jsonb` (the marshaled response body, stored on success for replay), `created_at`, `completed_at`. Index `idx_provops_tenant (tenant_id, created_at DESC)`. RLS-scoped like the other four tenant-scoped tables (not exempt like `processed_events`) **because its `result` payloads can embed tenant data**. |
+| `provisioning_operations` | PK `idempotency_key` (text, caller-supplied via the `Idempotency-Key` header) — **not** a UUID surrogate. `tenant_id`, `operation` (text — e.g. `provision_trial`, `convert`), `status` (`op_status`, default `in_progress`), `result jsonb` (the marshaled response body, stored on success for replay), `created_at`, `completed_at`. Index `idx_provops_tenant (tenant_id, created_at DESC)`. RLS-scoped like the other tenant-scoped tables (not exempt like `processed_events`) **because its `result` payloads can embed tenant data**. |
+| `pending_audit_entries` | Surrogate `id` — also the AL-5 `Idempotency-Key`, stable across delivery retries. Durable hand-off of the non-bus `TenantIdpConfigChanged` audit entry to Audit Log's AL-5 direct-write ingest (LLD §10.6, RP-D15): `tenant_id`, `entry jsonb` (the AL-5 request body verbatim), `status` (text `CHECK IN ('pending','failed')`), `attempts`, `last_error`, `next_attempt_at` (backoff + claim lease), `created_at`. Inserted by RP-6/RP-7 **in the same `RunInTx`** as the `keycloak_idp_configs` write (app pool, RLS-bound); claimed/marked by the `cmd/server` drainer on the BYPASSRLS `sysPool` (`ClaimDue` = one `UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED)`). Delivered rows are **deleted**; permanently rejected rows stay `failed`. App role gets `SELECT, INSERT` only. Index `idx_pending_audit_due (next_attempt_at) WHERE status='pending'`. RLS-scoped because `entry` embeds tenant data. **Prod grant:** `realm_provisioner_migrator` needs `SELECT, UPDATE, DELETE` on it — Terraform-owned, like its other table grants. |
 
 **3 RLS-exempt operational tables:**
 
@@ -37,7 +38,7 @@ Three helper functions back RLS:
 |---|---|
 | `outbox_events` | Created by `platform-events`' `outbox.ApplySchema`, **not** this migration — this migration only customizes it: `ALTER COLUMN payload TYPE text` (was jsonb) + a `trg_outbox_normalize_payload` trigger that decodes pgx SimpleProtocol's bytea-hex (`\x...`) encoding back to UTF-8 on every INSERT, since PgBouncer forces SimpleProtocol and pgx encodes `[]byte` as bytea-hex even for a `text` column. |
 | `processed_events` | This service's own DDL. PK `(event_id, consumer)`. `consumer` is one of `'membership'`\|`'tenant'`\|`'billing'` (the three SQS consumers). No tenant scoping, no FK, no RLS — a pure global dedup ledger. Index `idx_processed_events_processed_at`. |
-| `exporter_watermarks` | PK `exporter_name` (text). `last_processed_at timestamptz`. One row per `cmd/server` metric exporter that scrapes an append-only table on a persisted high-water mark instead of a fixed trailing window (today: `rls_violations_total`'s exporter). `GaugeRepository.RLSViolationCounts` takes `SELECT ... FOR UPDATE` on the row so concurrent server replicas (HPA `minReplicas: 2`) serialize on it instead of every replica redundantly re-counting the same `rls_violation_log` rows on every tick — and so a pod restart resumes from the mark instead of re-scraping (and re-`Add`ing onto the Prometheus counter) a window the dying pod already counted. Not admin_readonly-granted (unlike the 7 tables below it) — it carries no tenant or compliance-relevant data, just an exporter cursor. |
+| `exporter_watermarks` | PK `exporter_name` (text). `last_processed_at timestamptz`. One row per `cmd/server` metric exporter that scrapes an append-only table on a persisted high-water mark instead of a fixed trailing window (today: `rls_violations_total`'s exporter). `GaugeRepository.RLSViolationCounts` takes `SELECT ... FOR UPDATE` on the row so concurrent server replicas (HPA `minReplicas: 2`) serialize on it instead of every replica redundantly re-counting the same `rls_violation_log` rows on every tick — and so a pod restart resumes from the mark instead of re-scraping (and re-`Add`ing onto the Prometheus counter) a window the dying pod already counted. Not admin_readonly-granted (unlike the 8 tables it does grant) — it carries no tenant or compliance-relevant data, just an exporter cursor. |
 
 **1 audit-only table (RLS disabled by design):**
 
@@ -47,7 +48,7 @@ Three helper functions back RLS:
 
 ## Row-Level Security (§4.2-§4.4, §14.5)
 
-Every one of the 5 tenant-scoped tables:
+Every one of the 6 tenant-scoped tables:
 ```sql
 ALTER TABLE public.<table> ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.<table> FORCE  ROW LEVEL SECURITY;
@@ -56,7 +57,7 @@ CREATE POLICY tenant_isolation ON public.<table>
     USING      (rls_check_tenant(tenant_id, '<table>'))
     WITH CHECK (rls_check_tenant(tenant_id, '<table>'));
 ```
-No special-case policy shape (unlike some sibling services' `tenants` table matching on `id`) — every one of these 5 tables carries its own `tenant_id` column matched against the GUC.
+No special-case policy shape (unlike some sibling services' `tenants` table matching on `id`) — every one of these 6 tables carries its own `tenant_id` column matched against the GUC.
 
 **Cross-tenant admin access** requires the `BYPASSRLS` role **`realm_provisioner_migrator`** — never the app role `realm_provisioner_app`. The migration's final `DO $$ ... $$` block actively **strips** `BYPASSRLS` from `realm_provisioner_app` if it's ever found set (`ALTER ROLE realm_provisioner_app NOBYPASSRLS`), logging a `WARNING` if it lacks privilege to fix it — a defense-in-depth self-heal, not just a one-time grant.
 

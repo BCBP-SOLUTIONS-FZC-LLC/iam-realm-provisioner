@@ -137,6 +137,14 @@ env:
   # Org & Membership — I-8 residual-MFA-requirement check.
   ORG_MEMBERSHIP_BASE_URL: "http://iam-org-membership.iam.svc.cluster.local"
 
+  # Audit Log — AL-5 direct-write ingest for TenantIdpConfigChanged (LLD
+  # §10.6/§18.7). Empty = drainer disabled (startup WARN); entries queue
+  # durably in pending_audit_entries and deliver once this is set, e.g.
+  # "http://iam-audit-log.iam.svc.cluster.local" when iam-audit-log ships.
+  AUDIT_LOG_BASE_URL: ""
+  AUDIT_DELIVERY_INTERVAL: "5s"
+  AUDIT_DELIVERY_BATCH_SIZE: "50"
+
   # Realm export (offboarding, §15.2) — S3 bucket + KMS key for the
   # encrypted export written before a dedicated realm is deleted.
   REALM_EXPORT_BUCKET: "iam-realm-exports"

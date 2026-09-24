@@ -214,8 +214,11 @@ PUT /tenants/:id/idp {idp_alias, protocol, display_name, config{non-secret}, sec
   Keycloak.CreateOrUpdateIdp(realm.RealmName, {alias, protocol, display_name, enabled:true, config, secret})
     fail -> if secret != "" AND isNewConfig: OpenBao.DeleteIdpSecret(tenant_id, idp_alias)   -- compensating cleanup,
                                               see below; failIdempotency, return err
-  keycloak_idp_configs.Upsert{tenant_id, idp_alias, protocol, display_name, enabled:true, config, status:"active"}
-    fail -> failIdempotency, return err
+  RunInTx {
+    keycloak_idp_configs.Upsert{tenant_id, idp_alias, protocol, display_name, enabled:true, config, status:"active"}
+    pending_audit_entries.Enqueue(TenantIdpConfigChanged, action = create if isNewConfig else update,
+                                  metadata = full §11.6 validation result, never the secret)
+  } fail (either) -> failIdempotency, return err
   idempotency.Complete(key, result)
   -> 200 {idp_alias, status:"active"}
 
@@ -225,7 +228,7 @@ DELETE /tenants/:id/idp/:alias
   keycloak_idp_configs.FindByAlias(tenant_id, alias)  -- not found -> 404 idp_config_not_found (checked BEFORE Keycloak.DeleteIdp)
   Keycloak.DeleteIdp(realm.RealmName, alias)
   OpenBao.DeleteIdpSecret(tenant_id, alias)  -- best-effort: a delete failure is logged WARN, never returned
-  keycloak_idp_configs.Delete(tenant_id, alias)
+  RunInTx { keycloak_idp_configs.Delete(tenant_id, alias); pending_audit_entries.Enqueue(TenantIdpConfigChanged, action=delete) }
   -> 204
 ```
 
@@ -234,6 +237,8 @@ DELETE /tenants/:id/idp/:alias
 **RP-6 is now ledgered against `Idempotency-Key` like every other mutating endpoint (§9.2).** The route has always enforced `RequireIdempotencyKey`, but `ConfigureIdp` never actually called the idempotency store — a retry re-ran the entire flow (re-validating, re-recording an audit row, re-writing OpenBao, re-calling Keycloak) instead of replaying the stored result. It also adds a compensating OpenBao-secret delete when `CreateOrUpdateIdp` fails **after** the secret was already written — but only when `isNewConfig` (confirmed via `FindByAlias`): an update to an already-configured alias never deletes on failure, since the pre-existing Keycloak IdP is still live and completely unaffected by the failed update, even though `WriteIdpSecret` already overwrote OpenBao's copy with the new, never-applied value.
 
 **§11.6 Region-Agnostic IdP Configuration Checklist** (`idp_validator.go`): checks every SAML/OIDC config field against a fixed list of AWS region substrings (`ap-south-1`, `us-east-1`, etc.) and against the one platform-wide region-neutral auth host (`auth.bcbpsolutions.com`). CRITICAL checks (0-6, 10-12, 14-15 — 12 total) — no config value contains an HTML/XML injection sequence (0, scans every string value in the raw config map), SSO URL region (1), SLO URL region (2), customer signing cert present (3), ACS URL points at the neutral host (4), SLO **response** URL region (5, examines a distinct `slo_response_url` config key — SAML's `SingleLogoutService` `ResponseLocation`, defaulting to `slo_url` when a caller never sets it), entity ID region (6), OIDC issuer/redirect/audience region (10-12), OIDC `client_id` present (14), OIDC `issuer` is a non-empty valid HTTPS URL (15) — **block** with `400`. WARN checks (7-9, 13 — 4 total) — SAML `NameIDFormat != "transient"`, attribute-mapper URNs region-free, strong signature algorithm (`RSA-SHA(256|384|512)`), OIDC PKCE `S256` — require a recorded acknowledgement (by check ID) or return `422`. 16 checks total (0-15). RP-13's whole-estate audit re-runs the same `ValidateIdpConfig` function against every stored config's non-secret `Config` (never re-reading secrets from OpenBao) to compute pass/warnings/failing counts.
+
+**`TenantIdpConfigChanged` → Audit Log AL-5 direct-write (LLD §10.6, RP-D15).** Not a bus event (HLD §9.4 direct-write entry type; the 9-event inventory is frozen), so it can't ride the outbox. The entry is committed in the same `RunInTx` as the IdP-config write into `pending_audit_entries`, then `cmd/server/audit_delivery.go` → `AuditDeliveryService.DrainOnce` claims due rows on the BYPASSRLS `sysPool` (`FOR UPDATE SKIP LOCKED`; claim bumps `attempts` and `next_attempt_at = now() + min(2^attempts s, 5 min)`, which is also the lease) and POSTs `POST /api/v1/internal/audit-entries` with `Idempotency-Key = row id`. `201`/`200` → row deleted; `429`/`5xx`/timeout → `last_error` recorded, retried after backoff; other `4xx` → `port.ErrAuditEntryRejected`, row parked `failed`. Why not fire-and-forget: a crash between commit and POST would lose the entry forever — a replayed `succeeded` RP-6 key returns the stored result without re-executing. A rejected/failed RP-6/RP-7 enqueues nothing.
 
 ## RP-8 & RP-C4: Realm Config, Local-Intent-First (RP-INV-6)
 

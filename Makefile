@@ -55,6 +55,7 @@ TEST_INTERNAL_PKGS := ./cmd/... \
                       ./internal/adapter/outbound/openbao/... \
                       ./internal/adapter/outbound/orgmembership/... \
                       ./internal/adapter/outbound/tokenservice/... \
+                      ./internal/adapter/outbound/auditlog/... \
                       ./internal/adapter/outbound/httpx/... \
                       ./internal/adapter/outbound/s3/... \
                       ./internal/adapter/outbound/metrics/... \

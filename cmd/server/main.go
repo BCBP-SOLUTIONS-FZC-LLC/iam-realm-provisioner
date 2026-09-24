@@ -248,6 +248,7 @@ func main() {
 	reconRepo := pgadapter.NewReconciliationRepository(pool)
 	idempotencyRepo := pgadapter.NewIdempotencyRepository(pool)
 	processedEventsRepo := pgadapter.NewProcessedEventsRepository(pool)
+	pendingAuditRepo := pgadapter.NewPendingAuditEntryRepository(pool)
 
 	// ── 8b. Core services ─────────────────────────────────────────────────
 	sharedRealm := envOr("SHARED_TRIAL_REALM", "trial")
@@ -258,7 +259,7 @@ func main() {
 		tenantRealmRepo, idempotencyRepo, keycloakAdmin, txRunner, sharedRealm,
 	).WithLogger(log)
 	mfaSvc := service.NewMfaService(tenantRealmRepo, keycloakAdmin, orgMembershipClient).WithLogger(log)
-	idpSvc := service.NewIdpService(tenantRealmRepo, idpConfigRepo, idpValidationRepo, idempotencyRepo, openbaoClient, keycloakAdmin).WithLogger(log)
+	idpSvc := service.NewIdpService(tenantRealmRepo, idpConfigRepo, idpValidationRepo, idempotencyRepo, openbaoClient, keycloakAdmin, txRunner, pendingAuditRepo).WithLogger(log)
 	realmConfigSvc := service.NewRealmConfigService(tenantRealmRepo, reconRepo, keycloakAdmin).WithLogger(log)
 
 	internalH := httpadapter.NewInternalHandler(provisioningSvc, lifecycleSvc, mfaSvc, idpSvc, realmConfigSvc)
@@ -322,6 +323,11 @@ func main() {
 	// maintain them. Refreshed here from the BYPASSRLS sysPool, matching
 	// the sibling iam-org-membership exporter goroutines.
 	runBusinessExporters(ctx, pgadapter.NewGaugeRepository(sysPool), log)
+
+	// ── 9c. AL-5 audit-entry delivery (§10.6) ─────────────────────────────
+	// Drains pending_audit_entries (TenantIdpConfigChanged) to Audit Log's
+	// direct-write ingest, cross-tenant on the BYPASSRLS sysPool.
+	startAuditDelivery(ctx, sysPool, log)
 
 	// ── 10. Router ────────────────────────────────────────────────────────
 	router := httpadapter.NewRouter(httpadapter.RouterConfig{

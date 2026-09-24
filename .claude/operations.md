@@ -94,6 +94,8 @@ Instruments follow the Enterprise Platform Observability Standard's three-tier h
 | `iam_realm_provisioner_user_delete_total` | Counter | `result` | RP-15 |
 | `iam_realm_provisioner_session_revoke_total` | Counter | `result` | RP-16 |
 | `iam_realm_provisioner_mfa_reset_total` | Counter | `result` | RP-9 (fail-closed semantics) |
+| `iam_realm_provisioner_audit_entry_delivery_total` | Counter | `result` (`delivered`\|`retry`\|`rejected`) | AL-5 `TenantIdpConfigChanged` delivery attempts from `pending_audit_entries` — sustained `retry` = Audit Log unreachable; any `rejected` = an entry Audit will never accept (inspect the `failed` row's `last_error`) |
+| `iam_realm_provisioner_audit_entry_backlog_gauge` | Gauge | `status` (`pending`\|`failed`) | `pending_audit_entries` row count, refreshed by the 5-min exporter — growing `pending` with no `delivered` means Audit Log is down or `AUDIT_LOG_BASE_URL` is unset |
 | `iam_realm_provisioner_template_drift` | Gauge | `realm_version` | Report-only realm-template drift (RP-3) |
 | `iam_realm_provisioner_rls_violations_total` | Counter | `violation_type` | RLS-6 violations — every RLS alert reads this |
 | `iam_realm_provisioner_unknown_event_acknowledged_total` | Counter | `topic`, `event_type` | Inbound events silently ack'd because no handler is wired — the standard's own worked Tier 3 example, so not a candidate for promotion |
@@ -160,6 +162,8 @@ Grafana "IAM — Realm Provisioner": provision throughput/success by kind, conve
 | `SHARED_TRIAL_REALM` / `REALM_TEMPLATE_VERSION` | `trial` / `v1` | Shared trial realm name + active dedicated-realm template version |
 | `ORG_MEMBERSHIP_BASE_URL` | (required) | O&M client (I-8 residual-MFA check) — fail-fast on the dev default outside `APP_ENV=dev` |
 | `TOKEN_SERVICE_BASE_URL` | (required) | Token Service client (TS-1/TS-4 mint/rotate handshake, §2.5) — required for every RP-1/RP-2/RP-3/RP-4 call and RP-17; no optional-degrade path (unlike `ORG_MEMBERSHIP_BASE_URL`'s reconciler-only usage, §20); fail-fast on the dev default outside `APP_ENV=dev` |
+| `AUDIT_LOG_BASE_URL` | (unset) | Audit Log client — AL-5 direct-write for `TenantIdpConfigChanged` (LLD §10.6/§18.7). **Optional, deliberately not fail-fast**: unset logs a startup WARN and disables the drainer; entries accumulate durably in `pending_audit_entries` and deliver once it is set |
+| `AUDIT_DELIVERY_INTERVAL` / `AUDIT_DELIVERY_BATCH_SIZE` | `5s` / `50` | Drainer poll interval + claim batch; a full batch re-drains immediately |
 | `REALM_EXPORT_BUCKET` / `REALM_EXPORT_KMS_KEY` | `iam-realm-exports` / `alias/iam-realm-export` | Offboarding export target |
 | `TRIAL_GRACE_DAYS` / `CANCELLED_GRACE_DAYS` / `RETENTION_DAYS` | `30` / `30` / `90` | Lifecycle timers |
 | `RECONCILER_BATCH_LIMIT` / `RECONCILER_TIMEOUT` / `RECONCILER_MAX_ATTEMPTS` | `100` / `5m` / `20` | Reconciler-job tunables — `RECONCILER_MAX_ATTEMPTS` is RP-C4's poison-pill cap (§13.1) |

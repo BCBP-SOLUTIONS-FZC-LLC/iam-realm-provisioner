@@ -434,3 +434,25 @@ type fakePinger struct {
 var _ Pinger = (*fakePinger)(nil)
 
 func (p *fakePinger) Health(ctx context.Context) error { return p.HealthFn(ctx) }
+
+// fakePendingAuditEntryRepository accepts every enqueued AL-5 entry; the
+// handler tests don't assert on audit delivery (test/unit covers it).
+type fakePendingAuditEntryRepository struct{ enqueued []domain.AuditEntry }
+
+var _ port.PendingAuditEntryRepository = (*fakePendingAuditEntryRepository)(nil)
+
+func (f *fakePendingAuditEntryRepository) Enqueue(_ context.Context, e domain.AuditEntry) error {
+	f.enqueued = append(f.enqueued, e)
+	return nil
+}
+
+func (f *fakePendingAuditEntryRepository) ClaimDue(context.Context, int) ([]*domain.PendingAuditEntry, error) {
+	return nil, nil
+}
+func (f *fakePendingAuditEntryRepository) MarkDelivered(context.Context, uuid.UUID) error { return nil }
+func (f *fakePendingAuditEntryRepository) MarkRetry(context.Context, uuid.UUID, string) error {
+	return nil
+}
+func (f *fakePendingAuditEntryRepository) MarkFailed(context.Context, uuid.UUID, string) error {
+	return nil
+}

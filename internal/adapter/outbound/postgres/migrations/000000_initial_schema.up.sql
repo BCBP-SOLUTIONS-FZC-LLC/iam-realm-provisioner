@@ -275,6 +275,37 @@ CREATE POLICY tenant_isolation ON public.provisioning_operations
     WITH CHECK (rls_check_tenant(tenant_id, 'provisioning_operations'));
 
 -- ═════════════════════════════════════════════════════════════════════════
+-- §4.4 pending_audit_entries — durable hand-off of the non-bus
+-- TenantIdpConfigChanged audit entry to Audit Log's AL-5 direct-write
+-- ingest (HLD §9.4, §10.6). Enqueued in the same RunInTx as the
+-- keycloak_idp_configs write it records, so a committed IdP change always
+-- carries its audit entry; cmd/server's drainer POSTs each row (id is the
+-- AL-5 Idempotency-Key, stable across retries) and deletes it on success.
+-- A row Audit permanently rejects (4xx) moves to 'failed' and stays for
+-- operator inspection. RLS-scoped because `entry` embeds tenant data (same
+-- reasoning as provisioning_operations); the cross-tenant drainer reads
+-- it through the BYPASSRLS sysPool.
+-- ═════════════════════════════════════════════════════════════════════════
+CREATE TABLE public.pending_audit_entries (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id       uuid NOT NULL,
+  entry           jsonb NOT NULL,
+  status          text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'failed')),
+  attempts        int NOT NULL DEFAULT 0,
+  last_error      text,
+  next_attempt_at timestamptz NOT NULL DEFAULT now(),
+  created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_pending_audit_due ON public.pending_audit_entries (next_attempt_at) WHERE status = 'pending';
+
+ALTER TABLE public.pending_audit_entries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.pending_audit_entries FORCE  ROW LEVEL SECURITY;
+REVOKE ALL ON public.pending_audit_entries FROM PUBLIC;
+CREATE POLICY tenant_isolation ON public.pending_audit_entries
+    USING      (rls_check_tenant(tenant_id, 'pending_audit_entries'))
+    WITH CHECK (rls_check_tenant(tenant_id, 'pending_audit_entries'));
+
+-- ═════════════════════════════════════════════════════════════════════════
 -- processed_events — service-owned DDL, the consumer dedup ledger (§4.5,
 -- §7). Operational and RLS-exempt (not a tenant-query surface).
 -- ═════════════════════════════════════════════════════════════════════════
@@ -341,7 +372,8 @@ BEGIN
         BEGIN
             GRANT SELECT ON public.tenant_realms, public.keycloak_idp_configs,
                 public.keycloak_idp_config_validations, public.realm_config_reconciliations,
-                public.provisioning_operations, public.rls_violation_log, public.processed_events
+                public.provisioning_operations, public.pending_audit_entries,
+                public.rls_violation_log, public.processed_events
                 TO admin_readonly;
             EXECUTE $c$COMMENT ON ROLE admin_readonly IS
                 'Cross-tenant compliance/support reader. BYPASSRLS + SELECT only.'$c$;
@@ -385,6 +417,7 @@ BEGIN
         GRANT SELECT, INSERT                 ON public.keycloak_idp_config_validations   TO realm_provisioner_app;
         GRANT SELECT, INSERT, UPDATE          ON public.realm_config_reconciliations      TO realm_provisioner_app;
         GRANT SELECT, INSERT, UPDATE          ON public.provisioning_operations           TO realm_provisioner_app;
+        GRANT SELECT, INSERT                 ON public.pending_audit_entries             TO realm_provisioner_app;
         GRANT SELECT, INSERT, DELETE          ON public.processed_events                  TO realm_provisioner_app;
 
         -- outbox_events: created by platform-events; guarded IF EXISTS

@@ -4,6 +4,7 @@ DROP FUNCTION IF EXISTS outbox_normalize_payload();
 ALTER TABLE outbox_events ALTER COLUMN payload TYPE jsonb USING payload::jsonb;
 
 REVOKE ALL ON public.processed_events FROM realm_provisioner_app;
+REVOKE ALL ON public.pending_audit_entries FROM realm_provisioner_app;
 REVOKE ALL ON public.provisioning_operations FROM realm_provisioner_app;
 REVOKE ALL ON public.realm_config_reconciliations FROM realm_provisioner_app;
 REVOKE ALL ON public.keycloak_idp_config_validations FROM realm_provisioner_app;
@@ -13,6 +14,7 @@ REVOKE ALL ON public.tenant_realms FROM realm_provisioner_app;
 DROP TABLE IF EXISTS public.processed_events;
 DROP TABLE IF EXISTS public.exporter_watermarks;
 
+DROP TABLE IF EXISTS public.pending_audit_entries;
 DROP TABLE IF EXISTS public.provisioning_operations;
 DROP TABLE IF EXISTS public.realm_config_reconciliations;
 

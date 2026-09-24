@@ -15,6 +15,13 @@ import (
 )
 
 func newIdpTestService() (*service.IdpService, *mockKeycloakAdmin, *mockTenantRealmRepository, *mockIdpConfigRepository, *mockIdpValidationRepository, *mockOpenBaoClient, *mockIdempotencyStore) {
+	svc, kc, realms, idpConfigs, validations, openbao, idem, _, _ := newIdpTestServiceWithAudit()
+	return svc, kc, realms, idpConfigs, validations, openbao, idem
+}
+
+// newIdpTestServiceWithAudit additionally returns the tx runner and the
+// pending_audit_entries mock, for the TenantIdpConfigChanged (§10.6) tests.
+func newIdpTestServiceWithAudit() (*service.IdpService, *mockKeycloakAdmin, *mockTenantRealmRepository, *mockIdpConfigRepository, *mockIdpValidationRepository, *mockOpenBaoClient, *mockIdempotencyStore, *mockTxRunner, *mockPendingAuditEntryRepository) {
 	kc := &mockKeycloakAdmin{}
 	realms := newMockTenantRealmRepository()
 	idpConfigs := &mockIdpConfigRepository{
@@ -28,8 +35,10 @@ func newIdpTestService() (*service.IdpService, *mockKeycloakAdmin, *mockTenantRe
 	validations := &mockIdpValidationRepository{InsertFn: func(ctx context.Context, v *domain.IdpConfigValidation) error { return nil }}
 	idem := newMockIdempotencyStore()
 	openbao := &mockOpenBaoClient{}
-	svc := service.NewIdpService(realms, idpConfigs, validations, idem, openbao, kc)
-	return svc, kc, realms, idpConfigs, validations, openbao, idem
+	tx, _ := newMockTxRunner()
+	audit := &mockPendingAuditEntryRepository{}
+	svc := service.NewIdpService(realms, idpConfigs, validations, idem, openbao, kc, tx, audit)
+	return svc, kc, realms, idpConfigs, validations, openbao, idem, tx, audit
 }
 
 func validSAMLIdpRequest() service.ConfigureIdpRequest {

@@ -284,7 +284,7 @@ func runE2ESuite(m *testing.M) (int, error) {
 		tenantRealmRepo, idempotencyRepo, kcAdmin, txRunner, sharedRealm,
 	).WithLogger(noopLogger{})
 	mfaSvc := service.NewMfaService(tenantRealmRepo, kcAdmin, fakeOrgMembership{}).WithLogger(noopLogger{})
-	idpSvc := service.NewIdpService(tenantRealmRepo, idpConfigRepo, idpValidationRepo, idempotencyRepo, newFakeOpenBao(), kcAdmin).WithLogger(noopLogger{})
+	idpSvc := service.NewIdpService(tenantRealmRepo, idpConfigRepo, idpValidationRepo, idempotencyRepo, newFakeOpenBao(), kcAdmin, txRunner, pgadapter.NewPendingAuditEntryRepository(appPool)).WithLogger(noopLogger{})
 	realmConfigSvc := service.NewRealmConfigService(tenantRealmRepo, reconRepo, kcAdmin).WithLogger(noopLogger{})
 
 	internalH := httpadapter.NewInternalHandler(provisioningSvc, lifecycleSvc, mfaSvc, idpSvc, realmConfigSvc)

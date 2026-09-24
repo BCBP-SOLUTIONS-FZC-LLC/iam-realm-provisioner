@@ -94,7 +94,8 @@ spec:
           protocol: TCP
 
     # Allow HTTP to iam-org-membership — the I-8 residual-MFA-requirement
-    # check.
+    # check — and to iam-audit-log's AL-5 direct-write ingest (§10.6), which
+    # listens on the same container port.
     - ports:
         - port: 8080
           protocol: TCP

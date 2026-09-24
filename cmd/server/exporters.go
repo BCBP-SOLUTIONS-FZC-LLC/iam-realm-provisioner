@@ -73,6 +73,17 @@ func runBusinessExporters(ctx context.Context, gauges *pgadapter.GaugeRepository
 		return nil
 	})
 
+	// No Reset: the label set is the fixed pending|failed status pair and
+	// the query returns a row for each, including zeros.
+	go tick(ctx, "audit_entry_backlog_gauge", log, func() error {
+		counts, err := gauges.AuditEntryBacklog(ctx)
+		if err != nil {
+			return err
+		}
+		setGaugeVec(metrics.AuditEntryBacklogGauge, counts, false)
+		return nil
+	})
+
 	// rls_violations_total is monotonic (Add, never Set/Reset) — each tick
 	// adds the count RLSViolationCounts observed since its own persisted
 	// high-water mark (not a fixed trailing window), so the counter's total

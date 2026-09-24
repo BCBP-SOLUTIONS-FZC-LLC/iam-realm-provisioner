@@ -58,7 +58,7 @@ Every mutating endpoint below marked "required" enforces `RequireIdempotencyKey`
 | RP-4 | `POST /tenants/:id/revert-conversion` | required | Undo Convert within a fixed reversal window: migrate users back, tear down the dedicated realm, and re-mint the tenant's `platform-automation` client back in the shared realm (§2.5 — the dedicated realm's client died with the realm). `409 revert_window_expired` past the window. Emits `TrialReactivated`. |
 | RP-5 | `POST /tenants/:id/users` | required | Create an invited user in the tenant's current realm with `required_actions` applied verbatim. No local persistence. |
 | RP-6 | `PUT /tenants/:id/idp` | required | Configure a SAML/OIDC IdP behind the §11.6 region-portability gate. Requires a `dedicated` realm (`409 idp_requires_dedicated_realm` otherwise). |
-| RP-7 | `DELETE /tenants/:id/idp/:alias` | — | Remove an IdP — Keycloak, then the OpenBao secret, then the local row. Idempotent. |
+| RP-7 | `DELETE /tenants/:id/idp/:alias` | — | Remove an IdP — Keycloak, then the OpenBao secret, then the local row (+ its `TenantIdpConfigChanged` audit entry, same tx). Idempotent. |
 | RP-8 | `PATCH /tenants/:id/realm-config` | — | Apply an allow-listed realm-level setting; on transient Keycloak failure, records a `pending` reconciliation row instead of failing the caller (RP-INV-6, local-intent-first). |
 | RP-9 | `POST /tenants/:id/users/:keycloak_user_id/mfa-reset` | — | Delete every OTP/WebAuthn credential; re-adds `CONFIGURE_TOTP` if the user still holds `requires-mfa`. Fail-closed, no reconciler. |
 | RP-10 | `POST /tenants/:id/reactivate` | required | Re-enable a disabled trial user or a suspended dedicated realm — reverses **both** a billing-lapse and an operator suspension from one endpoint. `409 tenant_offboarded` if terminal. |
@@ -181,7 +181,7 @@ RLS-6 (no non-`SET LOCAL` write to `app.tenant_id`) is checked separately, inlin
 
 | Concern | Technology | Notes |
 |---|---|---|
-| **Primary store** | PostgreSQL, database `provisioner` on shared RDS (Multi-AZ, PgBouncer transaction pooling in prod) | `FORCE ROW LEVEL SECURITY` on the 5 tenant-scoped tables; GUC `app.tenant_id` bound transaction-locally |
+| **Primary store** | PostgreSQL, database `provisioner` on shared RDS (Multi-AZ, PgBouncer transaction pooling in prod) | `FORCE ROW LEVEL SECURITY` on the 6 tenant-scoped tables; GUC `app.tenant_id` bound transaction-locally |
 | **Events** | AWS SNS + transactional outbox (`platform-events`) | One topic, `iam-tenant-events` — **not** a `RoutingPublisher`; this service is a co-producer with Org & Membership, disjoint event names |
 | **Inbound queues** | AWS SQS, 3 queues | `membership-realm-q`, `tenant-realm-q`, `billing-realm-q`, each with its own `-dlq` (`maxReceiveCount=5`), dedup via `processed_events`. Every message: Glue header stripped (`GlueDecodeCodec`) → counted → payload validated against the consumer's own consumed-message schema → handler; `dlqHandler` observes the 5th delivery before SQS redrives to `-dlq` |
 | **Secrets** | OpenBao KV v2 | Per-tenant IdP secrets at `secret/data/iam/realm-provisioner/idp/<tenant_id>/<idp_alias>`; Kubernetes auth (pod ServiceAccount token → role → policy) |
@@ -658,7 +658,7 @@ Coverage is measured over `./cmd/...`, `./internal/...`, `./pkg/...` (`COVER_PKG
 | **Network isolation** | Every route under `/api/v1/internal/*` except `/healthz`/`/readyz`/`/asyncapi`/`/asyncapi.yaml` is mesh-only mTLS. `RequireSystemRole` is defense-in-depth — NetworkPolicy + mesh mTLS is primary. `/metrics` on its own dedicated port, monitoring-namespace-only. |
 | **Input validation** | Fail-fast single-error (not collect-all); `strategy ∈ {shared, dedicated}`, `protocol ∈ {saml, oidc}`; `Idempotency-Key` non-empty ≤ 256 chars; IdP `config` validated by the §11.6 checklist **before** any Keycloak write; `setting_key` allow-listed. No secret material is ever accepted into or stored in Postgres. |
 | **Authorization matrix** | RP-1..RP-10/12/15/16/17: internal system principal only (mesh peer). RP-11: internal system principal, incl. O&M/operator tooling. RP-13/RP-14: `platform_operator` only. RP makes no end-user authorization decision — that's AuthZ Enrichment's job. |
-| **RLS** | `FORCE ROW LEVEL SECURITY` + `REVOKE ALL FROM PUBLIC` on the 5 tenant-scoped tables; only the `BYPASSRLS` role `realm_provisioner_migrator` can bypass, and the app role is actively stripped of `BYPASSRLS` if ever found set. |
+| **RLS** | `FORCE ROW LEVEL SECURITY` + `REVOKE ALL FROM PUBLIC` on the 6 tenant-scoped tables; only the `BYPASSRLS` role `realm_provisioner_migrator` can bypass, and the app role is actively stripped of `BYPASSRLS` if ever found set. |
 | **§11.6 IdP region-portability checklist** | CRITICAL checks block with `400`; WARN checks require a recorded acknowledgement (admin `user_id` + timestamp) or `422`. Exists specifically so a customer-supplied IdP configuration can never pin the platform to a region ahead of a future cross-region migration. |
 | **Cross-tenant admin access** | Requires `realm_provisioner_migrator` (`BYPASSRLS`), never the app role. A third role, `admin_readonly` (`NOLOGIN BYPASSRLS`), exists purely for compliance/support `SELECT`s and is never used by application code. |
 
@@ -903,7 +903,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, extending the serv
 |---|---|
 | [`.claude/CLAUDE.md`](.claude/CLAUDE.md) | Top-level guidance for Claude Code working in this repo |
 | [`.claude/architecture.md`](.claude/architecture.md) | Clean Architecture directory tree, shared library integration, dep rules |
-| [`.claude/database-schema.md`](.claude/database-schema.md) | 9 tables (5 RLS-scoped + 3 exempt + 1 audit-only), enums, RLS invariants, triggers, migrations |
+| [`.claude/database-schema.md`](.claude/database-schema.md) | 10 tables (6 RLS-scoped + 3 exempt + 1 audit-only), enums, RLS invariants, triggers, migrations |
 | [`.claude/api-caching-events.md`](.claude/api-caching-events.md) | Full endpoint catalogue (RP-1..RP-17), error taxonomy, event catalogue, AsyncAPI/drift mechanics |
 | [`.claude/request-flows.md`](.claude/request-flows.md) | Keycloak-effect-first discipline, compensating teardown, every RP-*/RP-C* flow, idempotency mechanics, GDPR/data-lifecycle |
 | [`.claude/operations.md`](.claude/operations.md) | Security, observability, configuration, CI/CD, testing, GDPR, integration points, open items |

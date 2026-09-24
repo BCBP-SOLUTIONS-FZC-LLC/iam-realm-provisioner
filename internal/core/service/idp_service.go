@@ -7,10 +7,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/pkg/requestctx"
 )
 
 // validIdpAlias restricts idp_alias to a safe charset — letters, digits,
@@ -33,15 +35,19 @@ func validateIdpAliasFormat(alias string) error {
 }
 
 // IdpService implements RP-6/RP-7/RP-13 (§8.4/8.5, RP-INV-4 — the §11.6
-// gate).
+// gate). Every successful IdP change also records a TenantIdpConfigChanged
+// audit entry in pending_audit_entries, in the same transaction as the
+// keycloak_idp_configs write, for AL-5 direct-write delivery (§10.6).
 type IdpService struct {
-	realms      port.TenantRealmRepository
-	idpConfigs  port.IdpConfigRepository
-	validations port.IdpValidationRepository
-	idempotency port.IdempotencyStore
-	openbao     port.OpenBaoClient
-	keycloak    port.KeycloakAdmin
-	log         port.SlogStyleLogger
+	realms       port.TenantRealmRepository
+	idpConfigs   port.IdpConfigRepository
+	validations  port.IdpValidationRepository
+	idempotency  port.IdempotencyStore
+	openbao      port.OpenBaoClient
+	keycloak     port.KeycloakAdmin
+	tx           port.TxRunner
+	auditEntries port.PendingAuditEntryRepository
+	log          port.SlogStyleLogger
 }
 
 // NewIdpService wires IdpService's dependencies.
@@ -52,8 +58,13 @@ func NewIdpService(
 	idempotency port.IdempotencyStore,
 	openbao port.OpenBaoClient,
 	keycloak port.KeycloakAdmin,
+	tx port.TxRunner,
+	auditEntries port.PendingAuditEntryRepository,
 ) *IdpService {
-	return &IdpService{realms: realms, idpConfigs: idpConfigs, validations: validations, idempotency: idempotency, openbao: openbao, keycloak: keycloak}
+	return &IdpService{
+		realms: realms, idpConfigs: idpConfigs, validations: validations, idempotency: idempotency,
+		openbao: openbao, keycloak: keycloak, tx: tx, auditEntries: auditEntries,
+	}
 }
 
 // WithLogger attaches a logger and returns s for chaining.
@@ -198,10 +209,27 @@ func (s *IdpService) ConfigureIdp(ctx context.Context, idempotencyKey string, te
 		return nil, err
 	}
 
-	if err := s.idpConfigs.Upsert(ctx, &domain.IdpConfig{
-		TenantID: tenantID, IdpAlias: req.IdpAlias, Protocol: req.Protocol,
-		DisplayName: req.DisplayName, Enabled: true, Config: req.Config,
-		Status: domain.IdpConfigStatusActive,
+	action := domain.AuditActionUpdate
+	if isNewConfig {
+		action = domain.AuditActionCreate
+	}
+	entry := idpAuditEntry(ctx, tenantID, req.IdpAlias, action, map[string]any{
+		"protocol":               string(req.Protocol),
+		"validator_version":      ValidatorVersion,
+		"validation_outcome":     string(validation.Outcome),
+		"checks":                 checksJSON,
+		"acknowledged_check_ids": req.Acknowledgements,
+		"secret_rotated":         req.Secret != "",
+	})
+	if err := s.tx.RunInTx(ctx, func(ctx context.Context) error {
+		if err := s.idpConfigs.Upsert(ctx, &domain.IdpConfig{
+			TenantID: tenantID, IdpAlias: req.IdpAlias, Protocol: req.Protocol,
+			DisplayName: req.DisplayName, Enabled: true, Config: req.Config,
+			Status: domain.IdpConfigStatusActive,
+		}); err != nil {
+			return err
+		}
+		return s.auditEntries.Enqueue(ctx, entry)
 	}); err != nil {
 		s.failIdempotency(ctx, idempotencyKey)
 		return nil, err
@@ -216,7 +244,8 @@ func (s *IdpService) ConfigureIdp(ctx context.Context, idempotencyKey string, te
 }
 
 // RemoveIdp implements RP-7: removes the Keycloak IdP, the OpenBao secret,
-// and the local row. Idempotent.
+// and the local row (with its TenantIdpConfigChanged audit entry, in one
+// transaction). Idempotent.
 func (s *IdpService) RemoveIdp(ctx context.Context, tenantID uuid.UUID, idpAlias string) error {
 	if err := validateIdpAliasFormat(idpAlias); err != nil {
 		return err
@@ -226,7 +255,8 @@ func (s *IdpService) RemoveIdp(ctx context.Context, tenantID uuid.UUID, idpAlias
 	if err != nil {
 		return err
 	}
-	if _, err := s.idpConfigs.FindByAlias(ctx, tenantID, idpAlias); err != nil {
+	cfg, err := s.idpConfigs.FindByAlias(ctx, tenantID, idpAlias)
+	if err != nil {
 		return err
 	}
 	if err := s.keycloak.DeleteIdp(ctx, realm.RealmName, idpAlias); err != nil {
@@ -235,7 +265,38 @@ func (s *IdpService) RemoveIdp(ctx context.Context, tenantID uuid.UUID, idpAlias
 	if err := s.openbao.DeleteIdpSecret(ctx, tenantID, idpAlias); err != nil {
 		s.log.WarnContext(ctx, "remove_idp: openbao secret delete failed (best-effort)", "tenant_id", tenantID, "idp_alias", idpAlias, "error", err.Error())
 	}
-	return s.idpConfigs.Delete(ctx, tenantID, idpAlias)
+	entry := idpAuditEntry(ctx, tenantID, idpAlias, domain.AuditActionDelete, map[string]any{"protocol": string(cfg.Protocol)})
+	return s.tx.RunInTx(ctx, func(ctx context.Context) error {
+		if err := s.idpConfigs.Delete(ctx, tenantID, idpAlias); err != nil {
+			return err
+		}
+		return s.auditEntries.Enqueue(ctx, entry)
+	})
+}
+
+// idpAuditEntry builds the TenantIdpConfigChanged AL-5 entry (HLD §9.4,
+// §10.6). The actor is the mesh caller — normally the iam-system principal
+// O&M calls as — and trace_id is captured now, since delivery happens
+// later from the drainer on an unrelated trace.
+func idpAuditEntry(ctx context.Context, tenantID uuid.UUID, alias, action string, metadata map[string]any) domain.AuditEntry {
+	entry := domain.AuditEntry{
+		TenantID: tenantID, EntryType: domain.AuditEntryTypeIdpChanged, Action: action,
+		Actor:      domain.AuditActor{Type: domain.AuditActorIAMSystem, ID: domain.SystemActorID},
+		Target:     &domain.AuditTarget{Type: "idp", ID: alias},
+		OccurredAt: time.Now().UTC(), SourceService: domain.Source,
+		SourceEventType: domain.AuditSourceTenantIdpConfigChanged,
+		Metadata:        metadata,
+	}
+	if rc, ok := requestctx.FromContext(ctx); ok {
+		if rc.UserID != uuid.Nil && rc.UserID.String() != domain.SystemActorID {
+			entry.Actor = domain.AuditActor{Type: domain.AuditActorUser, ID: rc.UserID.String()}
+		}
+		entry.IPAddress, entry.UserAgent = rc.ClientIP, rc.UserAgent
+	}
+	if sc := trace.SpanContextFromContext(ctx); sc.HasTraceID() {
+		entry.TraceID = sc.TraceID().String()
+	}
+	return entry
 }
 
 // PortabilityAuditResult is the RP-13 response body (HLD §11.6 verbatim shape).

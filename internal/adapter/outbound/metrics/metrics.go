@@ -122,6 +122,17 @@ var (
 	// MfaResetTotal counts RP-9 MFA-reset calls by result.
 	MfaResetTotal *prometheus.CounterVec
 
+	// AuditEntryDeliveryTotal counts AL-5 direct-write delivery attempts
+	// of pending_audit_entries rows (TenantIdpConfigChanged, §10.6) by
+	// result (delivered|retry|rejected).
+	AuditEntryDeliveryTotal *prometheus.CounterVec
+
+	// AuditEntryBacklogGauge is the current pending_audit_entries row
+	// count by status (pending|failed) — a growing pending count means
+	// Audit Log is unreachable or AUDIT_LOG_BASE_URL is unset; any failed
+	// row is an entry Audit permanently rejected.
+	AuditEntryBacklogGauge *prometheus.GaugeVec
+
 	// ServiceAccountRegisterTotal counts the RP-1/RP-2/RP-3
 	// automation-principal mint-tail attempts (mint Keycloak client +
 	// Token Service TS-4/TS-1) by result — "warn" is the non-blocking
@@ -401,6 +412,18 @@ func registerMetrics(environment string) {
 		ConstLabels: labels,
 	}, []string{"result"})
 
+	AuditEntryDeliveryTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        prefix + "audit_entry_delivery_total",
+		Help:        "AL-5 direct-write audit-entry delivery attempts by result (delivered|retry|rejected).",
+		ConstLabels: labels,
+	}, []string{"result"})
+
+	AuditEntryBacklogGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name:        prefix + "audit_entry_backlog_gauge",
+		Help:        "Current pending_audit_entries rows by status (pending|failed).",
+		ConstLabels: labels,
+	}, []string{"status"})
+
 	ServiceAccountRegisterTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name:        prefix + "service_account_register_total",
 		Help:        "RP-1/RP-2/RP-3 automation-principal mint-tail attempts by result (success|warn|failure).",
@@ -509,6 +532,8 @@ func registerMetrics(environment string) {
 		UserDeleteTotal,
 		SessionRevokeTotal,
 		MfaResetTotal,
+		AuditEntryDeliveryTotal,
+		AuditEntryBacklogGauge,
 		ServiceAccountRegisterTotal,
 		ServiceAccountKeyRefreshTotal,
 		ServiceAccountBackfillTotal,

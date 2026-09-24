@@ -138,7 +138,7 @@ func TestRLS_EveryTenantScopedTableEnabled(t *testing.T) {
 
 	expected := []string{
 		"tenant_realms", "keycloak_idp_configs", "keycloak_idp_config_validations",
-		"realm_config_reconciliations", "provisioning_operations",
+		"realm_config_reconciliations", "provisioning_operations", "pending_audit_entries",
 	}
 	rows, err := rawPool.Query(ctx, `
 		SELECT c.relname

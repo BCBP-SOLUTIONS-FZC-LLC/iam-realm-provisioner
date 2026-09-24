@@ -221,3 +221,37 @@ func (r *GaugeRepository) groupedCounts(ctx context.Context, sql string, args ..
 	}
 	return out, nil
 }
+
+// auditEntryBacklogSQL counts pending_audit_entries rows per status. The
+// VALUES join keeps both statuses present at 0 rather than dropping a label.
+const auditEntryBacklogSQL = `
+SELECT s.status, count(p.id)
+FROM (VALUES ('pending'), ('failed')) AS s(status)
+LEFT JOIN public.pending_audit_entries p ON p.status = s.status
+GROUP BY s.status`
+
+// AuditEntryBacklog returns the pending_audit_entries row count by status
+// (TenantIdpConfigChanged AL-5 hand-off, §10.6).
+func (r *GaugeRepository) AuditEntryBacklog(ctx context.Context) (map[string]int64, error) {
+	out := map[string]int64{}
+	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, auditEntryBacklogSQL)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var status string
+			var n int64
+			if err := rows.Scan(&status, &n); err != nil {
+				return err
+			}
+			out[status] = n
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
