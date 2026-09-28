@@ -116,15 +116,20 @@ jobs:
         with:
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v4.6.0
+      - name: Set up Python (schema-gov)
+        uses: actions/setup-python@v5
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          python-version: '3.14'
 
-      - name: Pull schema-gov image
-        run: docker pull "${{ env.SCHEMA_GOV_IMAGE }}"
+      # platform-schemagov is installed from source, not pulled from GHCR: the
+      # ghcr.io/bcbp-solutions-fzc-llc/platform-schemagov package's Actions-access
+      # allow-list doesn't include this repo, so `docker pull` returns "denied"
+      # even after docker/login-action succeeds. The package's own Dockerfile is
+      # just `pip install .` of this same source; GO_PRIVATE_TOKEN (already used
+      # for private Go modules) authorizes the git clone. Same as iam-token-service.
+      - name: Install schema-gov (platform-schemagov v0.4.0)
+        run: |
+          pip install --no-cache-dir "git+https://x-access-token:${{ secrets.GO_PRIVATE_TOKEN }}@github.com/BCBP-SOLUTIONS-FZC-LLC/platform-schemagov.git@v0.4.0"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.2.3
@@ -193,17 +198,11 @@ jobs:
           if [ "${IS_SCHEDULE}" != "true" ] && [ "${DRY_RUN_INPUT}" = "false" ]; then
             EXECUTE_FLAG="--execute"
           fi
-          docker run --rm \
-            -v "${{ github.workspace }}":/workspace \
-            -v "${{ runner.temp }}":/tmp \
-            -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
-            -e AWS_REGION="${{ vars.AWS_REGION }}" \
-            -e GITHUB_ACTIONS \
-            "${{ env.SCHEMA_GOV_IMAGE }}" prune \
+          AWS_REGION="${{ vars.AWS_REGION }}" schema-gov prune \
             --registry "${{ vars.GLUE_REGISTRY_TENANT_NAME }}" \
             --schema-dir .tmp/glue-schemas \
             --env      staging \
-            --output   /tmp/schema-prune-metrics.json \
+            --output   ${{ runner.temp }}/schema-prune-metrics.json \
             ${EXECUTE_FLAG}
           echo "::notice title=Shared registry::TenantCreated/TrialStarted above (if listed) are owned by iam-org-membership — expected in dry-run output, never actioned (see the Guard step)."
 
@@ -258,15 +257,20 @@ jobs:
         with:
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v4.6.0
+      - name: Set up Python (schema-gov)
+        uses: actions/setup-python@v5
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          python-version: '3.14'
 
-      - name: Pull schema-gov image
-        run: docker pull "${{ env.SCHEMA_GOV_IMAGE }}"
+      # platform-schemagov is installed from source, not pulled from GHCR: the
+      # ghcr.io/bcbp-solutions-fzc-llc/platform-schemagov package's Actions-access
+      # allow-list doesn't include this repo, so `docker pull` returns "denied"
+      # even after docker/login-action succeeds. The package's own Dockerfile is
+      # just `pip install .` of this same source; GO_PRIVATE_TOKEN (already used
+      # for private Go modules) authorizes the git clone. Same as iam-token-service.
+      - name: Install schema-gov (platform-schemagov v0.4.0)
+        run: |
+          pip install --no-cache-dir "git+https://x-access-token:${{ secrets.GO_PRIVATE_TOKEN }}@github.com/BCBP-SOLUTIONS-FZC-LLC/platform-schemagov.git@v0.4.0"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.2.3
@@ -320,17 +324,11 @@ jobs:
         run: |
           EXECUTE_FLAG=""
           [ "${DRY_RUN_INPUT}" = "false" ] && EXECUTE_FLAG="--execute"
-          docker run --rm \
-            -v "${{ github.workspace }}":/workspace \
-            -v "${{ runner.temp }}":/tmp \
-            -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
-            -e AWS_REGION="${{ vars.AWS_REGION }}" \
-            -e GITHUB_ACTIONS \
-            "${{ env.SCHEMA_GOV_IMAGE }}" prune \
+          AWS_REGION="${{ vars.AWS_REGION }}" schema-gov prune \
             --registry "${{ vars.GLUE_REGISTRY_TENANT_NAME }}" \
             --schema-dir .tmp/glue-schemas \
             --env      production \
-            --output   /tmp/schema-prune-metrics.json \
+            --output   ${{ runner.temp }}/schema-prune-metrics.json \
             ${EXECUTE_FLAG}
           echo "::notice title=Shared registry::TenantCreated/TrialStarted above (if listed) are owned by iam-org-membership — expected in dry-run output, never actioned (see the Guard step)."
 
