@@ -78,14 +78,30 @@ func (c *Client) do(req *http.Request, tenantID uuid.UUID) (*http.Response, erro
 
 // classifyStatus maps a non-2xx TS response status to the shared error
 // every RegisterPrincipal/IssueOrRotateCredential/ReadPrincipal apply
-// identically: >=500 as the retryable ErrTokenServiceUnavailable, any
-// other >=300 as a plain unexpected-status error naming endpoint (e.g.
-// "TS-4"). Returns nil for a 2xx status. Callers that need to special-case
-// a specific status first (IssueOrRotateCredential's 409) check that before
-// falling through to this.
-func classifyStatus(status int, endpoint string) error {
+// identically: >=500 as the retryable ErrTokenServiceUnavailable, 404 as
+// ErrServiceAccountNotProvisioned (principal not yet registered), 400 as a
+// typed invalid-request domain error surfacing the TS error code, any other
+// >=300 as a plain unexpected-status error. Returns nil for a 2xx status.
+// Callers that need to special-case a specific status first
+// (IssueOrRotateCredential's 409) check that before falling through here.
+func classifyStatus(status int, endpoint string, body io.Reader) error {
 	if status >= 500 {
 		return domain.NewError(domain.ErrTokenServiceUnavailable, "token service unavailable").WithDetails(map[string]any{"status": status})
+	}
+	if status == http.StatusNotFound {
+		return domain.NewError(domain.ErrServiceAccountNotProvisioned, "token service: principal not found").
+			WithDetails(map[string]any{"endpoint": endpoint})
+	}
+	if status == http.StatusBadRequest || status == http.StatusUnprocessableEntity {
+		var errBody errorResponseBody
+		if decErr := json.NewDecoder(io.LimitReader(body, 4096)).Decode(&errBody); decErr != nil {
+			errBody = errorResponseBody{}
+		}
+		msg := fmt.Sprintf("tokenservice: %s rejected request (status %d)", endpoint, status)
+		if errBody.Error != "" {
+			msg = fmt.Sprintf("tokenservice: %s rejected request — %s", endpoint, errBody.Error)
+		}
+		return fmt.Errorf("%s", msg)
 	}
 	if status >= 300 {
 		return fmt.Errorf("tokenservice: unexpected status %d from %s", status, endpoint)
@@ -123,7 +139,7 @@ func (c *Client) RegisterPrincipal(ctx context.Context, tenantID uuid.UUID, req 
 	}
 	defer httpx.CloseBody(c.log, resp.Body)
 
-	if err := classifyStatus(resp.StatusCode, "TS-4"); err != nil {
+	if err := classifyStatus(resp.StatusCode, "TS-4", resp.Body); err != nil {
 		return nil, err
 	}
 
@@ -194,7 +210,7 @@ func (c *Client) IssueOrRotateCredential(ctx context.Context, tenantID, principa
 		return nil, domain.NewError(code, "token service credential issue/rotate conflict").
 			WithDetails(map[string]any{"tenant_id": tenantID, "principal_id": principalID, "upstream_error": errBody.Error})
 	}
-	if err := classifyStatus(resp.StatusCode, "TS-1"); err != nil {
+	if err := classifyStatus(resp.StatusCode, "TS-1", resp.Body); err != nil {
 		return nil, err
 	}
 
@@ -252,7 +268,7 @@ func (c *Client) ReadPrincipal(ctx context.Context, tenantID, principalID uuid.U
 	}
 	defer httpx.CloseBody(c.log, resp.Body)
 
-	if err := classifyStatus(resp.StatusCode, "TS-3"); err != nil {
+	if err := classifyStatus(resp.StatusCode, "TS-3", resp.Body); err != nil {
 		return nil, err
 	}
 
