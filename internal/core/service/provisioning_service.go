@@ -178,6 +178,8 @@ func (s *ProvisioningService) mintPlatformAutomation(ctx context.Context, idempo
 		PrincipalSub: sub, KeycloakClientID: clientID,
 	})
 	if err != nil {
+		// TS-4 failed — Token Service has no record of this client yet.
+		// Safe to delete the Keycloak client as a compensating cleanup.
 		if created {
 			s.bestEffortDeleteServiceAccountClient(ctx, realmName, clientID)
 		}
@@ -186,9 +188,17 @@ func (s *ProvisioningService) mintPlatformAutomation(ctx context.Context, idempo
 	if _, err := s.tokenService.IssueOrRotateCredential(ctx, tenantID, reg.PrincipalID, port.IssueCredentialRequest{
 		RotationID: mintRotationID(idempotencyKey),
 	}); err != nil {
-		if created {
-			s.bestEffortDeleteServiceAccountClient(ctx, realmName, clientID)
-		}
+		// TS-4 already succeeded — Token Service's principal record now
+		// references this Keycloak client. Do NOT delete the client here:
+		// deleting it would leave Token Service with an orphaned principal
+		// pointing to a gone client (worse than a never-activated-but-
+		// registered client). A retry of the same idempotencyKey self-heals:
+		//   1. CreateServiceAccountClient → created=false (client still exists)
+		//   2. RegisterPrincipal (TS-4) → idempotent 200, same principal_id
+		//   3. IssueOrRotateCredential (TS-1) → same rotation_id → replay 200
+		// RP-C reconcilers handle any truly orphaned clients on their own
+		// schedule if no retry ever happens — a far less harmful state than
+		// a committed Token Service principal with no live Keycloak client.
 		return uuid.Nil, err
 	}
 	return reg.PrincipalID, nil
