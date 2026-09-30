@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/glue"
 
@@ -64,6 +65,19 @@ func (noopPublisher) PublishBatch(context.Context, []events.Envelope[json.RawMes
 func instrumentConsumer(consumer string, handler events.Handler) events.Handler {
 	return func(ctx context.Context, env events.Envelope[json.RawMessage]) error {
 		metrics.PlatformMessagesReceivedTotal.WithLabelValues(consumer).Inc()
+		if !env.Timestamp.IsZero() {
+			// Producer→consumer end-to-end latency (platform_event_propagation_seconds).
+			// Zero timestamp means an older or hand-crafted envelope without one —
+			// skip rather than record a bogus multi-decade duration. A negative
+			// delta means the producer's wall clock is skewed ahead of the
+			// consumer's (real under imperfect NTP) — clamp to 0 so the sample
+			// doesn't land in the histogram's -Inf bucket and skew quantiles.
+			delta := time.Since(env.Timestamp).Seconds()
+			if delta < 0 {
+				delta = 0
+			}
+			metrics.PlatformEventPropagationDuration.WithLabelValues(consumer).Observe(delta)
+		}
 		err := handler(ctx, env)
 		if err != nil {
 			metrics.PlatformMessagesFailedTotal.WithLabelValues(consumer).Inc()

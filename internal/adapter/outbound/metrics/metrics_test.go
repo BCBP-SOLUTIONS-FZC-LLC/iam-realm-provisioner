@@ -73,6 +73,12 @@ func TestRegister_SucceedsAndPopulatesAllVars(t *testing.T) {
 	assert.NotNil(t, DependencyRequestDuration)
 	assert.NotNil(t, DuplicateMessagesTotal)
 	assert.NotNil(t, RLSViolationsPlatformTotal)
+	assert.NotNil(t, PlatformMessagesReceivedTotal)
+	assert.NotNil(t, PlatformMessagesProcessedTotal)
+	assert.NotNil(t, PlatformMessagesFailedTotal)
+	assert.NotNil(t, PlatformDLQMessagesTotal)
+	assert.NotNil(t, PlatformRetryTotal)
+	assert.NotNil(t, PlatformEventPropagationDuration)
 }
 
 func TestRegister_IsIdempotent(t *testing.T) {

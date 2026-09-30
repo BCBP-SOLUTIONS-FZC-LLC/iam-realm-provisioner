@@ -498,10 +498,11 @@ components:
     DirectPaidSignupPayload:
       type: object
       additionalProperties: true
-      required: [tenant_id, realm, direct_signup]
+      required: [tenant_id, realm, plan, direct_signup]
       properties:
         tenant_id: { type: string, format: uuid }
         realm: { type: string }
+        plan: { type: string, enum: [starter, pro, enterprise] }
         direct_signup: { type: boolean, const: true }
 
     TrialExpiredPayload:

@@ -493,7 +493,7 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 			Type: domain.EventDirectPaidSignup, TenantID: req.TenantID,
 			Subject: "tenants/" + req.TenantID.String(),
 			Data: domain.DirectPaidSignupPayload{
-				TenantID: req.TenantID, Realm: realmName, DirectSignup: true,
+				TenantID: req.TenantID, Realm: realmName, Plan: req.Plan, DirectSignup: true,
 			},
 		}); err != nil {
 			return err

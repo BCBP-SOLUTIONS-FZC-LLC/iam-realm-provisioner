@@ -290,6 +290,25 @@ func TestIssueOrRotateCredential_ConflictWithOptimisticLockBody_MapsToOptimistic
 	assert.Equal(t, domain.ErrOptimisticLockConflict, derr.Code)
 }
 
+// TS-1's third §17 409 cause (TS-D13): a replayed rotation_id whose
+// credential has since been revoked. Must surface as the distinct
+// domain.ErrCredentialReplayRevoked, not be flattened into
+// ErrServiceAccountRotationInFlight.
+func TestIssueOrRotateCredential_ConflictWithCredentialReplayRevokedBody_MapsToCredentialReplayRevoked(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"credential_replay_revoked","status":409}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, noopLogger{})
+	_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
+	require.Error(t, err)
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCredentialReplayRevoked, derr.Code)
+}
+
 func TestIssueOrRotateCredential_ServerErrorMapsToTokenServiceUnavailable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
@@ -357,7 +376,7 @@ func TestReadPrincipal_Success(t *testing.T) {
 		gotPath, gotMethod = r.URL.Path, r.Method
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprintf(w, `{"principal_id":"%s","tenant_id":"%s","keycloak_client_id":"platform-automation","principal_type":"platform_automation","status":"active","record_version":3,
-			"credentials":[{"version":1,"status":"rotating","openbao_path":"x/v1","issued_at":"2026-09-01T00:00:00Z","expires_at":"2026-09-10T00:00:00Z"},
+			"credentials":[{"version":1,"status":"rotating","openbao_path":"x/v1","issued_at":"2026-09-01T00:00:00Z","expires_at":"2026-09-10T00:00:00Z","rotation_cadence_days":30,"next_rotation_at":"2026-10-10T00:00:00Z"},
 			              {"version":2,"status":"active","openbao_path":"x/v2","issued_at":"2026-09-10T00:00:00Z"}]}`,
 			principalID, tenantID)
 	}))
@@ -372,7 +391,28 @@ func TestReadPrincipal_Success(t *testing.T) {
 	require.Len(t, res.Credentials, 2)
 	assert.Equal(t, "rotating", res.Credentials[0].Status)
 	require.NotNil(t, res.Credentials[0].ExpiresAt)
+	require.NotNil(t, res.Credentials[0].RotationCadenceDays)
+	assert.Equal(t, 30, *res.Credentials[0].RotationCadenceDays)
+	require.NotNil(t, res.Credentials[0].NextRotationAt)
+	assert.Equal(t, 2026, res.Credentials[0].NextRotationAt.Year())
 	assert.Nil(t, res.Credentials[1].ExpiresAt)
+	assert.Nil(t, res.Credentials[1].RotationCadenceDays, "omitted rotation_cadence_days decodes to nil")
+	assert.Nil(t, res.Credentials[1].NextRotationAt, "omitted next_rotation_at decodes to nil")
+}
+
+func TestReadPrincipal_NextRotationAtMalformedErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"principal_id":"`+uuid.New().String()+`","tenant_id":"`+uuid.New().String()+`","keycloak_client_id":"platform-automation",
+			"principal_type":"platform_automation","status":"active","record_version":1,
+			"credentials":[{"version":1,"status":"active","openbao_path":"x","issued_at":"2026-09-01T00:00:00Z","next_rotation_at":"not-a-date"}]}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, noopLogger{})
+	_, err := c.ReadPrincipal(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "next_rotation_at")
 }
 
 func TestReadPrincipal_IssuedAtMalformedErrors(t *testing.T) {

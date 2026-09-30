@@ -315,7 +315,8 @@ _ = json.NewDecoder(resp.Body).Decode(&errResp)
 | `keycloak_user_not_found` | 404 | Additive — internal-only signal from `FindUserByEmail`, absorbed before reaching a caller (§9.2) |
 | `idp_requires_dedicated_realm` / `realm_already_dedicated` / `revert_window_expired` / `tenant_offboarded` / `operation_in_progress` / `optimistic_lock_conflict` | 409 | State-machine / idempotency conflict — `optimistic_lock_conflict` also surfaces from Token Service TS-1's disambiguated 409 (§2.5) |
 | `user_email_conflict` | 409 | Additive — RP-1/RP-2/RP-5 create-user 409 that couldn't be resolved as the caller's own lost-response retry (§9.2) |
-| `service_account_rotation_in_flight` | 409 | Additive — Token Service TS-1 rejected a concurrent issue/rotate for the same `platform-automation` principal (§2.5) |
+| `service_account_rotation_in_flight` | 409 | Additive — Token Service TS-1 rejected a concurrent issue/rotate for the same `platform-automation` principal (§2.5); also the safe default for any other/unparseable TS-1 409 body |
+| `credential_replay_revoked` | 409 | Additive — Token Service TS-1 (TS-D13) rejected a replayed `rotation_id` whose credential has since been revoked — distinct from `service_account_rotation_in_flight` so callers can tell a live rotation race from a stale `rotation_id` |
 | `service_account_not_provisioned` | 422 | Additive — RP-17 called before the tenant's `platform-automation` principal was ever minted |
 | `keycloak_unavailable` / `conversion_failed` | 502 | Keycloak transport failure or partial-migration failure — retryable, no local commit |
 | `org_membership_unavailable` / `object_store_unavailable` / `db_unavailable` / `token_service_unavailable` | 503 | O&M I-8 check, S3 export, Postgres, or Token Service (§2.5) unreachable |
@@ -637,6 +638,7 @@ Coverage is measured over `./cmd/...`, `./internal/...`, `./pkg/...` (`COVER_PKG
 | `BAO_ADDR` | `http://localhost:8210` | — | OpenBao address — Kubernetes auth (pod ServiceAccount token) |
 | `BAO_AUTH_ROLE` / `BAO_KV_MOUNT` / `BAO_IDP_PATH_PREFIX` / `BAO_KEYCLOAK_ADMIN_PATH` | `iam-realm-provisioner` / `secret` / `iam/realm-provisioner/idp` / `iam/realm-provisioner/keycloak-admin` | same | OpenBao path/mount wiring |
 | `ORG_MEMBERSHIP_BASE_URL` | `http://localhost:8082` | — | **Required outside dev.** O&M client — I-8 residual-MFA check |
+| `ORG_MEMBERSHIP_TIMEOUT_MS` | `5s` | `5s` | O&M HTTP client per-request timeout — Go `time.ParseDuration` string (e.g. `5s`, `30s`); a bare integer parses as an error and silently falls back to the default (`_MS` suffix in the name is legacy) |
 | `TOKEN_SERVICE_BASE_URL` | `http://localhost:8083` | — | **Required outside dev.** Token Service client — TS-1/TS-4 mint/rotate handshake (§2.5), required for every RP-1/RP-2/RP-3/RP-4 call and RP-17; no optional-degrade path (unlike `ORG_MEMBERSHIP_BASE_URL`'s reconciler-only usage) |
 | `REALM_EXPORT_BUCKET` / `REALM_EXPORT_KMS_KEY` | `iam-realm-exports` / — | `iam-realm-exports` / — | Offboarding export target |
 | `TRIAL_GRACE_DAYS` / `CANCELLED_GRACE_DAYS` / `RETENTION_DAYS` | `30` / `30` / `90` | same | Lifecycle timers |
@@ -908,7 +910,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, extending the serv
 | [`.claude/request-flows.md`](.claude/request-flows.md) | Keycloak-effect-first discipline, compensating teardown, every RP-*/RP-C* flow, idempotency mechanics, GDPR/data-lifecycle |
 | [`.claude/operations.md`](.claude/operations.md) | Security, observability, configuration, CI/CD, testing, GDPR, integration points, open items |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Detailed architecture narrative with Mermaid diagrams — layer model, write flow, RLS/GUC flow, threat model |
-| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD, v1.14 Approved — §2.5 platform-automation principal, §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
+| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD, v1.20 Approved — §2.5 platform-automation principal, §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
 | [`docs/runbook.md`](docs/runbook.md) | Full operator procedures for the headline incident scenarios |
 
 ---

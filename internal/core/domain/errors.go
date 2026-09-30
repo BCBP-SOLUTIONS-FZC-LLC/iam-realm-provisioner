@@ -26,13 +26,15 @@ const (
 	ErrOptimisticLockConflict         ErrorCode = "optimistic_lock_conflict"           // 409
 	ErrUserEmailConflict              ErrorCode = "user_email_conflict"                // 409
 	ErrServiceAccountRotationInFlight ErrorCode = "service_account_rotation_in_flight" // 409
-	ErrServiceAccountNotProvisioned   ErrorCode = "service_account_not_provisioned"    // 422
-	ErrKeycloakUnavailable            ErrorCode = "keycloak_unavailable"               // 502
-	ErrConversionFailed               ErrorCode = "conversion_failed"                  // 502
-	ErrOrgMembershipUnavailable       ErrorCode = "org_membership_unavailable"         // 503
-	ErrObjectStoreUnavailable         ErrorCode = "object_store_unavailable"           // 503
-	ErrDBUnavailable                  ErrorCode = "db_unavailable"                     // 503
-	ErrTokenServiceUnavailable        ErrorCode = "token_service_unavailable"          // 503
+	ErrCredentialReplayRevoked        ErrorCode = "credential_replay_revoked"          //nolint:gosec // G101 false positive: 409, an §17 error-code string constant, not a credential
+
+	ErrServiceAccountNotProvisioned ErrorCode = "service_account_not_provisioned" // 422
+	ErrKeycloakUnavailable          ErrorCode = "keycloak_unavailable"            // 502
+	ErrConversionFailed             ErrorCode = "conversion_failed"               // 502
+	ErrOrgMembershipUnavailable     ErrorCode = "org_membership_unavailable"      // 503
+	ErrObjectStoreUnavailable       ErrorCode = "object_store_unavailable"        // 503
+	ErrDBUnavailable                ErrorCode = "db_unavailable"                  // 503
+	ErrTokenServiceUnavailable      ErrorCode = "token_service_unavailable"       // 503
 
 	// ErrInvalidRequest is additive to the frozen §17 taxonomy -- a generic
 	// malformed-JSON/failed-binding-validation 400, distinct from the
@@ -70,6 +72,7 @@ var httpStatus = map[ErrorCode]int{
 	ErrOptimisticLockConflict:         409,
 	ErrUserEmailConflict:              409,
 	ErrServiceAccountRotationInFlight: 409,
+	ErrCredentialReplayRevoked:        409,
 	ErrKeycloakUnavailable:            502,
 	ErrConversionFailed:               502,
 	ErrOrgMembershipUnavailable:       503,

@@ -51,9 +51,10 @@ Every mutating endpoint above marked "required" enforces `RequireIdempotencyKey`
 | `revert_window_expired` | 409 | RP-4 past the reversal window |
 | `tenant_offboarded` | 409 | Any mutation against a terminal (offboarded) tenant |
 | `operation_in_progress` | 409 | Idempotency-Key replay against a non-`succeeded` row |
-| `optimistic_lock_conflict` | 409 | `record_version` mismatch on a `tenant_realms`/`idp_config` update; also surfaced from `IssueOrRotateCredential` when Token Service's TS-1 409 body names this cause explicitly (disambiguated from `service_account_rotation_in_flight` below by parsing the response body, not flattened into one code) |
+| `optimistic_lock_conflict` | 409 | `record_version` mismatch on a `tenant_realms`/`idp_config` update; also surfaced from `IssueOrRotateCredential` when Token Service's TS-1 409 body names this cause explicitly (disambiguated from `service_account_rotation_in_flight` and `credential_replay_revoked` below by parsing the response body, not flattened into one code) |
 | `user_email_conflict` | 409 | Additive — RP-1/RP-2/RP-5 create-user 409 that `resolveUserCreateConflict` could not resolve as the caller's own lost-response retry (§9.2) |
 | `service_account_rotation_in_flight` | 409 | Additive — Token Service TS-1 rejected a concurrent issue/rotate for the same principal (§2.5); also the safe default for any other/unparseable TS-1 409 body |
+| `credential_replay_revoked` | 409 | Additive — Token Service TS-1 (TS-D13) rejected a replayed `rotation_id` whose credential has since been revoked; distinct from `service_account_rotation_in_flight` so callers can tell "a live rotation race" from "your stored rotation_id is stale" |
 | `service_account_not_provisioned` | 422 | Additive — RP-17 apply attempted before the tenant's `platform-automation` principal was ever minted |
 | `keycloak_unavailable` | 502 | |
 | `conversion_failed` | 502 | RP-3/RP-4 Keycloak sequence failure (with `WithDetails` context) |

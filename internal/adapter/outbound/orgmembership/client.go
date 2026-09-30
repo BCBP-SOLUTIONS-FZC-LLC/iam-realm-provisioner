@@ -48,8 +48,13 @@ var _ port.OrgMembershipClient = (*Client)(nil)
 var _ port.SubscriptionLapseReader = (*Client)(nil)
 
 // New constructs a Client calling O&M's internal API at baseURL.
-func New(baseURL string, log port.Logger) *Client {
-	return &Client{baseURL: baseURL, http: httpx.NewClient(5 * time.Second), log: log}
+// timeout is the per-request deadline (ORG_MEMBERSHIP_TIMEOUT_MS env var in
+// cmd/; defaults to 5s when callers pass 0 or a negative value).
+func New(baseURL string, timeout time.Duration, log port.Logger) *Client {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	return &Client{baseURL: baseURL, http: httpx.NewClient(timeout), log: log}
 }
 
 // HasResidualMFARequirement calls O&M's I-8

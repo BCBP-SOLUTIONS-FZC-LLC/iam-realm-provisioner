@@ -74,12 +74,16 @@ type TokenServiceClient interface {
 }
 
 // CredentialSummary is one entry in ReadPrincipalResult.Credentials.
+// RotationCadenceDays and NextRotationAt are Token Service TS-D14 additions
+// — both optional, both omitted from older TS responses (nil).
 type CredentialSummary struct {
-	Version     int
-	Status      string
-	OpenBaoPath string
-	IssuedAt    time.Time
-	ExpiresAt   *time.Time
+	Version             int
+	Status              string
+	OpenBaoPath         string
+	IssuedAt            time.Time
+	ExpiresAt           *time.Time
+	RotationCadenceDays *int
+	NextRotationAt      *time.Time
 }
 
 // ReadPrincipalResult is TS-3's response body (RP-18).

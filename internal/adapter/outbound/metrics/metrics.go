@@ -8,23 +8,34 @@
 //     contract, and a service MUST NOT unilaterally invent or adopt a new
 //     platform_* metric into production alerting/dashboards/SLOs/HPA
 //     before it clears the Platform Observability Registry's ratification
-//     process. This file emits three platform_* candidates —
-//     DependencyRequestDuration (platform_dependency_request_seconds),
-//     DuplicateMessagesTotal (platform_duplicate_messages_total), and
-//     RLSViolationsPlatformTotal (platform_rls_violations_total) — in
-//     shadow, alongside their existing Tier 3 counterparts, so real
-//     production data backs their ratification packets. See
-//     PlatformRegistry (registry.go) for each candidate's full submitted
-//     packet — status, semantic definition, required/approved labels and
-//     their allowed values, cardinality justification, aggregation
-//     expectations. Every alert/recording-rule/SLO in this repo continues
-//     to read the Tier 3 metric until a candidate's status there flips
-//     from Proposed to Canonical.
+//     process. This file emits nine platform_* candidates in shadow —
+//     four Canonical Tier 1 examples from the standard itself
+//     (PlatformMessagesReceived/Processed/Failed/DLQMessagesTotal) plus
+//     five Registry-Proposed additions (DependencyRequestDuration,
+//     DuplicateMessagesTotal, RLSViolationsPlatformTotal, PlatformRetryTotal,
+//     PlatformEventPropagationDuration) — alongside their existing Tier 3
+//     counterparts where applicable, so real production data backs their
+//     ratification packets. See PlatformRegistry (registry.go) for each
+//     candidate's full submitted packet — status, semantic definition,
+//     required/approved labels and their allowed values, cardinality
+//     justification, aggregation expectations. Every alert/recording-rule
+//     /SLO in this repo continues to read the Tier 3 metric until a
+//     candidate's status there flips from Proposed to Canonical.
+//
+//     Two of the standard's Registry-Proposed examples —
+//     platform_queue_depth and platform_dlq_depth — are deliberately NOT
+//     emitted here: both are SQS-side observations (queue-attribute
+//     ApproximateNumberOfMessages) scraped from CloudWatch by the
+//     cluster's metrics-exporter, never by the app process itself. Adding
+//     an app-side gauge for them would duplicate CloudWatch and drift on
+//     scale-to-zero.
+//
 //   - Tier 2 iam_* (domain-shared) — none currently apply. RP-INV-1 (this
 //     service is the sole Keycloak Admin API caller in the platform)
 //     means every remaining metric represents a behavior no other IAM
 //     service can perform, failing the standard's "shared across IAM
 //     services" test.
+//
 //   - Tier 3 iam_realm_provisioner_* (§25 — the frozen prefix) — everything
 //     else, and still this service's sole authoritative metric family for
 //     every one of the three Tier 1 candidates above; nothing here is
@@ -262,6 +273,27 @@ var (
 	// is intercepted by SQS itself before this service's consumer loop
 	// ever sees it again.
 	PlatformDLQMessagesTotal *prometheus.CounterVec
+
+	// PlatformRetryTotal is a Tier 1 candidate (platform_retry_total,
+	// Canonical per the standard's own Tier 1 examples) — see
+	// PlatformRegistry (registry.go, Status: Proposed). Counts one for
+	// every deliberate retry this service schedules against an outbound
+	// dependency; shadow-emitted from AuditDeliveryService's MarkRetry /
+	// MarkRetryAfter call sites today (dependency="audit-log"). Inbound
+	// SQS redeliveries are NOT counted here — those are already observable
+	// via received - processed - failed on the message-lifecycle counters
+	// above, and platform-events does not expose ApproximateReceiveCount
+	// to a per-delivery handler that could label them.
+	PlatformRetryTotal *prometheus.CounterVec
+
+	// PlatformEventPropagationDuration is a Tier 1 candidate
+	// (platform_event_propagation_seconds) submitted for ratification —
+	// see PlatformRegistry (registry.go, Status: Proposed). One sample per
+	// inbound delivery: producer→consumer end-to-end latency, computed as
+	// time.Since(env.Timestamp) inside instrumentConsumer, labeled by
+	// consumer. Registry-Proposed example per the standard (not yet in the
+	// Canonical set), so shadow-only until ratification.
+	PlatformEventPropagationDuration *prometheus.HistogramVec
 )
 
 // gincommonLabels returns a copy of gincommon's {service, version} const
@@ -515,6 +547,19 @@ func registerMetrics(environment string) {
 		ConstLabels: platformLabels,
 	}, []string{"consumer"})
 
+	PlatformRetryTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        "platform_retry_total",
+		Help:        "Deliberate outbound-dependency retries scheduled by this service, by dependency (currently audit-log only).",
+		ConstLabels: platformLabels,
+	}, []string{"dependency"})
+
+	PlatformEventPropagationDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:        "platform_event_propagation_seconds",
+		Help:        "Producer-to-consumer end-to-end latency per inbound delivery — time.Since(env.Timestamp) inside instrumentConsumer — by consumer.",
+		Buckets:     prometheus.DefBuckets,
+		ConstLabels: platformLabels,
+	}, []string{"consumer"})
+
 	gincommon.MetricsRegisterer().MustRegister(
 		ProvisionTotal,
 		UsersMigratedTotal,
@@ -549,6 +594,8 @@ func registerMetrics(environment string) {
 		PlatformMessagesProcessedTotal,
 		PlatformMessagesFailedTotal,
 		PlatformDLQMessagesTotal,
+		PlatformRetryTotal,
+		PlatformEventPropagationDuration,
 	)
 
 	// Pre-initialize labels so dashboards show 0 rather than "no data".
@@ -561,5 +608,7 @@ func registerMetrics(environment string) {
 		PlatformMessagesProcessedTotal.WithLabelValues(consumer)
 		PlatformMessagesFailedTotal.WithLabelValues(consumer)
 		PlatformDLQMessagesTotal.WithLabelValues(consumer)
+		PlatformEventPropagationDuration.WithLabelValues(consumer)
 	}
+	PlatformRetryTotal.WithLabelValues("audit-log")
 }

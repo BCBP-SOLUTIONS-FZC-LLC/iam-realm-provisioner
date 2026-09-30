@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -451,6 +452,9 @@ func (f *fakePendingAuditEntryRepository) ClaimDue(context.Context, int) ([]*dom
 }
 func (f *fakePendingAuditEntryRepository) MarkDelivered(context.Context, uuid.UUID) error { return nil }
 func (f *fakePendingAuditEntryRepository) MarkRetry(context.Context, uuid.UUID, string) error {
+	return nil
+}
+func (f *fakePendingAuditEntryRepository) MarkRetryAfter(context.Context, uuid.UUID, string, time.Duration) error {
 	return nil
 }
 func (f *fakePendingAuditEntryRepository) MarkFailed(context.Context, uuid.UUID, string) error {

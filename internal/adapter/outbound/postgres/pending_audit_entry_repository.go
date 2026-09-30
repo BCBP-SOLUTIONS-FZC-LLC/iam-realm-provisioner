@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
@@ -102,6 +103,23 @@ func (r *PendingAuditEntryRepository) MarkDelivered(ctx context.Context, id uuid
 func (r *PendingAuditEntryRepository) MarkRetry(ctx context.Context, id uuid.UUID, lastErr string) error {
 	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE pending_audit_entries SET last_error = $2 WHERE id = $1`, id, truncate(lastErr, maxAuditErrorLen))
+		return err
+	})
+}
+
+// MarkRetryAfter records lastErr and overrides next_attempt_at with
+// now()+delay, honoring an AL-5 Retry-After hint over the row's default
+// exponential backoff.
+func (r *PendingAuditEntryRepository) MarkRetryAfter(ctx context.Context, id uuid.UUID, lastErr string, delay time.Duration) error {
+	if delay < 0 {
+		delay = 0
+	}
+	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			UPDATE pending_audit_entries
+			SET last_error = $2,
+			    next_attempt_at = now() + make_interval(secs => $3)
+			WHERE id = $1`, id, truncate(lastErr, maxAuditErrorLen), delay.Seconds())
 		return err
 	})
 }

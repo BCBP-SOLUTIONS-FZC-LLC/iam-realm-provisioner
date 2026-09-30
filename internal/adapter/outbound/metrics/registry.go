@@ -104,16 +104,15 @@ type RegistryEntry struct {
 }
 
 // PlatformRegistry lists every platform_*/domain-shared metric this
-// service emits or has proposed. All three entries here are this
-// service's own Registry Ratification Requirement submissions — none is
-// yet Canonical, so none is wired into this repo's alerts, recording
-// rules, SLOs, or HPA references (see each metric's doc comment in
-// metrics.go and every alert/SLO file's header comment for the same
-// note). Flip an entry's Status to StatusCanonical only once real
-// observability governance has actually approved it, and only then
-// proceed with the standard's Backward Compatibility migration steps
-// (dashboards → alerts → recording rules → SLOs → HPA → deprecate →
-// remove after sunset).
+// service emits or has proposed. All entries here are this service's own
+// Registry Ratification Requirement submissions — none is yet Canonical,
+// so none is wired into this repo's alerts, recording rules, SLOs, or
+// HPA references (see each metric's doc comment in metrics.go and every
+// alert/SLO file's header comment for the same note). Flip an entry's
+// Status to StatusCanonical only once real observability governance has
+// actually approved it, and only then proceed with the standard's
+// Backward Compatibility migration steps (dashboards → alerts → recording
+// rules → SLOs → HPA → deprecate → remove after sunset).
 var PlatformRegistry = []RegistryEntry{
 	{
 		Name:               "platform_dependency_request_seconds",
@@ -215,4 +214,41 @@ var PlatformRegistry = []RegistryEntry{
 		AggregationNotes: "increase(platform_dlq_messages_total[1h]) > 0 is worth a WARN-severity alert once ratified — a poison message needs operator triage (inspect the real -dlq queue) regardless of which service or consumer produced it.",
 		SupersedesTier3:  nil,
 	},
+	{
+		Name:               "platform_retry_total",
+		Tier:               "platform",
+		Status:             StatusProposed,
+		SemanticDefinition: "A deliberate retry this service schedules against an outbound dependency — one increment per retry decision, not one per redelivery attempt observed passively. Named verbatim as one of the standard's own Canonical Tier 1 examples; parallel-emitted from AuditDeliveryService's MarkRetry/MarkRetryAfter branches today (dependency=\"audit-log\"). Inbound SQS redeliveries are deliberately NOT counted here — those are already derivable from platform_messages_received_total minus platform_messages_processed_total minus platform_messages_failed_total on the same window, and platform-events does not expose ApproximateReceiveCount to a per-delivery handler that could label them.",
+		RequiredLabels:     []string{"domain", "service", "environment"},
+		ApprovedLabels:     []string{"dependency"},
+		LabelValues: map[string][]string{
+			"dependency": {"audit-log"}, // this service currently retries only against Audit Log's AL-5 direct-write ingest; future dependencies with a retry policy add themselves here
+		},
+		Cardinality:      "Bounded — one value per dependency this service retries against (currently 1); no per-message/tenant identifier is ever a label value.",
+		AggregationNotes: "Platform-wide retry-storm board: sum by (domain, service, dependency) rate(platform_retry_total[w]). A sustained rate on one dependency across many services signals that dependency is degraded, not the caller — the reason this is worth a platform_* name rather than staying per-service.",
+		SupersedesTier3:  nil,
+	},
+	{
+		Name:               "platform_event_propagation_seconds",
+		Tier:               "platform",
+		Status:             StatusProposed,
+		SemanticDefinition: "Producer-to-consumer end-to-end latency per inbound delivery — time.Since(env.Timestamp) at the consumer wrapper's entry point, one sample per received message, by consumer. Named explicitly in the standard's own Registry-Proposed Examples (not the Canonical set); the metric's meaning requires every producer to stamp the envelope with an accurate wall-clock timestamp, so accuracy across services is only as good as the weakest producer's clock.",
+		RequiredLabels:     []string{"domain", "service", "environment"},
+		ApprovedLabels:     []string{"consumer"},
+		LabelValues: map[string][]string{
+			"consumer": {"membership", "tenant", "billing"},
+		},
+		Cardinality:      "Bounded — one value per consumer this service registers (currently 3); the histogram buckets are the Prometheus default set. No message/event identifier is ever a label value.",
+		AggregationNotes: "p99 propagation per consumer: histogram_quantile(0.99, sum by (le, consumer) (rate(platform_event_propagation_seconds_bucket[w]))). Cross-domain propagation-health board: sum by (domain, service, consumer) rate(..._count[w]). A sudden shift in p99 with unchanged _count implies a slow producer or broker; a shift in _count without a p99 change implies volume, not degradation.",
+		SupersedesTier3:  nil,
+	},
+	// platform_queue_depth and platform_dlq_depth are named in the standard's
+	// own Registry-Proposed Examples but are DELIBERATELY NOT registered
+	// here — both are SQS-side observations (the queue attribute
+	// ApproximateNumberOfMessages / ApproximateNumberOfMessagesVisible)
+	// scraped from CloudWatch by the cluster's metrics-exporter, never by
+	// the app process itself. Emitting an app-side gauge for them would
+	// duplicate CloudWatch and drift on scale-to-zero (no pod running ⇒ no
+	// scrape). This service's own message-lifecycle counters plus the
+	// exporter's queue-depth series compose the intended board.
 }

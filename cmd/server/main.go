@@ -232,7 +232,7 @@ func main() {
 		KeycloakAdminPath: envOr("BAO_KEYCLOAK_ADMIN_PATH", "iam/realm-provisioner/keycloak-admin"),
 	}, log)
 
-	orgMembershipClient := orgmembershipclient.New(mustEnv("ORG_MEMBERSHIP_BASE_URL", appEnv), log)
+	orgMembershipClient := orgmembershipclient.New(mustEnv("ORG_MEMBERSHIP_BASE_URL", appEnv), envDuration("ORG_MEMBERSHIP_TIMEOUT_MS", 5*time.Second), log)
 	tokenServiceClient := tokenserviceclient.New(mustEnv("TOKEN_SERVICE_BASE_URL", appEnv), log)
 
 	objectStore := s3adapter.New(s3Client, s3adapter.Config{

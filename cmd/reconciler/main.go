@@ -192,7 +192,7 @@ func run() int {
 	// other reconciler job's dispatch.
 	var subscriptionLapses port.SubscriptionLapseReader
 	if omBaseURL := envOr("ORG_MEMBERSHIP_BASE_URL", ""); omBaseURL != "" {
-		subscriptionLapses = orgmembershipadapter.New(omBaseURL, rawLog)
+		subscriptionLapses = orgmembershipadapter.New(omBaseURL, envDuration("ORG_MEMBERSHIP_TIMEOUT_MS", 5*time.Second), rawLog)
 	}
 
 	var outboxRunner *outbox.Runner

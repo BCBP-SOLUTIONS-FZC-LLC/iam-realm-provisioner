@@ -75,6 +75,73 @@ func TestWriteEntry_TransientStatuses(t *testing.T) {
 	}
 }
 
+// AL-5 429 with a delta-seconds Retry-After hint must surface as a
+// *port.RetryAfterError so the drainer honors AL's backoff instead of the
+// row's default exponential ClaimDue backoff.
+func TestWriteEntry_429WithRetryAfterSecondsSurfacesTypedError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "42")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	err := New(srv.URL, noopLogger{}).WriteEntry(context.Background(), "key-1", sampleEntry())
+	require.Error(t, err)
+	var rae *port.RetryAfterError
+	require.ErrorAs(t, err, &rae)
+	assert.Equal(t, 42*time.Second, rae.RetryAfter)
+	assert.False(t, errors.Is(err, port.ErrAuditEntryRejected))
+}
+
+// A 429 without a Retry-After header falls through to the plain transient
+// error; the row keeps its default exponential backoff.
+func TestWriteEntry_429WithoutRetryAfterIsPlainTransient(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	err := New(srv.URL, noopLogger{}).WriteEntry(context.Background(), "key-1", sampleEntry())
+	require.Error(t, err)
+	var rae *port.RetryAfterError
+	assert.False(t, errors.As(err, &rae), "no Retry-After header means no typed error")
+}
+
+// A hostile Retry-After hint beyond the 5-minute cap must be clamped so a
+// misconfigured upstream can never stall delivery arbitrarily.
+func TestWriteEntry_429RetryAfterClampedToMaxBackoff(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "36000") // 10 hours
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	err := New(srv.URL, noopLogger{}).WriteEntry(context.Background(), "key-1", sampleEntry())
+	require.Error(t, err)
+	var rae *port.RetryAfterError
+	require.ErrorAs(t, err, &rae)
+	assert.Equal(t, maxRetryAfter, rae.RetryAfter)
+}
+
+// Malformed and non-positive Retry-After values are ignored (no typed
+// error), so ordinary backoff applies.
+func TestParseRetryAfter_Malformed(t *testing.T) {
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	assert.Zero(t, parseRetryAfter("", now))
+	assert.Zero(t, parseRetryAfter("nonsense", now))
+	assert.Zero(t, parseRetryAfter("0", now))
+	assert.Zero(t, parseRetryAfter("-5", now))
+	assert.Zero(t, parseRetryAfter(now.Add(-1*time.Hour).UTC().Format(http.TimeFormat), now),
+		"an HTTP-date in the past yields zero delay, not a negative one")
+}
+
+func TestParseRetryAfter_HTTPDate(t *testing.T) {
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	got := parseRetryAfter(now.Add(90*time.Second).Format(http.TimeFormat), now)
+	assert.InDelta(t, 90*time.Second, got, float64(time.Second),
+		"HTTP-date Retry-After decodes to duration relative to now")
+}
+
 func TestWriteEntry_PermanentRejection(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)

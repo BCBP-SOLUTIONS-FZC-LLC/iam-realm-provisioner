@@ -159,11 +159,13 @@ type issueOrRotateResponseBody struct {
 
 // IssueOrRotateCredential calls TS-1
 // POST /api/v1/internal/tenants/:id/service-accounts/:principal_id/credentials.
-// A 409 is surfaced as domain.ErrOptimisticLockConflict when TS-1's response
-// body names that cause explicitly, or domain.ErrServiceAccountRotationInFlight
-// otherwise (TS-1's `rotation_in_flight` cause, and the safe default for any
-// other/unparseable 409 body) — so callers can decide retry-vs-fail using
-// the actual upstream cause rather than always assuming a rotation race.
+// A 409 is surfaced as one of the three §17 causes when TS-1's response body
+// names it explicitly — domain.ErrOptimisticLockConflict (record_version
+// mismatch), domain.ErrCredentialReplayRevoked (TS-D13: a replayed
+// rotation_id whose credential has since been revoked), or
+// domain.ErrServiceAccountRotationInFlight (concurrent rotation on the same
+// principal). An empty/unparseable 409 body falls back to
+// ErrServiceAccountRotationInFlight as the safe retryable default.
 func (c *Client) IssueOrRotateCredential(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
 	url := fmt.Sprintf("%s/api/v1/internal/tenants/%s/service-accounts/%s/credentials", c.baseURL, tenantID, principalID)
 	httpReq, err := c.newRequest(ctx, http.MethodPost, url, issueOrRotateRequestBody{
@@ -183,8 +185,11 @@ func (c *Client) IssueOrRotateCredential(ctx context.Context, tenantID, principa
 		var errBody errorResponseBody
 		_ = json.NewDecoder(resp.Body).Decode(&errBody) //nolint:errcheck // best-effort; falls back to the safe default below on a malformed/empty body
 		code := domain.ErrServiceAccountRotationInFlight
-		if errBody.Error == string(domain.ErrOptimisticLockConflict) {
+		switch errBody.Error {
+		case string(domain.ErrOptimisticLockConflict):
 			code = domain.ErrOptimisticLockConflict
+		case string(domain.ErrCredentialReplayRevoked):
+			code = domain.ErrCredentialReplayRevoked
 		}
 		return nil, domain.NewError(code, "token service credential issue/rotate conflict").
 			WithDetails(map[string]any{"tenant_id": tenantID, "principal_id": principalID, "upstream_error": errBody.Error})
@@ -212,11 +217,13 @@ func (c *Client) IssueOrRotateCredential(ctx context.Context, tenantID, principa
 }
 
 type credentialSummaryBody struct {
-	Version     int     `json:"version"`
-	Status      string  `json:"status"`
-	OpenBaoPath string  `json:"openbao_path"`
-	IssuedAt    string  `json:"issued_at"`
-	ExpiresAt   *string `json:"expires_at,omitempty"`
+	Version             int     `json:"version"`
+	Status              string  `json:"status"`
+	OpenBaoPath         string  `json:"openbao_path"`
+	IssuedAt            string  `json:"issued_at"`
+	ExpiresAt           *string `json:"expires_at,omitempty"`
+	RotationCadenceDays *int    `json:"rotation_cadence_days,omitempty"`
+	NextRotationAt      *string `json:"next_rotation_at,omitempty"`
 }
 
 type readPrincipalResponseBody struct {
@@ -267,8 +274,18 @@ func (c *Client) ReadPrincipal(ctx context.Context, tenantID, principalID uuid.U
 			}
 			expiresAt = &t
 		}
+		var nextRotationAt *time.Time
+		if cr.NextRotationAt != nil {
+			t, err := time.Parse(time.RFC3339, *cr.NextRotationAt)
+			if err != nil {
+				return nil, fmt.Errorf("tokenservice: decode TS-3 next_rotation_at: %w", err)
+			}
+			nextRotationAt = &t
+		}
 		creds = append(creds, port.CredentialSummary{
-			Version: cr.Version, Status: cr.Status, OpenBaoPath: cr.OpenBaoPath, IssuedAt: issuedAt, ExpiresAt: expiresAt,
+			Version: cr.Version, Status: cr.Status, OpenBaoPath: cr.OpenBaoPath,
+			IssuedAt: issuedAt, ExpiresAt: expiresAt,
+			RotationCadenceDays: cr.RotationCadenceDays, NextRotationAt: nextRotationAt,
 		})
 	}
 	return &port.ReadPrincipalResult{

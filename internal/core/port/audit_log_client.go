@@ -3,6 +3,7 @@ package port
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -14,6 +15,18 @@ import (
 // same body can never succeed, so the drainer parks the row as 'failed'
 // instead of retrying it. Every other WriteEntry error is transient.
 var ErrAuditEntryRejected = errors.New("audit entry rejected by audit log")
+
+// RetryAfterError wraps a transient AL-5 failure whose 429 response
+// carried a parseable Retry-After header (RFC 7231 §7.1.3). RetryAfter is
+// the hint's delay; AuditDeliveryService uses it to override the row's
+// default exponential backoff via MarkRetryAfter.
+type RetryAfterError struct {
+	Underlying error
+	RetryAfter time.Duration
+}
+
+func (e *RetryAfterError) Error() string { return e.Underlying.Error() }
+func (e *RetryAfterError) Unwrap() error { return e.Underlying }
 
 // AuditLogClient is this service's outbound dependency on the Audit Log
 // Service's AL-5 direct-write ingest (POST /api/v1/internal/audit-entries,
@@ -41,6 +54,10 @@ type PendingAuditEntryRepository interface {
 	// MarkRetry records lastErr on a row left pending for its next
 	// (already backed-off) attempt.
 	MarkRetry(ctx context.Context, id uuid.UUID, lastErr string) error
+	// MarkRetryAfter records lastErr and overrides next_attempt_at with
+	// now()+delay — used when AL-5 returned a Retry-After hint on 429 that
+	// should take precedence over the row's default exponential backoff.
+	MarkRetryAfter(ctx context.Context, id uuid.UUID, lastErr string, delay time.Duration) error
 	// MarkFailed parks a permanently-rejected row as 'failed'.
 	MarkFailed(ctx context.Context, id uuid.UUID, lastErr string) error
 }

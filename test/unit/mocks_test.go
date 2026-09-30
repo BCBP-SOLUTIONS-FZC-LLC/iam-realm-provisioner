@@ -3,6 +3,7 @@ package unit_test
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -507,12 +508,14 @@ type mockPendingAuditEntryRepository struct {
 	Enqueued   []domain.AuditEntry
 	EnqueueErr error
 
-	Due       []*domain.PendingAuditEntry
-	ClaimErr  error
-	Delivered []uuid.UUID
-	Retried   []uuid.UUID
-	Failed    []uuid.UUID
-	MarkErr   error
+	Due            []*domain.PendingAuditEntry
+	ClaimErr       error
+	Delivered      []uuid.UUID
+	Retried        []uuid.UUID
+	RetriedAfter   []uuid.UUID
+	RetryAfterHint []time.Duration
+	Failed         []uuid.UUID
+	MarkErr        error
 }
 
 var _ port.PendingAuditEntryRepository = (*mockPendingAuditEntryRepository)(nil)
@@ -543,6 +546,12 @@ func (m *mockPendingAuditEntryRepository) MarkDelivered(ctx context.Context, id 
 
 func (m *mockPendingAuditEntryRepository) MarkRetry(ctx context.Context, id uuid.UUID, lastErr string) error {
 	m.Retried = append(m.Retried, id)
+	return m.MarkErr
+}
+
+func (m *mockPendingAuditEntryRepository) MarkRetryAfter(ctx context.Context, id uuid.UUID, lastErr string, delay time.Duration) error {
+	m.RetriedAfter = append(m.RetriedAfter, id)
+	m.RetryAfterHint = append(m.RetryAfterHint, delay)
 	return m.MarkErr
 }
 
