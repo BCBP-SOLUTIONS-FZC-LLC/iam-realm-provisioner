@@ -6,18 +6,14 @@ only the job/service label's literal "iam-realm-provisioner" here becomes
 the chart's fullname template (they coincide under the default release
 name). If you add or change an alert, update BOTH files.
 
-Enterprise Platform Observability Standard: three of this service's
-metrics (Keycloak call latency/failures, RLS-6 violations) have a
-shadow-emitted Tier 1 platform_* candidate — see
-internal/adapter/outbound/metrics/registry.go's PlatformRegistry and
-deploy/monitoring/app-alerts.yml's header. All three are Status:
-Proposed (submitted, not yet ratified), so every alert below
-intentionally still reads the authoritative iam_realm_provisioner_*
-metric per the standard's governance rules (11/12: no unilateral
-adoption of an unratified shared metric into production alerting). Cut
-an alert over to its platform_* candidate only after PlatformRegistry
-flips that entry's Status to Canonical, updating both this file and
-deploy/monitoring/app-alerts.yml together.
+Enterprise Platform Observability Standard: HTTP, outbox and SQS alerts
+read the Tier 1 platform_* metrics emitted by platform-gincommon and
+platform-events (the pre-standard http_, outbox_ and sqs_ names were removed);
+business alerts read this service's Tier 3 iam_realm_provisioner_* metrics.
+Every series carries {domain, service, environment}; platform-metric alerts
+aggregate by them. Alerts reading a metric whose Platform Observability
+Registry status is still "proposed" carry `metric_status: proposed` — see
+deploy/monitoring/app-alerts.yml's header.
 */ -}}
 {{- if .Values.serviceMonitor.enabled }}
 {{- $job := include "iam-realm-provisioner.fullname" . }}
@@ -72,12 +68,13 @@ spec:
         # ── HTTP 5xx error rate ───────────────────────────────────────────
         - alert: IAMRealmProvisionerHighErrorRate
           expr: |
-            sum(rate(http_requests_total{job={{ $job | quote }}, status=~"5.."}[5m]))
+            sum by (domain, service, environment) (rate(platform_http_requests_total{job={{ $job | quote }}, status_class="5xx"}[5m]))
               /
-            sum(rate(http_requests_total{job={{ $job | quote }}}[5m]))
+            sum by (domain, service, environment) (rate(platform_http_requests_total{job={{ $job | quote }}}[5m]))
             > 0.05
           for: 5m
           labels:
+            metric_status: proposed
             severity: warning
             team: platform
           annotations:
@@ -90,12 +87,13 @@ spec:
         # ── HTTP 5xx error rate — critical ────────────────────────────────
         - alert: IAMRealmProvisionerCriticalErrorRate
           expr: |
-            sum(rate(http_requests_total{job={{ $job | quote }}, status=~"5.."}[5m]))
+            sum by (domain, service, environment) (rate(platform_http_requests_total{job={{ $job | quote }}, status_class="5xx"}[5m]))
               /
-            sum(rate(http_requests_total{job={{ $job | quote }}}[5m]))
+            sum by (domain, service, environment) (rate(platform_http_requests_total{job={{ $job | quote }}}[5m]))
             > 0.20
           for: 2m
           labels:
+            metric_status: proposed
             severity: critical
             team: platform
           annotations:
@@ -147,12 +145,13 @@ spec:
         - alert: IAMRealmProvisionerHighLatency
           expr: |
             histogram_quantile(0.99,
-              sum by (le) (
-                rate(http_request_duration_seconds_bucket{job={{ $job | quote }}}[5m])
+              sum by (le, domain, service, environment) (
+                rate(platform_http_request_duration_seconds_bucket{job={{ $job | quote }}}[5m])
               )
             ) > 1
           for: 10m
           labels:
+            metric_status: proposed
             severity: warning
             team: platform
           annotations:
@@ -217,14 +216,22 @@ spec:
     - name: iam_realm_provisioner_outbox_and_queues
       rules:
 
-        # ── Transactional outbox dead-letters (§11.5) — outbox_dead_letters_total
-        #    is platform-events' own metric (registered automatically by
-        #    events.Init), not something this service defines itself. Mirrors
-        #    the sibling IAM services' identical outbox-stuck alert — keep in
-        #    sync with deploy/monitoring/app-alerts.yml.
+        # ── Transactional outbox dead-letters (§11.5) — platform-events'
+        #    platform_dlq_messages_total{operation="outbox_publish",
+        #    reason="max_attempts"} (approved Tier 1). Keyed by event_type,
+        #    so series born at 1 are added via `unless last_over_time`. Keep
+        #    in sync with deploy/monitoring/app-alerts.yml.
         - alert: IAMRealmProvisionerOutboxStuck
           expr: |
-            increase(outbox_dead_letters_total{service={{ $job | quote }}}[30m]) > 0
+            sum by (domain, service, environment) (
+              (
+                platform_dlq_messages_total{service={{ $job | quote }}, operation="outbox_publish", reason="max_attempts"}
+                  unless
+                last_over_time(platform_dlq_messages_total{service={{ $job | quote }}, operation="outbox_publish", reason="max_attempts"}[1h] offset 30m)
+              )
+                or
+              increase(platform_dlq_messages_total{service={{ $job | quote }}, operation="outbox_publish", reason="max_attempts"}[30m])
+            ) > 0
           for: 15m
           labels:
             severity: warning
@@ -239,21 +246,26 @@ spec:
               connectivity; outbox_dead_letters is queryable/retryable via
               standard SQL.
 
-        # ── SQS ReceiveMessage errors — an application-visible signal that a
-        #    consumer loop can't reach its queue at all ────────────────────
+        # ── SQS ReceiveMessage errors — platform-events'
+        #    platform_dependency_request_seconds_count{dependency="sqs",
+        #    operation="receive_message", outcome="error"}; no queue label. ─
         - alert: IAMRealmProvisionerSQSReceiveErrors
           expr: |
-            increase(sqs_receive_errors_total{service={{ $job | quote }}}[30m]) > 0
+            sum by (domain, service, environment) (
+              increase(platform_dependency_request_seconds_count{service={{ $job | quote }}, dependency="sqs", operation="receive_message", outcome="error"}[30m])
+            ) > 0
           labels:
             severity: warning
             team: platform
+            metric_status: proposed
           annotations:
             summary: iam-realm-provisioner is failing to receive from an inbound queue
             description: >-
-              {{ "{{ $value | humanize }}" }} SQS ReceiveMessage error(s) on
-              {{ "{{ $labels.queue }}" }} in the last 30 minutes (excludes context
-              cancellation). Check IAM permissions and queue connectivity for
-              membership-realm-q / tenant-realm-q / billing-realm-q.
+              {{ "{{ $value | humanize }}" }} SQS ReceiveMessage error(s) in the last
+              30 minutes (excludes context cancellation; the metric has no
+              queue label — check the consumer logs for which queue). Check
+              IAM permissions and queue connectivity for membership-realm-q /
+              tenant-realm-q / billing-realm-q.
 
         # ── Inbound SQS DLQ depth (§11.5: "{membership,billing,tenant}-realm-q
         #    DLQ depth > 0 — warning"). NOTE: no application-level DLQ-depth

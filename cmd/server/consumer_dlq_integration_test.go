@@ -19,8 +19,8 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 )
 
 // TestConsumerOptions_DLQHandlerObservesLastDeliveryBeforeRedrive runs this
@@ -78,7 +78,11 @@ func TestConsumerOptions_DLQHandlerObservesLastDeliveryBeforeRedrive(t *testing.
 	sqsCall(t, endpoint, "SendMessage", map[string]any{"QueueUrl": queueURL, "MessageBody": string(body)})
 
 	ensureMetricsRegistered(t)
-	dlqBefore := counterValue(t, metrics.PlatformDLQMessagesTotal.WithLabelValues("tenant"))
+	// platform-events counts the dead-letter handler's deliberate failure
+	// as platform_messages_failed_total{reason="dead_letter_error"} on this
+	// queue (label: the queue name, the last segment of its URL).
+	dlqFailed := map[string]string{"queue": "tenant-realm-q-" + suffix, "reason": "dead_letter_error"}
+	dlqBefore := gatheredCounter(t, "platform_messages_failed_total", dlqFailed)
 	var handlerCalls int32
 	failing := func(context.Context, events.Envelope[json.RawMessage]) error {
 		atomic.AddInt32(&handlerCalls, 1)
@@ -99,7 +103,7 @@ func TestConsumerOptions_DLQHandlerObservesLastDeliveryBeforeRedrive(t *testing.
 	defer func() { _ = cons.Stop() }()
 
 	require.Eventually(t, func() bool {
-		return counterValue(t, metrics.PlatformDLQMessagesTotal.WithLabelValues("tenant")) == dlqBefore+1
+		return gatheredCounter(t, "platform_messages_failed_total", dlqFailed) == dlqBefore+1
 	}, 60*time.Second, 200*time.Millisecond, "dlqHandler never observed the message")
 	assert.EqualValues(t, dlqObserveReceiveCount, atomic.LoadInt32(&handlerCalls),
 		"the handler sees deliveries 1-4; dlqHandler takes the 5th")
@@ -128,4 +132,32 @@ func sqsCall(t *testing.T, endpoint, action string, in map[string]any) map[strin
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
 	require.Less(t, resp.StatusCode, 300, "%s: %v", action, out)
 	return out
+}
+
+// gatheredCounter sums every series of the counter name on gincommon's
+// registry whose labels include want.
+func gatheredCounter(t *testing.T, name string, want map[string]string) float64 {
+	t.Helper()
+	families, err := gincommon.MetricsGatherer().Gather()
+	require.NoError(t, err)
+	var sum float64
+	for _, f := range families {
+		if f.GetName() != name {
+			continue
+		}
+	series:
+		for _, m := range f.GetMetric() {
+			got := map[string]string{}
+			for _, lp := range m.GetLabel() {
+				got[lp.GetName()] = lp.GetValue()
+			}
+			for k, v := range want {
+				if got[k] != v {
+					continue series
+				}
+			}
+			sum += m.GetCounter().GetValue()
+		}
+	}
+	return sum
 }

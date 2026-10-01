@@ -101,21 +101,21 @@ func TestEnvDuration(t *testing.T) {
 
 func TestMustEnv_DevPlaceholder(t *testing.T) {
 	t.Setenv("REC_TEST_MUSTENV", "")
-	for _, appEnv := range []string{"dev", "development", "local", "test"} {
+	for _, appEnv := range []string{"dev", "local", "test"} {
 		assert.Equal(t, "http://localhost:8081", mustEnv("REC_TEST_MUSTENV", appEnv))
 	}
 }
 
 func TestMustEnv_SetValue(t *testing.T) {
 	t.Setenv("REC_TEST_MUSTENV", "https://real.example.com")
-	assert.Equal(t, "https://real.example.com", mustEnv("REC_TEST_MUSTENV", "production"))
+	assert.Equal(t, "https://real.example.com", mustEnv("REC_TEST_MUSTENV", "prod"))
 }
 
 func TestMustEnv_MissingOutsideDev_Dies(t *testing.T) {
 	t.Setenv("REC_TEST_MUSTENV", "")
 	exitCode := stubExit(t)
 
-	_ = mustEnv("REC_TEST_MUSTENV", "production")
+	_ = mustEnv("REC_TEST_MUSTENV", "prod")
 
 	require.NotNil(t, exitCode)
 	assert.Equal(t, 1, *exitCode)

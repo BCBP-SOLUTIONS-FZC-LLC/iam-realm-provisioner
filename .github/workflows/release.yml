@@ -14,11 +14,12 @@
 #      build/docker/smoke-testing below handle both, mirroring how ci.yml's
 #      build-image job already runs .github/scripts/smoke-tests.sh once per
 #      binary rather than assuming a single entrypoint.
-#   2. deploy-gate's health query uses http_requests_total{status_class=
-#      "5xx"} (emitted by platform-gincommon's Gin middleware — see
-#      .claude/operations.md § Observability) rather than
-#      iam-authz-enrichment's grpc_server_handled_total: this service has no
-#      gRPC surface, only the mesh-internal HTTP API RP-1..RP-16.
+#   2. deploy-gate's health query uses platform_http_requests_total{
+#      status_class="5xx"} (emitted by platform-gincommon's Gin middleware —
+#      see .claude/operations.md § Observability) rather than
+#      iam-authz-enrichment's platform_grpc_server_handled_total: this
+#      service has no gRPC surface, only the mesh-internal HTTP API
+#      RP-1..RP-16.
 #
 # deploy-gate is gated on the vars.DEPLOY_GATE_ENABLED repository/environment
 # variable (default unset -> skipped, not run), same as iam-authz-enrichment
@@ -368,10 +369,14 @@ jobs:
             --timeout=5m
 
       # status_class="5xx" is emitted by platform-gincommon's Gin
-      # middleware on http_requests_total (see .claude/operations.md §
-      # Observability) — this service has no gRPC surface, only the
-      # mesh-internal HTTP API (RP-1..RP-16), so this is the equivalent
-      # signal to iam-authz-enrichment's grpc_server_handled_total check.
+      # middleware on platform_http_requests_total (Tier 1; registry status
+      # "proposed" — metric_status: proposed — its unprefixed
+      # predecessor was removed). Selected by the
+      # {domain, service} identity labels instead of a job regex; the
+      # environment label is whatever APP_ENV the chart deployed (prod by
+      # default). This service has no gRPC surface, only the mesh-internal
+      # HTTP API (RP-1..RP-16), so this is the equivalent signal to
+      # iam-authz-enrichment's platform_grpc_server_handled_total check.
       - name: Health gate — error rate < 1% for 2 minutes
         run: |
           PROM_URL="${{ vars.PROMETHEUS_URL }}"
@@ -379,7 +384,7 @@ jobs:
             echo "PROMETHEUS_URL not set — skipping error-rate check"
             exit 0
           fi
-          QUERY='sum(rate(http_requests_total{job=~".*iam-realm-provisioner.*",status_class="5xx"}[2m]))/sum(rate(http_requests_total{job=~".*iam-realm-provisioner.*"}[2m]))'
+          QUERY='sum(rate(platform_http_requests_total{domain="iam",service="iam-realm-provisioner",status_class="5xx"}[2m]))/sum(rate(platform_http_requests_total{domain="iam",service="iam-realm-provisioner"}[2m]))'
           # Sleep AFTER confirming Prometheus is configured so the 2-minute window
           # only runs when there is actually something to measure.
           sleep 120

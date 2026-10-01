@@ -13,14 +13,14 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/pkg/requestctx"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
-	pgdomain "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/domain"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
+	pgdomain "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/domain"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 )
 
 // testGinConfig is a minimal gincommon.Config for tests that need the real
 // ProtectedMiddlewares chain (RequireAuth + ContextMiddleware) ahead of
 // GUCBridgeMiddleware, matching router.go's actual wiring order.
-var testGinConfig = gincommon.Config{ServiceName: "iam-realm-provisioner-test"}
+var testGinConfig = gincommon.Config{Domain: "iam", Environment: "test", ServiceName: "iam-realm-provisioner"}
 
 func init() { gin.SetMode(gin.TestMode) }
 

@@ -99,7 +99,7 @@ help:
 	@echo "  make vet              - go vet (default build + every test build tag)"
 	@echo "  make lint             - run golangci-lint (default build + every test build tag)"
 	@echo "  make arch-lint        - run go-arch-lint (dependency-rule enforcement, §3.4)"
-	@echo "  make metrics-registry-lint - enforce no unratified platform_* metric sources an alert/SLO"
+	@echo "  make metrics-registry-lint - no removed metric names in rules/HPA; proposed-metric alerts labelled metric_status: proposed"
 	@echo "  make metric-naming-lint - enforce Platform Observability Standard naming/suffix/label/registry rules"
 	@echo "  make test             - unit + postgres + integration tests (requires Docker)"
 	@echo "  make test-ci          - test with race detector + coverage (used in CI)"

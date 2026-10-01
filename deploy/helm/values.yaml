@@ -74,8 +74,14 @@ resources:
 # KEYCLOAK_ADMIN_CLIENT_SECRET, DOCS_AUTH_TOKEN) lives in envFromSecret
 # below. Mirrors .env-example, flattened to production defaults.
 env:
-  APP_ENV: "production"
+  # Observability environment label: must be one of local|dev|test|staging|prod
+  # (platform-gincommon/-events/-pgcommon panic or refuse to start on anything
+  # else, e.g. "production"). Override per environment (e.g. staging).
+  APP_ENV: "prod"
   APP_NAME: "iam-realm-provisioner"
+  # Platform Observability Registry domain — the {domain} const label on
+  # every metric (cmd/server and cmd/reconciler also default to "iam").
+  OBSERVABILITY_DOMAIN: "iam"
   APP_PORT: "8080"
   METRICS_PORT: "9090"
 

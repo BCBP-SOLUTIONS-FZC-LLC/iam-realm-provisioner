@@ -8,7 +8,7 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
 )
 
 // skipDuplicate is the cheap processed_events probe every known-type
@@ -22,9 +22,6 @@ func skipDuplicate(ctx context.Context, dedup port.ProcessedEventsStore, consume
 	if processed {
 		if metrics.ProcessedEventsDuplicates != nil {
 			metrics.ProcessedEventsDuplicates.WithLabelValues(string(consumer)).Inc()
-		}
-		if metrics.DuplicateMessagesTotal != nil {
-			metrics.DuplicateMessagesTotal.WithLabelValues(string(consumer)).Inc()
 		}
 		return true, nil
 	}

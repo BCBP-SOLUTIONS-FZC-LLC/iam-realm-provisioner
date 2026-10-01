@@ -5,6 +5,12 @@ metadata:
   name: {{ include "iam-realm-provisioner.fullname" . }}
   labels:
     {{- include "iam-realm-provisioner.labels" . | nindent 4 }}
+  {{- if .Values.autoscaling.targetRPSPerReplica }}
+  annotations:
+    # Scales on platform_http_requests_total, still "proposed" in the
+    # Platform Observability Registry (awaiting governance ratification).
+    observability.platform/metric-status: proposed
+  {{- end }}
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
@@ -35,11 +41,12 @@ spec:
     # must be installed and configured with the rule at
     # deploy/monitoring/prometheus-adapter-rule.yaml. Without it this metric
     # is silently absent from the custom metrics API and the HPA falls back
-    # to CPU/memory only.
+    # to CPU/memory only. The adapter derives this from
+    # platform_http_requests_total (metric_status: proposed).
     - type: Pods
       pods:
         metric:
-          name: http_requests_per_second
+          name: platform_http_requests_per_second
         target:
           type: AverageValue
           averageValue: {{ .Values.autoscaling.targetRPSPerReplica }}

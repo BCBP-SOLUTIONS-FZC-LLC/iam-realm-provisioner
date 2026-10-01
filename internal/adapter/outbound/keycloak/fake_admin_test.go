@@ -30,10 +30,12 @@ func TestMain(m *testing.M) {
 	retryMaxDelay = time.Millisecond
 
 	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{
+		Domain:       "iam",
+		Environment:  "test",
 		ServiceName:  "iam-realm-provisioner",
 		BuildVersion: "test",
 	})
-	metrics.Register("test")
+	metrics.Register()
 
 	code := m.Run()
 	retryMaxAttempts, retryBaseDelay, retryMaxDelay = origAttempts, origBase, origMax

@@ -1,31 +1,37 @@
 # Prometheus alerting rules for the iam-realm-provisioner application.
 #
-# HTTP request metrics (http_request_duration_seconds, http_requests_total) are
-# emitted by platform-gincommon. Business event counters
-# (iam_realm_provisioner_*_total, §11.2/§25 — the frozen metric prefix) are
-# registered in internal/adapter/outbound/metrics/metrics.go. Outbox/SQS
-# metrics (events_*, outbox_*, sqs_*) are emitted by platform-events with a
-# ConstLabel service="iam-realm-provisioner".
+# Metric sources (Enterprise Platform Observability Standard; the central
+# Platform Observability Registry in platform-gincommon is the source of
+# truth for every shared name):
+#   - platform_http_* (Tier 1) — platform-gincommon's Gin middleware.
+#   - platform_messages_* / platform_dlq_messages_total / platform_outbox_* /
+#     platform_dependency_request_seconds{dependency="sns"|"sqs"|"codec"}
+#     (Tier 1) — platform-events.
+#   - platform_dependency_request_seconds{dependency="keycloak"} (Tier 1) —
+#     this service (internal/adapter/outbound/metrics/metrics.go), same
+#     collector as platform-events.
+#   - platform_db_* (Tier 1) — platform-pgcommon.
+#   - iam_realm_provisioner_* (Tier 3, §11.2/§25 frozen prefix) — this
+#     service's business metrics (internal/adapter/outbound/metrics/metrics.go).
+# The pre-standard names (http_*, events_*, outbox_*, sqs_*, pgcommon_*) were
+# removed from the libraries and are no longer emitted.
 #
-# Enterprise Platform Observability Standard (Tier 1/2/3 hierarchy): three
-# of this service's metrics also have a shadow-emitted Tier 1 platform_*
-# candidate (see internal/adapter/outbound/metrics/metrics.go's package doc
-# and registry.go's PlatformRegistry for the full classification/ratification
-# state) —
-#   iam_realm_provisioner_keycloak_call_failures_total/_duration_seconds
-#     ~ platform_dependency_request_seconds{dependency="keycloak",operation,outcome}  [Proposed]
-#   iam_realm_provisioner_processed_events_duplicates_total
-#     ~ platform_duplicate_messages_total{consumer}  [Proposed]
-#   iam_realm_provisioner_rls_violations_total
-#     ~ platform_rls_violations_total{violation_type}  [Proposed]
-# All three platform_* candidates are Status: Proposed in PlatformRegistry —
-# submitted to the Platform Observability Registry but NOT yet ratified. Per
-# the standard's governance rules (11/12), a Proposed metric MUST NOT source
-# production alerting until ratified, so every alert below intentionally
-# still reads the iam_realm_provisioner_* name. Once a candidate's status
-# flips to Canonical, follow the standard's Backward Compatibility migration
-# steps (this file next, then the SLO recording rules, then this service's
-# Helm-rendered twin) — do not cut an alert over unilaterally before that.
+# Registry status: several Tier 1 successors (platform_http_requests_total,
+# platform_http_request_duration_seconds, platform_dependency_request_seconds)
+# are still status "proposed" (awaiting governance ratification). With the
+# legacy names gone they are the only source for those signals, so every
+# alert that reads one carries the label `metric_status: proposed` so it can
+# be routed accordingly until the registry marks the metric approved — then
+# drop the label. platform_dlq_messages_total is approved.
+#
+# Labels on every metric (injected centrally by the platform libraries):
+#   domain       — "iam"
+#   service      — "iam-realm-provisioner" (APP_NAME)
+#   environment  — APP_ENV (local|dev|test|staging|prod)
+# HTTP metrics add method, route (Gin route template), status_class
+# (1xx..5xx) and error_class; there is no version label (only
+# platform_build_info carries version). Platform-metric alerts aggregate
+# by (domain, service, environment).
 #
 # This is a standalone reference copy of the same alerts the chart's own
 # templates/prometheusrule.yaml renders as a PrometheusRule CRD (enabled via
@@ -37,20 +43,6 @@
 # docs/lld/iam-lld-realm-provisioner-service.md §11.5 — do not add an alert on a
 # metric that doesn't exist in the code (grep
 # internal/adapter/outbound/metrics/metrics.go first).
-#
-# Labels on all HTTP metrics (from platform-gincommon):
-#   service  — "iam-realm-provisioner"
-#   method   — HTTP method
-#   path     — route pattern (e.g. /tenants/:id/realm)
-#   status   — HTTP status code
-#
-# Labels on this service's Tier 1 platform_* metrics:
-#   domain       — "iam"
-#   service      — "realm-provisioner" (note: NOT "iam-realm-provisioner" —
-#                  this is the domain-relative slug the Platform
-#                  Observability Standard uses, distinct from the
-#                  gincommon `service` label above)
-#   environment  — APP_ENV (dev|staging|prod)
 
 groups:
   - name: iam_realm_provisioner_availability
@@ -93,12 +85,13 @@ groups:
       # ── HTTP 5xx error rate ─────────────────────────────────────────────────
       - alert: IAMRealmProvisionerHighErrorRate
         expr: |
-          sum(rate(http_requests_total{job="iam-realm-provisioner", status=~"5.."}[5m]))
+          sum by (domain, service, environment) (rate(platform_http_requests_total{job="iam-realm-provisioner", status_class="5xx"}[5m]))
             /
-          sum(rate(http_requests_total{job="iam-realm-provisioner"}[5m]))
+          sum by (domain, service, environment) (rate(platform_http_requests_total{job="iam-realm-provisioner"}[5m]))
           > 0.05
         for: 5m
         labels:
+          metric_status: proposed
           severity: warning
           team: platform
         annotations:
@@ -111,12 +104,13 @@ groups:
       # ── HTTP 5xx error rate — critical ─────────────────────────────────────
       - alert: IAMRealmProvisionerCriticalErrorRate
         expr: |
-          sum(rate(http_requests_total{job="iam-realm-provisioner", status=~"5.."}[5m]))
+          sum by (domain, service, environment) (rate(platform_http_requests_total{job="iam-realm-provisioner", status_class="5xx"}[5m]))
             /
-          sum(rate(http_requests_total{job="iam-realm-provisioner"}[5m]))
+          sum by (domain, service, environment) (rate(platform_http_requests_total{job="iam-realm-provisioner"}[5m]))
           > 0.20
         for: 2m
         labels:
+          metric_status: proposed
           severity: critical
           team: platform
         annotations:
@@ -127,11 +121,10 @@ groups:
             RP-INV-1's single Keycloak writer means every tenant realm
             operation funnels through this one service.
 
-      # ── Keycloak Admin API failure rate (§11.5). The Tier 1
-      #    platform_dependency_request_seconds candidate (shadow-emitted
-      #    from the same call site) is Status: Proposed, not yet ratified
-      #    — this alert intentionally still reads the authoritative Tier 3
-      #    pair per this file's header. ─────────────────────────────────
+      # ── Keycloak Admin API failure rate (§11.5). Reads the Tier 3 pair;
+      #    the same calls are also recorded as
+      #    platform_dependency_request_seconds{dependency="keycloak"}
+      #    (outcome="error" on failure). ─────────────────────────────────
       - alert: IAMRealmProvisionerKeycloakCallFailureRate
         expr: |
           sum(rate(iam_realm_provisioner_keycloak_call_failures_total[5m]))
@@ -172,12 +165,13 @@ groups:
       - alert: IAMRealmProvisionerHighLatency
         expr: |
           histogram_quantile(0.99,
-            sum by (le) (
-              rate(http_request_duration_seconds_bucket{job="iam-realm-provisioner"}[5m])
+            sum by (le, domain, service, environment) (
+              rate(platform_http_request_duration_seconds_bucket{job="iam-realm-provisioner"}[5m])
             )
           ) > 1
         for: 10m
         labels:
+          metric_status: proposed
           severity: warning
           team: platform
         annotations:
@@ -242,14 +236,26 @@ groups:
   - name: iam_realm_provisioner_outbox_and_queues
     rules:
 
-      # ── Transactional outbox dead-letters (§11.5) — outbox_dead_letters_total
-      #    is platform-events' own metric (registered automatically by
-      #    events.Init), not something this service defines itself. Mirrors
-      #    the sibling IAM services' identical outbox-stuck alert — keep in
-      #    sync with templates/prometheusrule.yaml.
+      # ── Transactional outbox dead-letters (§11.5) — platform-events
+      #    counts a record moved to outbox_dead_letters after MaxAttempts as
+      #    platform_dlq_messages_total{operation="outbox_publish",
+      #    reason="max_attempts"} (approved Tier 1; registered by
+      #    events.InitMetrics). The series is keyed by event_type, so it is
+      #    born at 1 and increase() alone would miss the first dead letter of
+      #    each event_type after a restart: the `unless last_over_time(...)`
+      #    term adds series with no sample in the hour before the window.
+      #    Keep in sync with templates/prometheusrule.yaml.
       - alert: IAMRealmProvisionerOutboxStuck
         expr: |
-          increase(outbox_dead_letters_total{service="iam-realm-provisioner"}[30m]) > 0
+          sum by (domain, service, environment) (
+            (
+              platform_dlq_messages_total{service="iam-realm-provisioner", operation="outbox_publish", reason="max_attempts"}
+                unless
+              last_over_time(platform_dlq_messages_total{service="iam-realm-provisioner", operation="outbox_publish", reason="max_attempts"}[1h] offset 30m)
+            )
+              or
+            increase(platform_dlq_messages_total{service="iam-realm-provisioner", operation="outbox_publish", reason="max_attempts"}[30m])
+          ) > 0
         for: 15m
         labels:
           severity: warning
@@ -265,20 +271,29 @@ groups:
             standard SQL.
 
       # ── SQS ReceiveMessage errors — an application-visible signal that a
-      #    consumer loop can't reach its queue at all ─────────────────────────
+      #    consumer loop can't reach its queue at all. platform-events
+      #    records every ReceiveMessage call in
+      #    platform_dependency_request_seconds{dependency="sqs",
+      #    operation="receive_message"}; the _count of outcome="error" counts
+      #    the failed calls. That metric has NO queue label (per service),
+      #    so this alert cannot name the failing queue. ────────────────────
       - alert: IAMRealmProvisionerSQSReceiveErrors
         expr: |
-          increase(sqs_receive_errors_total{service="iam-realm-provisioner"}[30m]) > 0
+          sum by (domain, service, environment) (
+            increase(platform_dependency_request_seconds_count{service="iam-realm-provisioner", dependency="sqs", operation="receive_message", outcome="error"}[30m])
+          ) > 0
         labels:
           severity: warning
           team: platform
+          metric_status: proposed
         annotations:
           summary: iam-realm-provisioner is failing to receive from an inbound queue
           description: >-
-            {{ $value | humanize }} SQS ReceiveMessage error(s) on
-            {{ $labels.queue }} in the last 30 minutes (excludes context
-            cancellation). Check IAM permissions and queue connectivity for
-            membership-realm-q / tenant-realm-q / billing-realm-q.
+            {{ $value | humanize }} SQS ReceiveMessage error(s) in the last
+            30 minutes (excludes context cancellation; the metric has no
+            queue label — check the consumer logs for which queue). Check
+            IAM permissions and queue connectivity for membership-realm-q /
+            tenant-realm-q / billing-realm-q.
 
       # ── Inbound SQS DLQ depth (§11.5: "{membership,billing,tenant}-realm-q
       #    DLQ depth > 0 — warning"). NOTE: no application-level DLQ-depth
@@ -348,11 +363,8 @@ groups:
   - name: iam_realm_provisioner_tenant_isolation
     rules:
 
-      # ── RLS-6 cross-tenant access (§17.5 Case 5). The Tier 1
-      #    platform_rls_violations_total candidate (shadow-emitted from the
-      #    same exporter tick) is Status: Proposed, not yet ratified —
-      #    this alert intentionally still reads the authoritative Tier 3
-      #    metric per this file's header. ─────────────────────────────────
+      # ── RLS-6 cross-tenant access (§17.5 Case 5). Tier 3: the registry
+      #    has no platform-wide RLS metric. ─────────────────────────────────
       - alert: IAMRealmProvisionerRLSCrossTenantAccess
         # cross_tenant_access means a valid app.tenant_id GUC pointed at a
         # row belonging to a different tenant — either a real attack or a

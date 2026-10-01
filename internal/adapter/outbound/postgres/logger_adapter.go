@@ -2,7 +2,7 @@ package postgres
 
 import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/domain"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/domain"
 )
 
 // LoggerAdapter implements platform-pgcommon's pkg/domain.Logger on top of

@@ -15,20 +15,21 @@
 #  SLO-2  Keycloak Admin API call success rate
 #         Target: 99% of Keycloak Admin API calls
 #         (iam_realm_provisioner_keycloak_call_duration_seconds) succeed.
-#         A Tier 1 platform_dependency_request_seconds{dependency="keycloak"}
-#         candidate is shadow-emitted from the same call site (Status:
-#         Proposed in internal/adapter/outbound/metrics/registry.go's
-#         PlatformRegistry — not yet ratified per the Enterprise Platform
-#         Observability Standard's governance rules, so this SLO
-#         intentionally still reads the Tier 3 pair; see
-#         deploy/monitoring/app-alerts.yml's header). This is the
-#         dependency this service is most exposed to — every
+#         Reads the Tier 3 pair; the same calls are also recorded as
+#         platform_dependency_request_seconds{dependency="keycloak"}. This
+#         is the dependency this service is most exposed to — every
 #         provisioning/migration/IdP/MFA operation is a Keycloak call.
 #
 #  SLO-3  Reconciler convergence
 #         Target: durable pending state (realm_config_pending_gauge,
 #         trial_expiry_deferred_total) clears within 2 CronJob cycles
 #         (realmConfigReconcile runs every 10 min; trial-expiry daily).
+#
+# SLO-1 reads platform-gincommon's platform_http_requests_total, which is
+# still status "proposed" in the Platform Observability Registry (awaiting
+# governance ratification; its unprefixed predecessor was removed).
+# Its alerts carry `metric_status: proposed` until the registry marks it
+# approved. The SLI is kept per {domain, service, environment}.
 #
 # Recording rules pre-compute the SLI numerator/denominator so alert rules
 # can key off a scalar. Alerts follow the multi-window multi-burn-rate
@@ -43,15 +44,16 @@ groups:
       # Write-path error rate (5xx only — 4xx are intentional, e.g. 409
       # operation_in_progress on a replayed Idempotency-Key, 422
       # idp_warnings_unacknowledged).
+      # metric_status: proposed (platform_http_requests_total).
       - record: iam:realm_provisioner_write_error_rate:ratio_rate_5m
         expr: |
-          sum(rate(http_requests_total{
+          sum by (domain, service, environment) (rate(platform_http_requests_total{
             service="iam-realm-provisioner",
             method=~"POST|PUT|PATCH|DELETE",
-            status=~"5.."
+            status_class="5xx"
           }[5m]))
           /
-          clamp_min(sum(rate(http_requests_total{
+          clamp_min(sum by (domain, service, environment) (rate(platform_http_requests_total{
             service="iam-realm-provisioner",
             method=~"POST|PUT|PATCH|DELETE"
           }[5m])), 0.001)
@@ -95,6 +97,7 @@ groups:
           severity: page
           slo: SLO-1
           service: iam-realm-provisioner
+          metric_status: proposed
         annotations:
           summary: "SLO-1 fast-burn: iam-realm-provisioner write-path 5xx rate above target"
           description: |
@@ -112,6 +115,7 @@ groups:
           severity: ticket
           slo: SLO-1
           service: iam-realm-provisioner
+          metric_status: proposed
         annotations:
           summary: "SLO-1 slow-burn: iam-realm-provisioner write-path error rate elevated for 15m+"
 

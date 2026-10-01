@@ -13,7 +13,7 @@ import (
 	eventbusadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/eventbus"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/eventschema"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
 )
 
 // These tests run against the REAL embedded consumed-message schemas
@@ -134,13 +134,12 @@ func TestValidateConsumed_HandlerErrorPropagatesUnchanged(t *testing.T) {
 	assert.Same(t, transient, err)
 }
 
-// TestInboundHandler_SchemaViolation_CountsAsFailed exercises the composed
-// pipeline: the violation is returned (so SQS retries until redrive) and
-// instrumentConsumer records it as failed, never processed.
-func TestInboundHandler_SchemaViolation_CountsAsFailed(t *testing.T) {
+// TestInboundHandler_SchemaViolation_ReturnsError exercises the composed
+// pipeline: the violation is returned (so SQS retries until redrive, and
+// platform-events' consumer counts the delivery in
+// platform_messages_failed_total) and the inner handler never runs.
+func TestInboundHandler_SchemaViolation_ReturnsError(t *testing.T) {
 	ensureMetricsRegistered(t)
-	beforeFail := counterValue(t, metrics.PlatformMessagesFailedTotal.WithLabelValues("billing"))
-	beforeProc := counterValue(t, metrics.PlatformMessagesProcessedTotal.WithLabelValues("billing"))
 
 	inner := &recordingHandler{}
 	h := inboundHandler("billing", inner.handle, realConsumedValidator(t, "billing"), &fakeLogger{})
@@ -148,6 +147,4 @@ func TestInboundHandler_SchemaViolation_CountsAsFailed(t *testing.T) {
 
 	assert.ErrorIs(t, err, errSchemaViolation)
 	assert.Zero(t, inner.calls)
-	assert.Equal(t, beforeFail+1, counterValue(t, metrics.PlatformMessagesFailedTotal.WithLabelValues("billing")))
-	assert.Equal(t, beforeProc, counterValue(t, metrics.PlatformMessagesProcessedTotal.WithLabelValues("billing")))
 }

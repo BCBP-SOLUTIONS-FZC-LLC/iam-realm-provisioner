@@ -34,7 +34,7 @@ sequenceDiagram
             Runner ->>+ SNS: Publish(TopicArn=SNS_TOPIC_TENANT_ARN,<br/>MessageAttributes{EventType, TenantID, Source, EventID, Subject})
             SNS -->>- Runner: MessageID
             Runner ->> OB: UPDATE outbox_events SET published_at = now()
-            Note over Runner: retry to OUTBOX_MAX_ATTEMPTS (5) with backoff, DLQ beyond (outbox_dead_letters_total)
+            Note over Runner: retry to OUTBOX_MAX_ATTEMPTS (5) with backoff, DLQ beyond (platform_dlq_messages_total{operation=outbox_publish})
         end
     end
 
@@ -66,5 +66,5 @@ sequenceDiagram
     Q3 -->>- C3: message
     C3 ->> C3: RunInTx { EnableRealm outside tx, then MarkProcessed(consumer='billing') } — Keycloak-effect-first
 
-    Note over Q1,C3: Every queue runs the same pipeline before the handlers above (consumerOptions + inboundHandler):<br/>GlueDecodeCodec strips the Glue header → instrumentConsumer (platform_messages_*) →<br/>validateConsumed against eventschema.ConsumedByConsumer (per consumer — billing's TenantReactivated is Billing's)<br/>violation → consumed_schema_violations_total++ and an error, the handler is never called
+    Note over Q1,C3: Every queue runs the same pipeline before the handlers above (consumerOptions + inboundHandler):<br/>GlueDecodeCodec strips the Glue header (platform-events counts platform_messages_* by queue) →<br/>validateConsumed against eventschema.ConsumedByConsumer (per consumer — billing's TenantReactivated is Billing's)<br/>violation → consumed_schema_violations_total++ and an error, the handler is never called
     Note over Q1,C3: A message that keeps failing: deliveries 1-4 → handler, 5th → dlqHandler<br/>(platform_dlq_messages_total++, returns an error so it is not deleted) → SQS RedrivePolicy moves it to -dlq

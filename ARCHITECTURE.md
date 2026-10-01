@@ -34,7 +34,7 @@ graph TD
         tokenservice["tokenservice/\nHTTPClient — TS-1/TS-3/TS-4 platform-automation\ncredential handshake (§2.5, RP-17/RP-18)"]
         s3["s3/\nObjectStore — realm export (RP-EVT-4)"]
         eventbus["eventbus/\nValidatingCodec (enqueue) · GlueCodec (SNS)\nOutbox Runner · single topic iam.tenant.events"]
-        metrics["metrics/\niam_realm_provisioner_* (Tier 3, authoritative) +\nplatform_* (Tier 1, Status: Proposed) instruments"]
+        metrics["metrics/\niam_realm_provisioner_* (Tier 3) +\nplatform_dependency_request_seconds (Tier 1, keycloak) instruments"]
     end
 
     subgraph eventschema_grp["Embedded Schemas  —  internal/eventschema/"]
@@ -557,7 +557,7 @@ sequenceDiagram
             Runner ->>+ SNS: Publish(TopicArn=SNS_TOPIC_TENANT_ARN,<br/>MessageAttributes{EventType, TenantID, Source, EventID, Subject})
             SNS -->>- Runner: MessageID
             Runner ->> OB: UPDATE outbox_events SET published_at = now()
-            Note over Runner: retry to OUTBOX_MAX_ATTEMPTS (5) with backoff, DLQ beyond (outbox_dead_letters_total)
+            Note over Runner: retry to OUTBOX_MAX_ATTEMPTS (5) with backoff, DLQ beyond (platform_dlq_messages_total{operation=outbox_publish})
         end
     end
 
@@ -589,7 +589,7 @@ sequenceDiagram
     Q3 -->>- C3: message
     C3 ->> C3: RunInTx { EnableRealm outside tx, then MarkProcessed(consumer='billing') } — Keycloak-effect-first
 
-    Note over Q1,C3: Every queue runs the same pipeline before the handlers above (consumerOptions + inboundHandler):<br/>GlueDecodeCodec strips the Glue header → instrumentConsumer (platform_messages_*) →<br/>validateConsumed against eventschema.ConsumedByConsumer (per consumer — billing's TenantReactivated is Billing's)<br/>violation → consumed_schema_violations_total++ and an error, the handler is never called
+    Note over Q1,C3: Every queue runs the same pipeline before the handlers above (consumerOptions + inboundHandler):<br/>GlueDecodeCodec strips the Glue header (platform-events counts platform_messages_* by queue) →<br/>validateConsumed against eventschema.ConsumedByConsumer (per consumer — billing's TenantReactivated is Billing's)<br/>violation → consumed_schema_violations_total++ and an error, the handler is never called
     Note over Q1,C3: A message that keeps failing: deliveries 1-4 → handler, 5th → dlqHandler<br/>(platform_dlq_messages_total++, returns an error so it is not deleted) → SQS RedrivePolicy moves it to -dlq
 ```
 
@@ -615,7 +615,7 @@ Where the dedup mark is written follows what the handler touches: `TenantConsume
 
 Two observability concerns run per request: Prometheus metrics (synchronous, in-process) and OpenTelemetry spans (async, OTLP export). Structured logs are written after each response. This service has no user-facing latency hot path, so SLOs target **operation success and freshness**, not p99 request latency — availability target **99.9%** for the `/internal` provisioning API.
 
-`gincommon.ObservabilityMiddlewares` is invoked once in `cmd/server/main.go` **before** any collector registration, so business / events / pgcommon metrics land on the same `gincommon.MetricsRegisterer()` as HTTP `http_*`, with matching `{service, version}` const labels. One `/metrics` scrape (on the dedicated `METRICS_PORT`, never sharing a listener with the API surface) serves HTTP + business + outbox + pg collectors together. Both binaries call `gincommon.InitTracingFromEnv()` unconditionally so in-process spans get valid trace IDs even without a collector.
+`gincommon.ObservabilityMiddlewares` is invoked once in `cmd/server/main.go` **before** any collector registration, so business / events / pgcommon metrics land on the same `gincommon.MetricsRegisterer()` as HTTP `platform_http_*`, with matching `{domain, service, environment}` const labels (`Config.Domain="iam"`, `Environment=APP_ENV`; `events.InitMetrics`/`pgmetrics.InitWithIdentity` reuse gincommon's identity, pgmetrics before `NewPool`). One `/metrics` scrape (on the dedicated `METRICS_PORT`, never sharing a listener with the API surface) serves HTTP + business + outbox + pg collectors together. Both binaries call `gincommon.InitTracingFromEnv()` unconditionally so in-process spans get valid trace IDs even without a collector.
 
 > Source: [`docs/architecture/mermaid/observability-stack.mmd`](docs/architecture/mermaid/observability-stack.mmd)
 
@@ -636,10 +636,13 @@ graph LR
     end
 
     subgraph prom["Prometheus  →  /metrics on dedicated METRICS_PORT (never shares a listener)"]
-        p1["http_requests_total{method,route,status_class}\nhttp_request_duration_seconds · http_active_requests\n(platform-gincommon, free)"]
-        p2["events_* / outbox_* / sqs_*\n(platform-events, incl. outbox_dead_letters_total)"]
-        p3["iam_realm_provisioner_* Tier 3 (service-specific) instruments —\nAUTHORITATIVE for every alert/SLO\n(internal/adapter/outbound/metrics/metrics.go), §25 frozen prefix:\nprovision_total{kind,result} · users_migrated_total\nrealm_active_gauge{strategy} · keycloak_call_duration_seconds{op}\nkeycloak_call_failures_total{op} · admin_token_refresh_total{trigger}\nidp_validation_total{outcome} · mfa_role_sync_total{action}\nrealm_config_pending_gauge · trial_expiry_processed/deferred_total\nlapse_processed_total{transition} · realm_export_total{result}\nuser_delete_total{result} · session_revoke_total{result}\nmfa_reset_total{result} · template_drift{realm_version}\nrls_violations_total{violation_type} · unknown_event_acknowledged_total{topic=source topic,event_type}\nconsumed_schema_violations_total{consumer,event_type} · processed_events_duplicates_total{consumer}"]
-        p4["platform_* Tier 1 (cross-domain) candidates — Status: Proposed,\nshadow-emitted only, NOT wired into any alert/SLO pending\nPlatform Observability Registry ratification (rules 11/12):\nconst labels: domain=iam, service=realm-provisioner, environment\nplatform_dependency_request_seconds{dependency,operation,outcome}\nplatform_duplicate_messages_total{consumer}\nplatform_rls_violations_total{violation_type}\nplatform_messages_received/processed/failed_total{consumer}\nplatform_dlq_messages_total{consumer}\nsee internal/adapter/outbound/metrics/registry.go's PlatformRegistry"]
+        p1["platform_http_requests_total{method,route,status_class}\nplatform_http_request_duration_seconds · platform_http_active_requests\n(platform-gincommon, free; all series {domain,service,environment})"]
+        p2["platform_messages_* / platform_outbox_* / platform_dlq_messages_total\nplatform_dependency_request_seconds{sns,sqs,codec}\n(platform-events) · platform_db_* (platform-pgcommon)"]
+        p3["iam_realm_provisioner_* Tier 3 (service-specific) instruments —\nsource of every business alert/SLO\n(internal/adapter/outbound/metrics/metrics.go), §25 frozen prefix:\nprovision_total{kind,result} · users_migrated_total\nrealm_active_gauge{strategy} · keycloak_call_duration_seconds{op}\nkeycloak_call_failures_total{op} · admin_token_refresh_total{trigger}\nidp_validation_total{result} · mfa_role_sync_total{action}\nrealm_config_pending_gauge · trial_expiry_processed/deferred_total\nlapse_processed_total{transition} · realm_export_total{result}\nuser_delete_total{result} · session_revoke_total{result}\nmfa_reset_total{result} · template_drift{realm_version}\nrls_violations_total{violation_type} · unknown_event_acknowledged_total{topic=source topic,event_type}\nconsumed_schema_violations_total{consumer,event_type} · processed_events_duplicates_total{consumer}"]
+        p4["platform_dependency_request_seconds{dependency=keycloak,operation,outcome}
+Tier 1 (registry status: proposed) — recorded by this service on the
+same collector platform-events uses; alerts on proposed metrics carry
+metric_status: proposed. Every series: {domain=iam, service=iam-realm-provisioner, environment}"]
     end
 
     subgraph otel["OpenTelemetry Traces"]
@@ -666,7 +669,7 @@ graph LR
     end
 
     subgraph alerts["Alert routing (deploy/monitoring/app-alerts.yml)"]
-        a1["Warning: keycloak_call_failures_total rate > 5% / 5m\ntrial_expiry_deferred_total > 0 sustained 1h\nrealm_config_pending_gauge > 0 sustained 30m (RP-INV-6)\noutbox_dead_letters_total increase > 0 / 30m\n{membership,billing,tenant}-realm-q DLQ depth > 0"]
+        a1["Warning: keycloak_call_failures_total rate > 5% / 5m\ntrial_expiry_deferred_total > 0 sustained 1h\nrealm_config_pending_gauge > 0 sustained 30m (RP-INV-6)\nplatform_dlq_messages_total{operation=outbox_publish} increase > 0 / 30m\n{membership,billing,tenant}-realm-q DLQ depth > 0"]
         a2["Critical: realm_export_total{result=fail} > 0\n(offboarding blocked — export-before-delete invariant)\nconsumed_schema_violations_total rate > 0 / 5m\n(consumed contract break — events of that type dropped)"]
         a3["Informational: admin_token_refresh_total{trigger=401} spike\n(possible credential rotation)"]
     end

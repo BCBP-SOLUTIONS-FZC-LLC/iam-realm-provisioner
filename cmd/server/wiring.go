@@ -9,10 +9,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/glue"
 
 	eventbusadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/eventbus"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/eventschema"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
 )
 
 // eventschemaByType exposes the embedded schema map for the SNS Glue codec
@@ -56,24 +55,6 @@ func (noopPublisher) PublishBatch(context.Context, []events.Envelope[json.RawMes
 	return nil
 }
 
-// instrumentConsumer wraps handler with the Enterprise Platform
-// Observability Standard's Canonical Tier 1 message-lifecycle counters
-// (platform_messages_received_total/_processed_total/_failed_total,
-// registry.go) — pure observation, no behavior change: it always calls
-// through to handler and returns its result unmodified.
-func instrumentConsumer(consumer string, handler events.Handler) events.Handler {
-	return func(ctx context.Context, env events.Envelope[json.RawMessage]) error {
-		metrics.PlatformMessagesReceivedTotal.WithLabelValues(consumer).Inc()
-		err := handler(ctx, env)
-		if err != nil {
-			metrics.PlatformMessagesFailedTotal.WithLabelValues(consumer).Inc()
-		} else {
-			metrics.PlatformMessagesProcessedTotal.WithLabelValues(consumer).Inc()
-		}
-		return err
-	}
-}
-
 // dlqObserveReceiveCount is the ApproximateReceiveCount above which
 // platform-events routes a delivery to dlqHandler instead of the consumer
 // handler — one short of the inbound queues' own RedrivePolicy
@@ -104,12 +85,14 @@ func consumerOptions(consumer string, concurrency int) []events.ConsumerOption {
 // platform-events' own documented contract ("The message is deleted only
 // if the dead-letter handler succeeds"), returning nil here would delete
 // the message immediately and it would never reach -dlq for operator
-// inspection — this handler exists only to observe
-// platform_dlq_messages_total (registry.go) before that pre-existing,
-// unaltered outcome plays out.
-func dlqHandler(consumer string) events.Handler {
+// inspection. platform-events counts that failed dead-letter delivery as
+// platform_messages_failed_total{reason="dead_letter_error"} (the message
+// lifecycle metrics are platform-events' own Tier 1 series, by queue and
+// event_type), so the poison message is observable before SQS's
+// pre-existing, unaltered redrive plays out. consumer is kept for the
+// log/wiring call sites; it is not a metric label.
+func dlqHandler(_ string) events.Handler {
 	return func(context.Context, events.Envelope[json.RawMessage]) error {
-		metrics.PlatformDLQMessagesTotal.WithLabelValues(consumer).Inc()
 		return errors.New("dead-letter threshold reached — left visible for SQS's own redrive to -dlq")
 	}
 }

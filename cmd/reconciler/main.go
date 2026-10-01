@@ -28,10 +28,10 @@ import (
 	s3adapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/s3"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/outbox"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/outbox"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/logger"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 )
 
 var registry = map[string]jobs.Func{
@@ -81,16 +81,20 @@ func run() int {
 	log.Info("reconciler starting", "job", jobName)
 	serviceName := envOr("APP_NAME", "iam-realm-provisioner-reconciler")
 
-	// Prime gincommon's metrics-init API so Register() picks up
-	// {service, version} const labels, matching cmd/server. There is no
-	// /metrics listener on this CronJob; the collectors still have to exist
-	// because the jobs increment them.
+	// Prime gincommon's metrics-init API so Register() picks up the
+	// {domain, service, environment} const labels, matching cmd/server.
+	// There is no /metrics listener on this CronJob; the collectors still
+	// have to exist because the jobs increment them. Domain/Environment are
+	// required by gincommon (it panics on a missing domain or an
+	// environment outside local|dev|test|staging|prod).
 	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{
 		Logger:       rawLog,
 		ServiceName:  serviceName,
 		BuildVersion: envOr("BUILD_VERSION", "dev"),
+		Domain:       envOr("OBSERVABILITY_DOMAIN", "iam"),
+		Environment:  appEnv,
 	})
-	metrics.Register(appEnv)
+	metrics.Register()
 
 	timeout := 5 * time.Minute
 	if s := os.Getenv("RECONCILER_TIMEOUT"); s != "" {
@@ -283,7 +287,7 @@ func envDuration(key string, def time.Duration) time.Duration {
 func mustEnv(key, appEnv string) string {
 	v := os.Getenv(key)
 	if v == "" {
-		if appEnv == "dev" || appEnv == "development" || appEnv == "local" || appEnv == "test" {
+		if appEnv == "dev" || appEnv == "local" || appEnv == "test" {
 			return "http://localhost:8081"
 		}
 		die("startup aborted — required env var %s is not set", key)

@@ -15,14 +15,12 @@ spec:
   endpoints:
     # Metrics are served on the dedicated "metrics" port (9090), separate
     # from the "http" API port — scraping never touches the API surface.
-    # Covers the iam_realm_provisioner_* (Tier 3, authoritative) business
-    # metrics (§14), this service's three shadow-emitted Tier 1 platform_*
-    # candidates pending Platform Observability Registry ratification
-    # (platform_dependency_request_seconds, platform_duplicate_messages_total,
-    # platform_rls_violations_total — Status: Proposed, see
-    # internal/adapter/outbound/metrics/registry.go), and the passthrough
-    # http_*/events_*/sqs_* metrics platform-gincommon/platform-events
-    # already emit.
+    # Covers the iam_realm_provisioner_* (Tier 3) business metrics (§14),
+    # platform_dependency_request_seconds{dependency="keycloak"} (this
+    # service), and the Tier 1 platform_http_* / platform_messages_* /
+    # platform_outbox_* / platform_db_* metrics platform-gincommon,
+    # platform-events and platform-pgcommon emit — all labeled
+    # {domain, service, environment}.
     - port: metrics
       path: /metrics
       interval: {{ .Values.serviceMonitor.interval }}

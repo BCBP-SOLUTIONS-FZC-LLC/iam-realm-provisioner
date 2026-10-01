@@ -36,9 +36,9 @@ func (a *Admin) begin(ctx context.Context, op string) (opCtx context.Context, do
 	start := time.Now()
 	return ctx, func(err error) {
 		dur := time.Since(start).Seconds()
-		outcome := "success"
+		outcome := "success" // registry outcome vocabulary: success|error
 		if err != nil {
-			outcome = "failure"
+			outcome = "error"
 		}
 		metrics.KeycloakCallDuration.WithLabelValues(op).Observe(dur)
 		metrics.DependencyRequestDuration.WithLabelValues("keycloak", op, outcome).Observe(dur)

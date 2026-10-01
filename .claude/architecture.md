@@ -117,9 +117,9 @@ iam-realm-provisioner/
 
 ```go
 require (
-    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon  v1.3.0
-    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events     v1.4.0
-    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon   v1.3.0
+    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon  v1.4.0
+    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2     v2.0.0
+    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2   v2.0.0
     github.com/Nerzal/gocloak/v13                         v13.9.0
 )
 ```

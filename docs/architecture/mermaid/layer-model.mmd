@@ -17,7 +17,7 @@ graph TD
         tokenservice["tokenservice/\nHTTPClient — TS-1/TS-3/TS-4 platform-automation\ncredential handshake (§2.5, RP-17/RP-18)"]
         s3["s3/\nObjectStore — realm export (RP-EVT-4)"]
         eventbus["eventbus/\nValidatingCodec (enqueue) · GlueCodec (SNS)\nOutbox Runner · single topic iam.tenant.events"]
-        metrics["metrics/\niam_realm_provisioner_* (Tier 3, authoritative) +\nplatform_* (Tier 1, Status: Proposed) instruments"]
+        metrics["metrics/\niam_realm_provisioner_* (Tier 3) +\nplatform_dependency_request_seconds (Tier 1, keycloak) instruments"]
     end
 
     subgraph eventschema_grp["Embedded Schemas  —  internal/eventschema/"]

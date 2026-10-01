@@ -36,13 +36,13 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/outbox"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/outbox"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/logger"
-	pgmigrate "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/migrate"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgmetrics"
+	pgmigrate "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/migrate"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgmetrics"
 )
 
 // buildVersion is injected by -ldflags at build time (see Dockerfile / Makefile).
@@ -71,22 +71,34 @@ func main() {
 		Logger:       log,
 		ServiceName:  envOr("APP_NAME", "iam-realm-provisioner"),
 		BuildVersion: envOr("BUILD_VERSION", buildVersion),
+		// Observability identity (Enterprise Platform Observability
+		// Standard): domain is fixed for every IAM service; OBSERVABILITY_DOMAIN
+		// in the Helm values/compose/.env-example carries the same value.
+		// Environment is APP_ENV (local|dev|test|staging|prod — gincommon
+		// panics on anything else, e.g. "production").
+		Domain:      envOr("OBSERVABILITY_DOMAIN", observabilityDomain),
+		Environment: appEnv,
 	}
 	// ObservabilityMiddlewares is gincommon's public metrics-init API. Call
 	// it here (before any collector registration or exporter goroutine) so
 	// business / events / pgcommon metrics land on gincommon.MetricsRegisterer
-	// with matching {service, version} const labels. NewRouter applies the
-	// same middleware slice to the Gin engine; gincommon's metrics.Init is sync.Once.
+	// with matching {domain, service, environment} const labels. NewRouter
+	// applies the same middleware slice to the Gin engine; gincommon's
+	// metrics init is sync.Once.
 	_ = gincommon.ObservabilityMiddlewares(cfg)
 
-	metrics.Register(appEnv)
+	// Business metrics first: Register builds the shared
+	// platform_dependency_request_seconds collector that events.InitMetrics
+	// then reuses for its SNS/SQS/codec calls.
+	metrics.Register()
 
 	// platform-events outbox/publish/consume metrics and platform-pgcommon
-	// query/pool metrics share gincommon's registerer so a single /metrics
-	// scrape (promhttp on METRICS_PORT) serves HTTP + business + outbox +
-	// pg collectors together.
-	events.InitWithRegisterer(cfg.ServiceName, cfg.BuildVersion, gincommon.MetricsRegisterer())
-	pgmetrics.InitWithRegisterer(cfg.ServiceName, cfg.BuildVersion, gincommon.MetricsRegisterer())
+	// query/pool metrics share gincommon's registerer and identity so a
+	// single /metrics scrape (promhttp on METRICS_PORT) serves HTTP +
+	// business + outbox + pg collectors together. pgmetrics must be
+	// initialized before NewPool below: the pool registers its
+	// platform_db_pool_* gauges only when metrics are already initialized.
+	initLibraryMetrics(log)
 
 	// ── 3. Database — pgcommon.ConfigFromEnv reads DATABASE_URL/PG_* directly
 	// so pool sizing, PgBouncer mode, and DSN assembly have exactly one
@@ -436,6 +448,39 @@ type pingerFunc func(context.Context) error
 
 func (f pingerFunc) Health(ctx context.Context) error { return f(ctx) }
 
+// observabilityDomain is the Platform Observability Registry domain every
+// IAM service reports under (the domain const label on every metric).
+const observabilityDomain = "iam"
+
+// initLibraryMetrics initializes platform-events' and platform-pgcommon's
+// Tier 1 metrics on gincommon's registerer with exactly the identity
+// gincommon resolved ({domain, service, environment}), so all three
+// libraries label the same values. Registration warnings (a platform_*
+// metric that clashed and was disabled) are logged; an invalid identity is
+// fatal. Must run after ObservabilityMiddlewares and before NewPool.
+func initLibraryMetrics(log interface {
+	Warn(msg string, fields map[string]interface{})
+}) {
+	reg := gincommon.MetricsRegisterer()
+	labels := gincommon.MetricsConstLabels()
+
+	evWarnings, err := events.InitMetrics(events.MetricsIdentityFromLabels(labels), reg)
+	if err != nil {
+		panic("init platform-events metrics: " + err.Error())
+	}
+	for _, w := range evWarnings {
+		log.Warn("platform-events metric registration warning", map[string]interface{}{"metric": w.Metric, "error": w.Error()})
+	}
+
+	pgWarnings, err := pgmetrics.InitWithIdentity(pgmetrics.IdentityFromLabels(labels), reg)
+	if err != nil {
+		panic("init platform-pgcommon metrics: " + err.Error())
+	}
+	for _, w := range pgWarnings {
+		log.Warn("platform-pgcommon metric registration warning", map[string]interface{}{"metric": w.Metric, "error": w.Error()})
+	}
+}
+
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -464,7 +509,7 @@ func envDuration(key string, def time.Duration) time.Duration {
 // isDevEnv reports whether appEnv is one of the local/CI-only values that
 // permit a hard dependency's safe placeholder default (§12.1 fail-fast).
 func isDevEnv(appEnv string) bool {
-	return appEnv == "dev" || appEnv == "development" || appEnv == "local" || appEnv == "test"
+	return appEnv == "dev" || appEnv == "local" || appEnv == "test"
 }
 
 // mustEnv panics with a descriptive message if key is empty outside

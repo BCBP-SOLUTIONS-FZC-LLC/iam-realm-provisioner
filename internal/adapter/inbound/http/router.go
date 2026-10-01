@@ -26,7 +26,7 @@ type Pinger interface {
 }
 
 // DocsConfig controls whether the AsyncAPI catalog surface is exposed.
-// Outside production it's always on; in production it's opt-in via Enabled
+// Outside prod (APP_ENV=prod) it's always on; in prod it's opt-in via Enabled
 // and, if AuthToken is set, gated behind a bearer token (§12.1).
 type DocsConfig struct {
 	Environment string
@@ -35,7 +35,7 @@ type DocsConfig struct {
 }
 
 func (d DocsConfig) active() bool {
-	return d.Environment != "production" || d.Enabled
+	return d.Environment != "prod" || d.Enabled
 }
 
 // RouterConfig bundles every dependency NewRouter needs.
@@ -177,7 +177,7 @@ func registerDocsRoutes(r *gin.Engine, cfg RouterConfig) {
 	}
 
 	var authMiddleware gin.HandlerFunc = func(c *gin.Context) { c.Next() }
-	if cfg.Docs.Environment == "production" && cfg.Docs.AuthToken != "" {
+	if cfg.Docs.Environment == "prod" && cfg.Docs.AuthToken != "" {
 		token := cfg.Docs.AuthToken
 		expected := []byte("Bearer " + token)
 		authMiddleware = func(c *gin.Context) {

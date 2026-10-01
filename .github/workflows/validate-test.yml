@@ -115,11 +115,11 @@ jobs:
       - name: Architecture lint
         run: bash .github/scripts/arch-lint.sh
 
-      # Enforces the Enterprise Platform Observability Standard's
-      # governance rules 11/12: no unratified (Status: Proposed in
-      # internal/adapter/outbound/metrics/registry.go's PlatformRegistry)
-      # platform_* metric may source a live alert/recording-rule/SLO
-      # expression.
+      # Enforces the Enterprise Platform Observability Standard against the
+      # central Platform Observability Registry (platform-gincommon
+      # pkg/obsregistry): no removed metric name in the rule/HPA/adapter
+      # files, and every alert reading a "proposed" metric carries
+      # metric_status: proposed.
       - name: Metrics registry compliance lint
         run: bash .github/scripts/metrics-registry-lint.sh
 

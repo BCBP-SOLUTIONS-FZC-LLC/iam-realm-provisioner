@@ -10,7 +10,7 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/eventschema"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
 )
 
 // errSchemaViolation marks a consumed payload that fails its
@@ -63,9 +63,12 @@ func validateConsumed(consumer string, h events.Handler, v payloadValidator, log
 	}
 }
 
-// inboundHandler composes the full inbound pipeline for one queue,
-// outermost first: platform_messages_* counters (so schema rejects count as
-// failed) → consumed-schema validation → the consumer's own Handle.
+// inboundHandler composes the full inbound pipeline for one queue:
+// consumed-schema validation → the consumer's own Handle. The Tier 1
+// message-lifecycle counters (platform_messages_received/processed/
+// failed_total, by queue and event_type) are recorded by platform-events'
+// SQS consumer around this handler, so a schema reject counts as
+// platform_messages_failed_total{reason="handler_error"}.
 func inboundHandler(consumer string, h events.Handler, v payloadValidator, log port.Logger) events.Handler {
-	return instrumentConsumer(consumer, validateConsumed(consumer, h, v, log))
+	return validateConsumed(consumer, h, v, log)
 }
