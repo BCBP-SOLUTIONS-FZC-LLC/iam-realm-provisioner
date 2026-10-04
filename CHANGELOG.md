@@ -8,6 +8,7 @@ This service has never been deployed to any environment — there is no released
 
 ### Fixed
 
+- **Trivy gate:** added `.trivyignore` for `DLA-4792-1` (the same entry as `iam-org-membership`). It is a timezone-data update (tzdata 2026b → 2026c) in the distroless base image, not a vulnerability. This repo's Trivy policy fails on `UNKNOWN` severity, and no patched distroless image exists yet: the pinned runtime digest is already the latest. Remove the entry and bump the digest once distroless ships tzdata 2026c.
 - **CI's integration suite no longer times out.** Each of the 11 Keycloak integration tests booted its own Keycloak 26 container, and `start-dev` spends ~60s on Quarkus augmentation alone on a GitHub runner. Running two at a time next to the Postgres suite under `-race`, starts exceeded the 120s wait and the package hit `go test`'s 10-minute timeout. The tests now share one container per package run, started lazily and terminated by `TestMain`. Each test already used its own uuid-named realm, so they stay isolated. The Keycloak start wait is 300s here and in `test/e2e`. `make test-integration`: 10m+ (timeout) → ~1 minute; full `make test-ci` ~3 minutes locally.
 
 ### Changed
