@@ -18,5 +18,7 @@ func TestMain(m *testing.M) {
 		BuildVersion: "test",
 	})
 	metrics.Register()
-	os.Exit(m.Run())
+	code := m.Run()
+	terminateSharedKeycloak()
+	os.Exit(code)
 }

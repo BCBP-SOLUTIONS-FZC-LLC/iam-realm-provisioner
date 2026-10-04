@@ -132,7 +132,7 @@ For layering details and the request-flow diagrams, see [ARCHITECTURE.md](ARCHIT
 | Unit | `test/unit/` + white-box `_test.go` files listed in `TEST_INTERNAL_PKGS` (Makefile) | No | See "Test layout" below |
 | PostgreSQL / RLS | `test/postgres/` (`-tags=integration`) | Yes | Real Postgres via testcontainers; the 5 canonical §14.5 RLS cases plus extras |
 | Composition roots | `cmd/server`, `cmd/reconciler`, `cmd/migrate` `*_integration_test.go` (`-tags=integration`, in `TEST_POSTGRES_PKGS`) | Yes | `main()`/`run()` against real Postgres, signal-driven in process |
-| Integration | `test/integration/` (`-tags=integration`) | Yes | Real Keycloak 26, OpenBao and floci (Glue/SQS) via testcontainers; on a busy Docker host use `TEST_INTEGRATION_PARALLEL=1` |
+| Integration | `test/integration/` (`-tags=integration`) | Yes | Real Keycloak 26 (one shared container per package run — use a uuid-named realm in a new test), OpenBao and floci (Glue/SQS) via testcontainers |
 | E2E | `test/e2e/` (`-tags=e2e`) | Yes | Full lifecycle flows against the app's own test harness |
 
 All unit tests must pass without Docker (`make test-unit`). Run the race detector before submitting a PR:

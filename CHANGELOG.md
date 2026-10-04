@@ -6,6 +6,10 @@ This service has never been deployed to any environment — there is no released
 
 ## [Unreleased]
 
+### Fixed
+
+- **CI's integration suite no longer times out.** Each of the 11 Keycloak integration tests booted its own Keycloak 26 container, and `start-dev` spends ~60s on Quarkus augmentation alone on a GitHub runner. Running two at a time next to the Postgres suite under `-race`, starts exceeded the 120s wait and the package hit `go test`'s 10-minute timeout. The tests now share one container per package run, started lazily and terminated by `TestMain`. Each test already used its own uuid-named realm, so they stay isolated. The Keycloak start wait is 300s here and in `test/e2e`. `make test-integration`: 10m+ (timeout) → ~1 minute; full `make test-ci` ~3 minutes locally.
+
 ### Changed
 
 - **Migrated to the platform libraries' new metrics contract (Enterprise Platform Observability Standard; requires the unreleased platform-gincommon / platform-events / platform-pgcommon versions that removed every pre-standard metric name).** Supersedes the Tier 1 "shadow candidate" entries under *Added* below.

@@ -357,7 +357,7 @@ func startKeycloakContainer(ctx context.Context) (testcontainers.Container, erro
 			"KEYCLOAK_ADMIN_PASSWORD": "admin",
 		},
 		Cmd:        []string{"start-dev"},
-		WaitingFor: wait.ForLog("Listening on: http://0.0.0.0:8080").WithStartupTimeout(120 * time.Second),
+		WaitingFor: wait.ForLog("Listening on: http://0.0.0.0:8080").WithStartupTimeout(300 * time.Second), // ~60s of Quarkus augmentation on a CI runner, plus boot
 	}
 	return testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
