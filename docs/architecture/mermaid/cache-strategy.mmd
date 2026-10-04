@@ -39,12 +39,12 @@ flowchart TD
         f1["Every mutating RP-1..RP-6/RP-10/RP-12/RP-14 call starts\nwith idempotency.Begin(key, tenantID, operation)"]
         f2{{"provisioning_operations row\nfound for this key?"}}
         f3["status=succeeded → replay stored result JSON,\nno Keycloak call, no transaction (IDEMP-3)"]
-        f4["status=in_progress or failed →\n409 operation_in_progress (retry with same key)"]
-        f5["not found → row inserted in_progress,\nrequest proceeds Keycloak-effect-first (write-flow.mmd)"]
+        f4["status=in_progress, within the lease →\n409 operation_in_progress (retry with same key)"]
+        f5["not found, failed, or in_progress past\nIDEMPOTENCY_IN_PROGRESS_LEASE (15m) → row (re)claimed\nin_progress, request proceeds Keycloak-effect-first (write-flow.mmd)"]
         f1 --> f2
         f2 -- yes, succeeded --> f3
-        f2 -- yes, other --> f4
-        f2 -- no --> f5
+        f2 -- yes, in_progress --> f4
+        f2 -- no / reclaimable --> f5
     end
 
     subgraph failure["Cache failure mode (§6.4)"]

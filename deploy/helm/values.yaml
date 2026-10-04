@@ -71,8 +71,11 @@ resources:
 
 # Non-secret env, rendered directly onto the server container (see
 # templates/deployment.yaml). Anything with a credential (DATABASE_URL,
-# KEYCLOAK_ADMIN_CLIENT_SECRET, DOCS_AUTH_TOKEN) lives in envFromSecret
-# below. Mirrors .env-example, flattened to production defaults.
+# KEYCLOAK_ADMIN_CLIENT_SECRET, DOCS_AUTH_TOKEN) or a per-environment AWS
+# identifier the service cannot start correctly without (SNS_TOPIC_TENANT_ARN,
+# the three SQS queue URLs) lives in envFromSecret below. Every key here is
+# read by this service's code or by platform-gincommon / platform-events /
+# platform-pgcommon. Mirrors .env-example, flattened to production defaults.
 env:
   # Observability environment label: must be one of local|dev|test|staging|prod
   # (platform-gincommon/-events/-pgcommon panic or refuse to start on anything
@@ -82,6 +85,9 @@ env:
   # Platform Observability Registry domain — the {domain} const label on
   # every metric (cmd/server and cmd/reconciler also default to "iam").
   OBSERVABILITY_DOMAIN: "iam"
+  # Logging — read by platform-gincommon's logger (all binaries).
+  LOG_LEVEL: "info"          # debug | info | warn | error
+  LOG_SAMPLING: "false"      # zap sampling of repetitive entries
   APP_PORT: "8080"
   METRICS_PORT: "9090"
 
@@ -98,28 +104,55 @@ env:
   PG_MIN_CONNS: "0"
   PG_BOUNCER_MODE: "true"
   PG_STATEMENT_TIMEOUT: "5s"
+  # Per-transaction lock_timeout (pgcommon, SET LOCAL) — a request queued
+  # behind a lock fails fast with 503 request_timeout instead of holding a
+  # pooled connection for the whole statement timeout (matches iam-org-membership).
+  PG_LOCK_TIMEOUT: "2s"
   PG_SLOW_QUERY_THRESHOLD: "200ms"
 
   # AWS SNS/SQS/Glue/S3 (§7/§13.4) — credentials come from the pod's IRSA
-  # role (serviceAccount.annotations above), not env vars. ARNs/URLs are
-  # real per-environment values — REQUIRED, cmd/server/config.go fails fast
-  # at startup if any queue URL is empty; set per environment.
+  # role (serviceAccount.annotations above), not env vars. The per-environment
+  # topic ARN and queue URLs are in envFromSecret below (as in
+  # iam-org-membership), so the chart refuses to render without them:
+  # outside dev, cmd/server's validateRequiredEnv panics on an empty
+  # SNS_TOPIC_TENANT_ARN / GLUE_REGISTRY_TENANT_NAME, and an empty queue URL
+  # silently disables that consumer.
   AWS_REGION: "ap-south-1"
-  SNS_TOPIC_TENANT_ARN: ""
-  GLUE_REGISTRY_TENANT_NAME: ""
-  SQS_MEMBERSHIP_REALM_QUEUE_URL: ""
-  SQS_TENANT_REALM_QUEUE_URL: ""
-  SQS_BILLING_REALM_QUEUE_URL: ""
+  # The shared IAM tenant-events Glue registry (§7.3.1) — the same name in
+  # every environment, so it has a real default (matches iam-org-membership).
+  GLUE_REGISTRY_TENANT_NAME: "iam-tenant-events"
   SQS_MEMBERSHIP_REALM_CONCURRENCY: "4"
   SQS_TENANT_REALM_CONCURRENCY: "4"
   SQS_BILLING_REALM_CONCURRENCY: "2"
+  # Shared consumer tuning for all three queues, read by platform-events'
+  # eventcfg.LoadSQS (internal/adapter/inbound/sqspipeline fills the same
+  # values as defaults when unset). SQS_MAX_RECEIVE_COUNT must stay below the
+  # queues' RedrivePolicy maxReceiveCount=5 so platform-events' own DLQ
+  # forward wins over SQS's silent redrive; the handler timeout must stay
+  # below the visibility timeout.
+  SQS_MAX_RECEIVE_COUNT: "4"
+  SQS_VISIBILITY_TIMEOUT: "30s"
+  SQS_HANDLER_TIMEOUT: "20s"
+  SQS_DRAIN_TIMEOUT: "15s"
+  SQS_QUEUE_DEPTH_INTERVAL: "60s"   # platform_queue_depth / platform_dlq_depth sampling
 
   OUTBOX_POLL_INTERVAL: "500ms"
   OUTBOX_BATCH_SIZE: "50"
   OUTBOX_MAX_ATTEMPTS: "5"
   OUTBOX_DRAIN_TIMEOUT: "30s"
+  # Read through platform-events' eventcfg.LoadOutbox — set explicitly so
+  # the library defaults (1 publisher, no jitter/lease) never apply here.
+  OUTBOX_PUBLISH_CONCURRENCY: "4"
+  OUTBOX_PUBLISH_TIMEOUT: "10s"
+  OUTBOX_STARTUP_JITTER: "2s"
+  OUTBOX_CLAIM_LEASE_DURATION: "10m"
   OUTBOX_RETENTION_DAYS: "8"
   PROCESSED_EVENTS_TTL_DAYS: "8"
+  # ledger-prune retention (§15): the idempotency ledger and the sampled RLS
+  # violation log. Requires the migrator role to hold DELETE on both
+  # (Terraform).
+  PROVISIONING_OPERATIONS_TTL_DAYS: "30"
+  RLS_VIOLATION_LOG_TTL_DAYS: "90"
 
   # Keycloak (RP-INV-1 — the sole seam, internal/adapter/outbound/keycloak/).
   # KEYCLOAK_ADMIN_CLIENT_SECRET lives in envFromSecret below.
@@ -130,6 +163,10 @@ env:
   KEYCLOAK_TIMEOUT_MS: "8s"
   SHARED_TRIAL_REALM: "trial"
   REALM_TEMPLATE_VERSION: "v1"
+  # The versioned template the image ships (Dockerfile copies
+  # deploy/keycloak/realm-template.json here; LLD §12.2). Without it the code
+  # silently falls back to the copy embedded in the binary.
+  REALM_TEMPLATE_PATH: "/deploy/keycloak/realm-template.json"
 
   # OpenBao (per-tenant IdP secrets + Keycloak admin credential, §12) — no
   # static token: this pod authenticates via its ServiceAccount JWT against
@@ -142,6 +179,10 @@ env:
 
   # Org & Membership — I-8 residual-MFA-requirement check.
   ORG_MEMBERSHIP_BASE_URL: "http://iam-org-membership.iam.svc.cluster.local"
+
+  # Token Service — TS-1/TS-4 mint/rotate handshake (§2.5, RP-17). REQUIRED:
+  # validateRequiredEnv panics at startup outside dev when it is empty.
+  TOKEN_SERVICE_BASE_URL: "http://iam-token-service.iam.svc.cluster.local"
 
   # Audit Log — AL-5 direct-write ingest for TenantIdpConfigChanged (LLD
   # §10.6/§18.7). Empty = drainer disabled (startup WARN); entries queue
@@ -165,12 +206,32 @@ env:
   RETENTION_DAYS: "90"
   RECONCILER_BATCH_LIMIT: "100"
   RECONCILER_TIMEOUT: "5m"
+  RECONCILER_MAX_ATTEMPTS: "20"      # RP-C4 poison-pill cap (§8.10)
+  # Idempotency ledger: an in_progress key older than this is reclaimed by
+  # the next retry (a crashed or SIGKILLed execution). Must exceed
+  # CONVERT_TIMEOUT.
+  IDEMPOTENCY_IN_PROGRESS_LEASE: "15m"
+  # RP-3 conversion runs detached from the 30s request deadline (callers get
+  # 409 operation_in_progress and retry with the same key); this bounds it.
+  CONVERT_TIMEOUT: "10m"
+  # Reconciler CronJobs have no /metrics listener: each run pushes its
+  # metrics here, grouped by cronjob (cmd/reconciler pushMetrics). Empty =
+  # no push, so reconciler counters and the alerts built on them are dark.
+  PROMETHEUS_PUSHGATEWAY_URL: ""
 
   DOCS_ENABLED: "false"
 
-  # OpenTelemetry — OTLP/gRPC via platform-gincommon's
-  # ObservabilityMiddlewares (port 4317, not the legacy OTLP/HTTP 4318).
+  # OpenTelemetry — read by platform-gincommon's InitTracingWithConfig
+  # (OTLP/gRPC on 4317, not the legacy OTLP/HTTP 4318). APP_NAME above is the
+  # service name; OTEL_SERVICE_NAME is not read. "none" disables export
+  # while keeping trace IDs. The values below are the library's prod
+  # defaults, set explicitly as in iam-org-membership.
   OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector.observability.svc.cluster.local:4317"
+  OTEL_EXPORTER_OTLP_INSECURE: "false"
+  OTEL_TRACES_SAMPLER_RATIO: "0.1"
+  OTEL_PROPAGATOR_BAGGAGE: "false"
+  # true at the edge only; this service is mesh-internal.
+  OTEL_TRACES_IGNORE_REMOTE_PARENT_SAMPLED: "false"
 
 # Env vars whose value comes from a Kubernetes Secret. Keys must be present
 # in either .Values.existingSecret or .Values.secretValues. Shared by both
@@ -182,6 +243,10 @@ envFromSecret:
   - SYSTEM_DATABASE_URL
   - MIGRATION_DATABASE_URL
   - KEYCLOAK_ADMIN_CLIENT_SECRET
+  - SNS_TOPIC_TENANT_ARN
+  - SQS_MEMBERSHIP_REALM_QUEUE_URL
+  - SQS_TENANT_REALM_QUEUE_URL
+  - SQS_BILLING_REALM_QUEUE_URL
   - DOCS_AUTH_TOKEN
 
 # existingSecret — preferred for production. Set to the name of a
@@ -190,9 +255,9 @@ envFromSecret:
 #
 # DATABASE_URL here MUST be the runtime app role (realm_provisioner_app),
 # which has no BYPASSRLS/CREATE. SYSTEM_DATABASE_URL/MIGRATION_DATABASE_URL
-# MUST both be the BYPASSRLS realm_provisioner_migrator role — the server
-# pod applies migrations itself at startup and RP-C1..C4 read across every
-# tenant (§10.1); there is no separate migrate Job in this chart.
+# MUST both be the BYPASSRLS realm_provisioner_migrator role — the migrate
+# hook Job (templates/migrate-job.yaml) applies migrations with
+# MIGRATION_DATABASE_URL, and RP-C1..C4 read across every tenant (§10.1).
 existingSecret: ""
 
 # rotationEpoch — used only when existingSecret is set. Bump this value to
@@ -207,12 +272,18 @@ secretValues:
   SYSTEM_DATABASE_URL: ""
   MIGRATION_DATABASE_URL: ""
   KEYCLOAK_ADMIN_CLIENT_SECRET: ""
+  SNS_TOPIC_TENANT_ARN: ""
+  SQS_MEMBERSHIP_REALM_QUEUE_URL: ""
+  SQS_TENANT_REALM_QUEUE_URL: ""
+  SQS_BILLING_REALM_QUEUE_URL: ""
   DOCS_AUTH_TOKEN: ""
 
-# 30s HTTP+metrics server graceful shutdown budget + buffer for the three
-# in-process SQS consumers to finish an in-flight message (at-least-once +
-# processed_events dedup makes a redelivery safe if this is exceeded).
-terminationGracePeriodSeconds: 30
+# Shutdown budget (cmd/server/main.go): in parallel HTTP drain (30s), SQS
+# consumer drain (SQS_DRAIN_TIMEOUT, 15s) and in-flight RP-3 conversions
+# (30s); then outbox drain (OUTBOX_DRAIN_TIMEOUT, 30s); then pool drain
+# (10s) = 70s + 5s buffer — matching iam-org-membership. At 30s the kubelet
+# SIGKILLed the pod mid-drain.
+terminationGracePeriodSeconds: 75
 
 # podDisruptionBudget — ensures at least 1 pod survives voluntary
 # disruptions (node drains, cluster upgrades). With minReplicas: 2 keep
@@ -297,6 +368,10 @@ networkPolicy:
       app.kubernetes.io/name: prometheus
   additionalIngressRules: []
   additionalEgressRules: []
+  # Postgres egress: direct Postgres (migrations) and PgBouncer (the pools).
+  databasePorts: [5432, 6432]
+  # Prometheus Pushgateway, for the reconciler CronJobs' metric push.
+  pushgatewayPort: 9091
 
 # ServiceMonitor — requires kube-prometheus-stack (monitoring.coreos.com/v1
 # CRD). PrometheusRule (alerting rules) is also gated on this flag — no
@@ -359,6 +434,17 @@ ingress:
   #  - secretName: iam-realm-provisioner-tls
   #    hosts:
   #      - iam-realm-provisioner.internal.example.com
+
+# Schema migrations: a pre-install / pre-upgrade hook Job (cmd/migrate,
+# templates/migrate-job.yaml) runs them once per release; the Deployment
+# runs with RUN_MIGRATIONS=false. Set enabled=false to fall back to
+# migrate-at-startup.
+migrations:
+  job:
+    enabled: true
+    backoffLimit: 1
+    timeout: "10m"              # MIGRATE_TIMEOUT, lock wait included
+    activeDeadlineSeconds: 900  # > timeout
 
 # ── Reconciler CronJobs (§8.7-8.10, templates/cronjobs.yaml) ───────────────
 # Each CronJob runs the SAME image as the Deployment (image above), with
@@ -464,6 +550,24 @@ cronjobs:
     enabled: true
     schedule: "30 4 * * *"       # this chart's own choice — not LLD-pinned
     jobName: processed-events-prune
+    concurrencyPolicy: Forbid
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    # Must exceed RECONCILER_TIMEOUT (5m/300s) — see realmConfigReconcile's
+    # comment above for why an equal value hard-kills the Job before the
+    # app's own internal deadline can fire.
+    activeDeadlineSeconds: 360
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 128Mi
+  ledgerPrune:
+    enabled: true
+    schedule: "0 5 * * *"        # §15 retention: provisioning_operations + rls_violation_log
+    jobName: ledger-prune
     concurrencyPolicy: Forbid
     successfulJobsHistoryLimit: 3
     failedJobsHistoryLimit: 3

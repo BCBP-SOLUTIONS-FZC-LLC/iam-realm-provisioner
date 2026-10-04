@@ -29,7 +29,7 @@ func TestAckUnknown_CountsBySourceTopic(t *testing.T) {
 			dedup := newStubDedup()
 
 			env := envelope(t, "SomeNewEvent", map[string]any{})
-			require.NoError(t, ackUnknown(context.Background(), newFakeTxRunner(&fakeRealmRepo{}, dedup), dedup, stubLogger{}, consumer, env))
+			require.NoError(t, ackUnknown(context.Background(), newFakeTxRunner(&fakeRealmRepo{}, dedup), stubLogger{}, consumer, env))
 
 			assert.Equal(t, before+1, testutil.ToFloat64(counter))
 			assert.Len(t, dedup.marked, 1)

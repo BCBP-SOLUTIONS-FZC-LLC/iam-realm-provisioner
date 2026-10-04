@@ -17,6 +17,51 @@ This service has never been deployed to any environment — there is no released
 
 ### Added
 
+- **Production-readiness fixes from a full review** (LLD rev 1.21):
+  - **Idempotency keys no longer get stuck `in_progress`.** Previously a key stuck that way returned 409 forever. `Fail`/`Complete` now run detached from the request context, which is cancelled by the 30s deadline or a client disconnect. `Begin` reclaims an `in_progress` row older than `IDEMPOTENCY_IN_PROGRESS_LEASE` (15m), covering a crash or SIGKILL.
+  - **Compensating teardown no longer leaks half-built realms, clients or secrets.** It runs on a detached 30s context instead of the cancelled request context.
+  - **RP-3 conversion runs detached** from the 30s request deadline, bounded by `CONVERT_TIMEOUT` (10m), and drains at shutdown. Previously any trial above roughly 70 users timed out mid-migration. The caller gets `409 operation_in_progress` and its retry replays the result.
+  - **Graceful shutdown fits its budget:** the drains now run in parallel as in O&M, and `terminationGracePeriodSeconds` goes from 30 to 75. Pods were being SIGKILLed mid-drain.
+  - **The migrate hook Job works on a first `helm install`.** It now runs as the namespace's `default` ServiceAccount (the chart's own doesn't exist yet during pre-install hooks), and a hook NetworkPolicy lets it reach Postgres.
+  - **Reconciler alerts can fire now.** They read the pushed per-run value instead of `increase()`, and the Helm versions no longer filter on a `job` label that Pushgateway series never carry. The NetworkPolicy now allows Pushgateway egress (`pushgatewayPort`) and the PgBouncer port (`databasePorts`).
+  - **`403 tenant_mismatch`:** a request whose tenant differs from `x-tenant-id` is rejected before any Keycloak call.
+  - **Eight new alerts:** outbox backlog age, DLQ depth, consumer dead (polling stopped), DB pool saturation, DB acquire errors, DB retries exhausted, and AL-5 audit entries rejected or undelivered.
+  - **New `ledger-prune` CronJob:** `provisioning_operations` 30d and `rls_violation_log` 90d, with new indexes supporting both.
+  - **`503 request_timeout`** for Postgres statement and lock timeouts, plus `PG_LOCK_TIMEOUT=2s`.
+  - **`make vuln-check`** now scans `./...`.
+  - **AL-5 failure recording no longer stalls on non-ASCII errors.** `last_error` was cut at 1024 bytes, which could split a multi-byte character, and an upstream body could contain invalid UTF-8. Either way Postgres rejected the `MarkFailed`/`MarkRetry` write, so the entry could never be marked failed. It is now cut on a character boundary and sanitized to valid UTF-8 first.
+  - **More tests:** the conversion panic and drain-deadline paths, `request_timeout` mapping, `tenant_mismatch` on RP-1, producer trace links, the Pushgateway push, the migrate Job against real Postgres (now in `make test-postgres`), the RLS-violation counter exporter, the inbox publishing events inside its claim transaction, and database-loss handling. Merged coverage is 97.2% with every suite passing.
+  - **Production go-live checklist** added to `.claude/operations.md`.
+  - **`make migrate-up`/`migrate-down` read `MIGRATION_DATABASE_URL`**, the name `.env`, Helm and `cmd/migrate` use; they read only `DATABASE_MIGRATION_URL`, so they failed against a normal `.env`. The old name is still accepted.
+  - **Docs aligned with the code** (LLD, README, ARCHITECTURE, CONTRIBUTING, VERSIONING, `.claude/`, Mermaid sources):
+    - Three binaries and seven CronJobs, the migrate hook Job and the 75s grace period with its shutdown order.
+    - A reused `failed` key is reclaimed, not answered with 409. The service's own 409 message no longer says "or previously failed".
+    - The LLD package tree; retention, with `rls_violation_log`'s "no pruning mechanism" gap now closed.
+    - The new alerts, and coverage at 97.2%.
+    - Two Mermaid sources had drifted from the diagrams embedded in ARCHITECTURE.md and are synced.
+
+- **Helm / env aligned with what the code and the shared libraries actually read, like iam-org-membership.**
+  - **Fixed startup failures in prod:** with the chart defaults the server would have panicked. `TOKEN_SERVICE_BASE_URL` was missing entirely, and `SNS_TOPIC_TENANT_ARN` and `GLUE_REGISTRY_TENANT_NAME` defaulted to `""`.
+    - `TOKEN_SERVICE_BASE_URL` now defaults to the in-cluster Token Service, and `GLUE_REGISTRY_TENANT_NAME` to `iam-tenant-events`.
+    - `SNS_TOPIC_TENANT_ARN` and the three SQS queue URLs moved to `envFromSecret`, as in O&M, so the chart refuses to render without them instead of producing a pod that panics or silently drops a consumer. **An `existingSecret` must now also hold these four keys.**
+  - **Now passed explicitly:** the platform-events consumer tuning (`SQS_MAX_RECEIVE_COUNT`, `SQS_VISIBILITY_TIMEOUT`, `SQS_HANDLER_TIMEOUT`, `SQS_DRAIN_TIMEOUT`, `SQS_QUEUE_DEPTH_INTERVAL`), gincommon's tracing knobs (`OTEL_EXPORTER_OTLP_INSECURE`, `OTEL_TRACES_SAMPLER_RATIO`, `OTEL_PROPAGATOR_BAGGAGE`, `OTEL_TRACES_IGNORE_REMOTE_PARENT_SAMPLED`) and `RECONCILER_MAX_ATTEMPTS`. All are set to the values already in effect, so behaviour is unchanged.
+  - **`REALM_TEMPLATE_PATH`:** now set to the template the image ships, `/deploy/keycloak/realm-template.json`. Without it the server silently used the copy embedded in the binary. The two are identical today, but a template edit would have been ignored in prod.
+  - **Removed:** `OTEL_SERVICE_NAME` (never read; the service name is `APP_NAME`).
+  - **`.env-example`:** now sets `OTEL_EXPORTER_OTLP_ENDPOINT=none`. Previously it said an unset endpoint means "no export", but it actually falls back to `localhost:4317` and logs failed exports.
+
+- **`docs/observability/`, mirroring iam-org-membership.**
+  - The four docs: `README.md` (identity, tiers, who counts what, CI enforcement, SLOs, items awaiting ratification), `metric-registry.md` (generated, not hand-written), `migration.md` (the three metric-naming steps) and `runbooks.md` (one entry per alert).
+  - **Tooling:** `make metrics-lint` / `make metrics-inventory` (`.github/scripts/metricslint.sh`, `metrics-inventory.py`) run platform-gincommon's `metricslint` on a real scrape from the new `TestStandard_LibrariesShareRegistryCollectors`. CI's `validate-quality.yml` runs it and fails if the inventory is stale.
+  - **Runbook annotations:** every alert in `app-alerts.yml`, `slo-rules.yml` and the Helm `PrometheusRule` now carries a `runbook` annotation. `TestMonitoring_EveryAlertHasARunbook` fails if an annotation and a runbook heading drift apart.
+  - **Stale text fixed:** the consumed-schema-violation alert and metric help no longer say violations are retried until SQS redrive.
+
+- **Shared libraries on their latest releases, incorporated like `iam-org-membership`** (LLD rev 1.20). `platform-gincommon` v1.4.0 → **v1.6.0**; `platform-events/v2` and `platform-pgcommon/v2` were already at their latest (v2.0.0) but several of their APIs were hand-rolled here instead of used:
+  - **gincommon:** `InitTracingWithConfig` (same identity as metrics) replaces `InitTracingFromEnv`; `NewSpanTracer` replaces the hand-rolled `otel_tracer.go`; `MetricsHandler()` replaces a bare `promhttp.Handler()` that served the default registry rather than gincommon's; `Config.RequestTimeout` replaces an outer `TimeoutMiddleware` that ran before observability and recorded timed-out requests as 200.
+  - **pgcommon:** `PG_STATEMENT_TIMEOUT` is the library's per-transaction `StatementTimeout` (the DSN `options=-c` hack is gone, and migrations no longer inherit a statement timeout); `MigrationDSNFromEnv`; sys pool `PoolName="system"`; DB-unavailable classification via `IsOperatorIntervention`/`IsSystemError`/`IsPoolClosed` instead of SQLSTATE string matching and `puddle` (57014 `query_canceled` is no longer reported as an outage).
+  - **platform-events:** outbox runner via `eventcfg.LoadOutbox`; consumers via new `internal/adapter/inbound/sqspipeline` (`eventcfg.LoadSQS`, library `GlueDecodeCodec`, `WithDLQForwarding`, `RequireDLQ` startup preflight). **Consumed-schema violations now go straight to the DLQ on their first delivery** instead of being retried 4 times. `processed_events` dedup now uses **`pkg/inbox`**: the claim and the projection write share one transaction; `event_id` is now `uuid`; the hand-rolled repository was removed and arch-lint forbids another writer.
+- **Migrate hook Job** (`cmd/migrate`, Helm `templates/migrate-job.yaml`, pre-install/pre-upgrade). Replicas run with `RUN_MIGRATIONS=false`, so they no longer race for the migration lock and a failed migration fails the release.
+- **Reconciler metrics are now exported.** CronJobs push to `PROMETHEUS_PUSHGATEWAY_URL`, grouped by `cronjob`; before this, reconciler counters were never scraped. The reconciler also initialises platform-events/pgcommon metrics and reports under `service="iam-realm-provisioner"`.
+
 - **`TenantIdpConfigChanged` now actually reaches Audit Log — via its AL-5 direct-write ingest, not the bus** (LLD rev 1.19, §10.6, RP-D15; closes Audit Log AL-Q12 from this side). Previously documented as a "dedicated audit event" with no transport and never emitted at all. RP-6/RP-7 enqueue the entry into the new RLS-scoped `pending_audit_entries` table in the same `RunInTx` as the `keycloak_idp_configs` write; `cmd/server`'s drainer (`AuditDeliveryService`, BYPASSRLS `sysPool`, `internal/adapter/outbound/auditlog`) POSTs `POST /api/v1/internal/audit-entries` with the row id as `Idempotency-Key`, deleting on `201/200`, backing off on 429/5xx, parking other 4xx as `failed`. New env `AUDIT_LOG_BASE_URL` (optional), `AUDIT_DELIVERY_INTERVAL`, `AUDIT_DELIVERY_BATCH_SIZE`; new metrics `iam_realm_provisioner_audit_entry_delivery_total{result}`, `iam_realm_provisioner_audit_entry_backlog_gauge{status}`. **Deploy note:** `realm_provisioner_migrator` needs a Terraform grant of `SELECT, UPDATE, DELETE` on `pending_audit_entries`.
 
 Initial build of the Realm Provisioner Service — the single writer to the Keycloak Admin API and system of record for tenant identity lifecycle (LLD `docs/lld/iam-lld-realm-provisioner-service.md`, v1.0 Approved).

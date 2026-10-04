@@ -2,8 +2,10 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -20,7 +22,10 @@ import (
 // testGinConfig is a minimal gincommon.Config for tests that need the real
 // ProtectedMiddlewares chain (RequireAuth + ContextMiddleware) ahead of
 // GUCBridgeMiddleware, matching router.go's actual wiring order.
-var testGinConfig = gincommon.Config{Domain: "iam", Environment: "test", ServiceName: "iam-realm-provisioner"}
+// testGinConfig carries the same identity as TestMain's (BuildVersion
+// included): gincommon resolves an empty BuildVersion from BUILD_VERSION —
+// which `make test` exports — and rejects a second identity in one process.
+var testGinConfig = gincommon.Config{Domain: "iam", Environment: "test", ServiceName: "iam-realm-provisioner", BuildVersion: "test"}
 
 func init() { gin.SetMode(gin.TestMode) }
 
@@ -43,6 +48,9 @@ func doRequest(r http.Handler, method, path string, headers map[string]string, b
 		rd = strings.NewReader("")
 	}
 	req := httptest.NewRequest(method, path, rd)
+	if headers["x-tenant-id"] == targetTenant {
+		headers = resolveTargetTenant(headers, path, body)
+	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -279,3 +287,29 @@ func TestRequireIdempotencyKey(t *testing.T) {
 
 // silence unused-import warning if context stops being referenced directly
 var _ = context.Background
+
+var pathTenant = regexp.MustCompile(`/tenants/([0-9a-fA-F-]{36})(?:/|$)`)
+
+// resolveTargetTenant returns a copy of headers with the targetTenant
+// placeholder replaced by the request's target tenant: the /tenants/:id
+// path segment, else the JSON body's tenant_id, else a fresh UUID (a route
+// with no tenant, e.g. RP-13).
+func resolveTargetTenant(headers map[string]string, path, body string) map[string]string {
+	out := make(map[string]string, len(headers))
+	for k, v := range headers {
+		out[k] = v
+	}
+	if m := pathTenant.FindStringSubmatch(path); m != nil {
+		out["x-tenant-id"] = m[1]
+		return out
+	}
+	var b struct {
+		TenantID string `json:"tenant_id"`
+	}
+	if json.Unmarshal([]byte(body), &b) == nil && uuid.Validate(b.TenantID) == nil {
+		out["x-tenant-id"] = b.TenantID
+		return out
+	}
+	out["x-tenant-id"] = uuid.NewString()
+	return out
+}

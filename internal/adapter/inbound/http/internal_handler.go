@@ -81,6 +81,9 @@ func (h *InternalHandler) ProvisionTrial(c *gin.Context) {
 		HandleError(c, domain.NewError(domain.ErrInvalidRequest, "tenant_slug must not contain '/', whitespace, or control characters"))
 		return
 	}
+	if !tenantMatchesCaller(c, req.TenantID) {
+		return
+	}
 	result, err := h.Provisioning.ProvisionTrial(c.Request.Context(), idempotencyKey(c), service.ProvisionTrialRequest{
 		TenantID: req.TenantID, TenantName: req.TenantName, TenantSlug: req.TenantSlug,
 		AdminEmail: req.AdminEmail, AdminName: req.AdminName,
@@ -133,6 +136,9 @@ func (h *InternalHandler) ProvisionDirect(c *gin.Context) {
 	}
 	if !validTenantSlug(req.TenantSlug) {
 		HandleError(c, domain.NewError(domain.ErrInvalidRequest, "tenant_slug must not contain '/', whitespace, or control characters"))
+		return
+	}
+	if !tenantMatchesCaller(c, req.TenantID) {
 		return
 	}
 	if !validPlan(req.Plan) {

@@ -48,44 +48,56 @@ func (d *stubDedup) MarkProcessed(ctx context.Context, consumer domain.Processed
 	return nil
 }
 
-func (d *stubDedup) Prune(context.Context, int, int) (int, error) { return 0, nil }
-
-// fakeTxRunner stands in for postgres.TxRunner. It models the one property
-// the consumers depend on: all-or-nothing. On a non-nil error from fn it
+// fakeInbox stands in for postgres.InboxRepository (platform-events'
+// inbox.Store). It models the properties the consumers depend on: a
+// duplicate never runs fn, and the claim and fn's writes are all-or-nothing
+// — on a claim failure (dedup.markProcessErr) or a non-nil error from fn it
 // truncates whatever the repo and dedup stubs recorded during the call, so a
 // test can assert that a failed projection write also discards the
-// processed_events mark instead of leaving the event marked as handled.
-type fakeTxRunner struct {
+// processed_events claim instead of leaving the event marked as handled.
+// calls counts transactions opened (ProcessOnce invocations).
+type fakeInbox struct {
 	repo  *fakeRealmRepo
 	dedup *stubDedup
 	calls int
 }
 
-func newFakeTxRunner(repo *fakeRealmRepo, dedup *stubDedup) *fakeTxRunner {
-	return &fakeTxRunner{repo: repo, dedup: dedup}
+var _ port.Inbox = (*fakeInbox)(nil)
+
+func newFakeTxRunner(repo *fakeRealmRepo, dedup *stubDedup) *fakeInbox {
+	return &fakeInbox{repo: repo, dedup: dedup}
 }
 
-func (f *fakeTxRunner) RunInTx(ctx context.Context, fn func(ctx context.Context) error) error {
+func (f *fakeInbox) IsProcessed(ctx context.Context, consumer domain.ProcessedEventsConsumer, eventID string) (bool, error) {
+	return f.dedup.IsProcessed(ctx, consumer, eventID)
+}
+
+func (f *fakeInbox) ProcessOnce(ctx context.Context, consumer domain.ProcessedEventsConsumer, eventID, _ string, fn func(txCtx context.Context) error) (bool, error) {
 	f.calls++
+	if f.dedup.processed[string(consumer)+":"+eventID] {
+		return true, nil
+	}
 	updatesAtStart := 0
 	if f.repo != nil {
 		updatesAtStart = len(f.repo.updateCalls)
 	}
 	markedAtStart := len(f.dedup.marked)
 
-	err := fn(ctx)
+	err := f.dedup.MarkProcessed(ctx, consumer, eventID)
+	if err == nil {
+		err = fn(ctx)
+	}
 	if err != nil {
 		if f.repo != nil {
 			f.repo.updateCalls = f.repo.updateCalls[:updatesAtStart]
 		}
 		for _, id := range f.dedup.marked[markedAtStart:] {
-			delete(f.dedup.processed, string(domain.ConsumerTenant)+":"+id)
-			delete(f.dedup.processed, string(domain.ConsumerBilling)+":"+id)
-			delete(f.dedup.processed, string(domain.ConsumerMembership)+":"+id)
+			delete(f.dedup.processed, string(consumer)+":"+id)
 		}
 		f.dedup.marked = f.dedup.marked[:markedAtStart]
+		return false, err
 	}
-	return err
+	return false, nil
 }
 
 type stubMfaSyncer struct {
@@ -146,7 +158,7 @@ func envelope(t *testing.T, eventType string, payload any) events.Envelope[json.
 }
 
 func newTestMembership(mfa *stubMfaSyncer, dedup *stubDedup) *MembershipConsumer {
-	return NewMembershipConsumer(mfa, dedup, newFakeTxRunner(nil, dedup), stubLogger{})
+	return NewMembershipConsumer(mfa, newFakeTxRunner(nil, dedup), stubLogger{})
 }
 
 // ── MembershipConsumer ────────────────────────────────────────────────────
@@ -348,5 +360,5 @@ func TestMembershipConsumer_MarkProcessedFailurePropagates(t *testing.T) {
 	})
 	err := c.Handle(context.Background(), env)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "mark processed")
+	assert.Contains(t, err.Error(), "dedup write failed", "the inbox claim failure propagates")
 }

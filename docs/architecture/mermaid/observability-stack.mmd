@@ -10,18 +10,22 @@ graph LR
     end
 
     subgraph gincommon_only["Single wiring point — no service builds its own logger/registry/tracer"]
-        gc1["platform-gincommon v1.3.0\nZap logging · Prometheus registry · OTel tracer provider\nall constructed ONCE via gincommon.Config in cmd/server/main.go\nand cmd/reconciler/main.go — every adapter/service receives\nthe already-built Logger/Registerer, never builds its own"]
+        gc1["platform-gincommon v1.6.0\nZap logging · Prometheus registry · OTel tracer provider\nall constructed ONCE via gincommon.Config in cmd/server/main.go\nand cmd/reconciler/main.go — every adapter/service receives\nthe already-built Logger/Registerer, never builds its own"]
     end
 
     subgraph prom["Prometheus  →  /metrics on dedicated METRICS_PORT (never shares a listener)"]
         p1["platform_http_requests_total{method,route,status_class}\nplatform_http_request_duration_seconds · platform_http_active_requests\n(platform-gincommon, free; all series {domain,service,environment})"]
         p2["platform_messages_* / platform_outbox_* / platform_dlq_messages_total\nplatform_dependency_request_seconds{sns,sqs,codec}\n(platform-events) · platform_db_* (platform-pgcommon)"]
-        p3["iam_realm_provisioner_* business instruments\n(internal/adapter/outbound/metrics/metrics.go):\nprovision_total{kind,result} · users_migrated_total\nrealm_active_gauge{strategy} · keycloak_call_duration_seconds{op}\nkeycloak_call_failures_total{op} · admin_token_refresh_total{trigger}\nidp_validation_total{result} · mfa_role_sync_total{action}\nrealm_config_pending_gauge · trial_expiry_processed/deferred_total\nlapse_processed_total{transition} · realm_export_total{result}\nuser_delete_total{result} · session_revoke_total{result}\nmfa_reset_total{result} · template_drift{realm_version}\nrls_violations_total{violation_type} · unknown_event_acknowledged_total{topic=source topic,event_type}\nconsumed_schema_violations_total{consumer,event_type} · processed_events_duplicates_total{consumer}"]
+        p3["iam_realm_provisioner_* Tier 3 (service-specific) instruments —\nsource of every business alert/SLO\n(internal/adapter/outbound/metrics/metrics.go), §25 frozen prefix:\nprovision_total{kind,result} · users_migrated_total\nrealm_active_gauge{strategy} · keycloak_call_duration_seconds{op}\nkeycloak_call_failures_total{op} · admin_token_refresh_total{trigger}\nidp_validation_total{result} · mfa_role_sync_total{action}\nrealm_config_pending_gauge · trial_expiry_processed/deferred_total\nlapse_processed_total{transition} · realm_export_total{result}\nuser_delete_total{result} · session_revoke_total{result}\nmfa_reset_total{result} · template_drift{realm_version}\nrls_violations_total{violation_type} · unknown_event_acknowledged_total{topic=source topic,event_type}\nconsumed_schema_violations_total{consumer,event_type} · processed_events_duplicates_total{consumer}"]
+        p4["platform_dependency_request_seconds{dependency=keycloak,operation,outcome}
+Tier 1 (registry status: proposed) — recorded by this service on the
+same collector platform-events uses; alerts on proposed metrics carry
+metric_status: proposed. Every series: {domain=iam, service=iam-realm-provisioner, environment}"]
     end
 
     subgraph otel["OpenTelemetry Traces"]
-        ot1["gincommon.InitTracingFromEnv() — tracer provider + W3C\npropagator, always installed in BOTH cmd/server and\ncmd/reconciler so in-process spans get valid IDs even\nwithout OTEL_EXPORTER_OTLP_ENDPOINT (export is a no-op)"]
-        ot2["pgcommon.Config.Tracer (pgadapter.NewOTelTracer)\nadds a db.query span per query on both pools"]
+        ot1["gincommon.InitTracingWithConfig() — tracer provider + W3C\npropagator with the SAME identity as metrics, installed in\nBOTH cmd/server and cmd/reconciler so in-process spans get\nvalid IDs even without a collector (OTEL_EXPORTER_OTLP_ENDPOINT=none disables export)"]
+        ot2["pgcommon.Config.Tracer (gincommon.NewSpanTracer)\nadds a db.query span per query on both pools"]
         ot3["Every outbound HTTP call (O&M, OpenBao, Keycloak via\ngocloak's resty client) built on adapter/outbound/httpx —\ninjects traceparent, spans named per-operation\n(keycloak.create_realm, keycloak.migrate_user, etc.)"]
         ot4["SNS envelope carries trace_id explicitly (no header on SNS/SQS) —\nprovision → event → O&M projection stays one trace"]
         ot5["Reconciler runs rooted at a per-job reconciler span\n(e.g. reconciler.trial-expiry)"]
@@ -33,17 +37,17 @@ graph LR
         l3["RLS violation log — ERROR, 1% sampled (rls_violation_log)"]
     end
 
-    subgraph db_obs["Database observability (platform-pgcommon v1.3.0)"]
+    subgraph db_obs["Database observability (platform-pgcommon/v2 v2.0.0)"]
         db1["pgx pool metrics — acquire_count/duration, idle/acquired conns"]
         db2["SlowQueryTracer — WARN log > SlowQueryThreshold"]
     end
 
-    subgraph cron["cmd/reconciler — 6 CronJobs"]
-        c1["trial-expiry · trial-hard-delete · subscription-lapse\nrealm-config-reconcile · outbox-prune · processed-events-prune"]
+    subgraph cron["cmd/reconciler — 7 CronJobs"]
+        c1["trial-expiry · trial-hard-delete · subscription-lapse\nrealm-config-reconcile · outbox-prune · processed-events-prune · ledger-prune\nmetrics pushed to the Pushgateway, grouped by cronjob"]
     end
 
     subgraph alerts["Alert routing (deploy/monitoring/app-alerts.yml)"]
-        a1["Warning: keycloak_call_failures_total rate > 5% / 5m\ntrial_expiry_deferred_total > 0 sustained 1h\nrealm_config_pending_gauge > 0 sustained 30m (RP-INV-6)\nplatform_dlq_messages_total{operation=outbox_publish} increase > 0 / 30m\n{membership,billing,tenant}-realm-q DLQ depth > 0"]
+        a1["Warning: keycloak_call_failures_total rate > 5% / 5m\ntrial_expiry_deferred_total > 0 in the last pushed run\nrealm_config_pending_gauge > 0 sustained 30m (RP-INV-6)\nplatform_dlq_messages_total{operation=outbox_publish} increase > 0 / 30m\n{membership,billing,tenant}-realm-q DLQ depth > 0\noutbox backlog age · consumer polling stopped · DB pool saturated / acquire errors\nAL-5 audit entries rejected / undelivered"]
         a2["Critical: realm_export_total{result=fail} > 0\n(offboarding blocked — export-before-delete invariant)\nconsumed_schema_violations_total rate > 0 / 5m\n(consumed contract break — events of that type dropped)"]
         a3["Informational: admin_token_refresh_total{trigger=401} spike\n(possible credential rotation)"]
     end

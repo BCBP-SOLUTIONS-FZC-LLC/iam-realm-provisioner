@@ -2,7 +2,7 @@
 
 // Package postgres_test also covers the cmd/reconciler/jobs bodies that
 // need a real BYPASSRLS sysPool: TrialHardDelete (RP-C2, raw SQL via
-// runInTxWithSysPool) and ProcessedEventsPrune (port.ProcessedEventsStore.Prune
+// runInTxWithSysPool) and ProcessedEventsPrune (port.InboxPruner — inbox.Store.Prune
 // against the same sysPool). Everything else these jobs depend on (Keycloak)
 // is still mocked — only the DB parts need to be real.
 package postgres_test
@@ -337,7 +337,7 @@ func TestProcessedEventsPrune(t *testing.T) {
 		insertProcessedEventAt(t, ctx, rawPool, recentEvent, "billing", time.Now().UTC().Add(-1*24*time.Hour))
 
 		jctx := &jobs.Context{
-			ProcessedEvents:        pgadapter.NewProcessedEventsRepository(sysPool),
+			ProcessedEvents:        pgadapter.NewInboxRepository(sysPool, nil),
 			Logger:                 port.NewSlogStyleLogger(noopLogger{}),
 			ProcessedEventsTTLDays: 7,
 			BatchLimit:             500,
@@ -357,7 +357,7 @@ func TestProcessedEventsPrune(t *testing.T) {
 		insertProcessedEventAt(t, ctx, rawPool, recentEvent, "tenant", time.Now().UTC())
 
 		jctx := &jobs.Context{
-			ProcessedEvents:        pgadapter.NewProcessedEventsRepository(sysPool),
+			ProcessedEvents:        pgadapter.NewInboxRepository(sysPool, nil),
 			Logger:                 port.NewSlogStyleLogger(noopLogger{}),
 			ProcessedEventsTTLDays: 7,
 			BatchLimit:             500,
@@ -381,7 +381,7 @@ func TestProcessedEventsPrune(t *testing.T) {
 		insertProcessedEventAt(t, ctx, rawPool, oldEvent, "tenant", time.Now().UTC().Add(-10*24*time.Hour))
 
 		jctx := &jobs.Context{
-			ProcessedEvents:        pgadapter.NewProcessedEventsRepository(sysPool),
+			ProcessedEvents:        pgadapter.NewInboxRepository(sysPool, nil),
 			Logger:                 port.NewSlogStyleLogger(noopLogger{}),
 			ProcessedEventsTTLDays: 7,
 			// BatchLimit deliberately left unset (0) — must fall back to

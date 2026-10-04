@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
@@ -58,11 +57,16 @@ func HandleError(c *gin.Context, err error) {
 	// Raw pgconn.PgError that was not caught and translated by the service
 	// layer. wrapConnErr maps classes 08/53/57/58 to ErrDBUnavailable, so
 	// the DomainError branch above is the production path. This fallback
-	// still classifies a leaked PgError (tests, future missed wrap) into
-	// 503 db_unavailable per §17 without importing pgconn: classes 08/53
-	// via pgcommon helpers, 57/58 via the SQLSTATE text pgconn puts in
-	// Error().
-	if pgcommon.IsConnectionException(err) || pgcommon.IsInsufficientResources(err) || isOperatorOrSystemErrorSQLState(err) {
+	// still classifies a leaked PgError (tests, future missed wrap) or a
+	// closed pool into 503 db_unavailable per §17 via pgcommon's
+	// classifiers, without importing pgconn.
+	if pgcommon.IsQueryCanceled(err) || pgcommon.IsLockNotAvailable(err) {
+		er := newErrorResponse(c, string(domain.ErrRequestTimeout), nil)
+		er.Status = http.StatusServiceUnavailable
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, er)
+		return
+	}
+	if isDBUnavailable(err) {
 		er := newErrorResponse(c, string(domain.ErrDBUnavailable), nil)
 		er.Status = http.StatusServiceUnavailable
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, er)
@@ -76,15 +80,10 @@ func HandleError(c *gin.Context, err error) {
 	c.AbortWithStatusJSON(http.StatusInternalServerError, er)
 }
 
-// isOperatorOrSystemErrorSQLState reports whether err is a Postgres error
-// in SQLSTATE class 57 (operator_intervention) or 58 (system_error).
-// pgcommon v1.3.0 has no dedicated helper for these two, so we match the
-// "(SQLSTATE 57…)" / "(SQLSTATE 58…)" text pgconn puts in Error() instead
-// of type-asserting *pgconn.PgError (inbound HTTP must not import pgconn).
-func isOperatorOrSystemErrorSQLState(err error) bool {
-	if !pgcommon.IsPgError(err) {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "SQLSTATE 57") || strings.Contains(msg, "SQLSTATE 58")
+// isDBUnavailable mirrors postgres.IsDBUnavailable (this package may not
+// import the postgres adapter): SQLSTATE class 08, 53, 57 (except 57014) or
+// 58, or a closed pool.
+func isDBUnavailable(err error) bool {
+	return pgcommon.IsConnectionException(err) || pgcommon.IsInsufficientResources(err) ||
+		pgcommon.IsOperatorIntervention(err) || pgcommon.IsSystemError(err) || pgcommon.IsPoolClosed(err)
 }

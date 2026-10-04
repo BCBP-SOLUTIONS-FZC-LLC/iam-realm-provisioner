@@ -88,10 +88,11 @@ func readRuleFile(t *testing.T, rel string) []byte {
 }
 
 type promRule struct {
-	Alert  string            `yaml:"alert"`
-	Record string            `yaml:"record"`
-	Expr   string            `yaml:"expr"`
-	Labels map[string]string `yaml:"labels"`
+	Alert       string            `yaml:"alert"`
+	Record      string            `yaml:"record"`
+	Expr        string            `yaml:"expr"`
+	Labels      map[string]string `yaml:"labels"`
+	Annotations map[string]string `yaml:"annotations"`
 }
 
 type promRuleFile struct {
@@ -195,5 +196,42 @@ func TestMonitoring_ProposedMetricsAreLabelled(t *testing.T) {
 	if strings.Contains(string(hpa), "platform_http_requests_per_second") {
 		assert.Contains(t, string(hpa), "observability.platform/metric-status: proposed",
 			"the HPA scales on platform_http_requests_total (proposed) and must carry the metric-status annotation")
+	}
+}
+
+// runbookDoc is the alert-runbook page every alert's `runbook` annotation
+// points into (docs/observability/runbooks.md#<alert-name-lowercase>).
+const runbookDoc = "docs/observability/runbooks.md"
+
+var runbookHeading = regexp.MustCompile(`(?m)^### (\S+)\s*$`)
+
+// TestMonitoring_EveryAlertHasARunbook pins the alert ↔ runbook contract:
+// every alert carries `runbook: docs/observability/runbooks.md#<name>`
+// (the lowercased alert name), every such anchor is a `###` heading in that
+// page, and the page has no heading for an alert that no longer exists.
+func TestMonitoring_EveryAlertHasARunbook(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Join(repoRoot, runbookDoc))
+	require.NoError(t, err)
+	headings := map[string]bool{}
+	for _, m := range runbookHeading.FindAllStringSubmatch(string(doc), -1) {
+		headings[strings.ToLower(m[1])] = true
+	}
+
+	alerts := map[string]bool{}
+	for _, rel := range ruleFiles {
+		var f promRuleFile
+		require.NoError(t, yaml.Unmarshal(readRuleFile(t, rel), &f), rel)
+		for _, r := range f.rules() {
+			if r.Alert == "" {
+				continue
+			}
+			anchor := strings.ToLower(r.Alert)
+			alerts[anchor] = true
+			assert.Equal(t, runbookDoc+"#"+anchor, r.Annotations["runbook"], "%s: alert %s needs a runbook annotation", rel, r.Alert)
+			assert.True(t, headings[anchor], "%s: alert %s has no `### %s` entry in %s", rel, r.Alert, r.Alert, runbookDoc)
+		}
+	}
+	for h := range headings {
+		assert.True(t, alerts[h], "%s has an entry for %q, which is not an alert in any rule file", runbookDoc, h)
 	}
 }

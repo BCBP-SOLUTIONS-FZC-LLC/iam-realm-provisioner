@@ -27,7 +27,7 @@ func TestBillingConsumer_SuspendedTenant_ReEnablesRealm(t *testing.T) {
 	}}
 	kc := &fakeKeycloakAdmin{}
 	dedup := newStubDedup()
-	c := NewBillingConsumer(repo, kc, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewBillingConsumer(repo, kc, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, domain.EventTenantReactivated, domain.BillingTenantReactivatedPayload{TenantID: tenantID, Source: "billing"})
 	require.NoError(t, c.Handle(context.Background(), env))
@@ -49,7 +49,7 @@ func TestBillingConsumer_NonSuspendedTenant_NoOpButStillRecorded(t *testing.T) {
 	repo := &fakeRealmRepo{findFn: func(context.Context, uuid.UUID) (*domain.TenantRealm, error) { return row, nil }}
 	kc := &fakeKeycloakAdmin{}
 	dedup := newStubDedup()
-	c := NewBillingConsumer(repo, kc, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewBillingConsumer(repo, kc, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, domain.EventTenantReactivated, domain.BillingTenantReactivatedPayload{TenantID: tenantID, Source: "billing"})
 	require.NoError(t, c.Handle(context.Background(), env))
@@ -70,7 +70,7 @@ func TestBillingConsumer_KeycloakRunsOutsideTheTransaction(t *testing.T) {
 	kc := &fakeKeycloakAdmin{}
 	dedup := newStubDedup()
 	tx := newFakeTxRunner(repo, dedup)
-	c := NewBillingConsumer(repo, kc, dedup, tx, stubLogger{})
+	c := NewBillingConsumer(repo, kc, tx, stubLogger{})
 
 	env := envelope(t, domain.EventTenantReactivated, domain.BillingTenantReactivatedPayload{TenantID: tenantID, Source: "billing"})
 	require.NoError(t, c.Handle(context.Background(), env))
@@ -89,7 +89,7 @@ func TestBillingConsumer_KeycloakFailure_OpensNoTransaction(t *testing.T) {
 	kc := &fakeKeycloakAdmin{enableRealmErr: errors.New("keycloak unavailable")}
 	dedup := newStubDedup()
 	tx := newFakeTxRunner(repo, dedup)
-	c := NewBillingConsumer(repo, kc, dedup, tx, stubLogger{})
+	c := NewBillingConsumer(repo, kc, tx, stubLogger{})
 
 	env := envelope(t, domain.EventTenantReactivated, domain.BillingTenantReactivatedPayload{TenantID: tenantID, Source: "billing"})
 	require.Error(t, c.Handle(context.Background(), env))
@@ -108,7 +108,7 @@ func TestBillingConsumer_MarkFailureRollsBackTheUpdate(t *testing.T) {
 	kc := &fakeKeycloakAdmin{}
 	dedup := newStubDedup()
 	dedup.markProcessErr = errors.New("dedup write failed")
-	c := NewBillingConsumer(repo, kc, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewBillingConsumer(repo, kc, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, domain.EventTenantReactivated, domain.BillingTenantReactivatedPayload{TenantID: tenantID, Source: "billing"})
 	require.Error(t, c.Handle(context.Background(), env))
@@ -126,7 +126,7 @@ func TestBillingConsumer_Redelivery_IsNoOp(t *testing.T) {
 	repo := &fakeRealmRepo{findFn: func(context.Context, uuid.UUID) (*domain.TenantRealm, error) { return row, nil }}
 	kc := &fakeKeycloakAdmin{}
 	dedup := newStubDedup()
-	c := NewBillingConsumer(repo, kc, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewBillingConsumer(repo, kc, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, domain.EventTenantReactivated, domain.BillingTenantReactivatedPayload{TenantID: tenantID, Source: "billing"})
 	require.NoError(t, c.Handle(context.Background(), env))
@@ -143,7 +143,7 @@ func TestBillingConsumer_UnknownEventType_Acknowledged(t *testing.T) {
 	}}
 	kc := &fakeKeycloakAdmin{}
 	dedup := newStubDedup()
-	c := NewBillingConsumer(repo, kc, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewBillingConsumer(repo, kc, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, "TenantSuspended", map[string]any{})
 	require.NoError(t, c.Handle(context.Background(), env))
@@ -160,7 +160,7 @@ func TestBillingConsumer_UnknownEventType_MarkProcessedFailurePropagates(t *test
 	kc := &fakeKeycloakAdmin{}
 	dedup := newStubDedup()
 	dedup.markProcessErr = errors.New("dedup write failed")
-	c := NewBillingConsumer(repo, kc, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewBillingConsumer(repo, kc, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, "TenantSuspended", map[string]any{})
 	err := c.Handle(context.Background(), env)
@@ -173,7 +173,7 @@ func TestBillingConsumer_IsProcessedErrorPropagates(t *testing.T) {
 	kc := &fakeKeycloakAdmin{}
 	dedup := newStubDedup()
 	dedup.isProcessedErr = errors.New("dedup store unreachable")
-	c := NewBillingConsumer(repo, kc, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewBillingConsumer(repo, kc, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, domain.EventTenantReactivated, domain.BillingTenantReactivatedPayload{TenantID: uuid.New()})
 	err := c.Handle(context.Background(), env)
@@ -185,7 +185,7 @@ func TestBillingConsumer_MalformedPayload_DecodeErrorPropagates(t *testing.T) {
 	repo := &fakeRealmRepo{}
 	kc := &fakeKeycloakAdmin{}
 	dedup := newStubDedup()
-	c := NewBillingConsumer(repo, kc, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewBillingConsumer(repo, kc, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := events.NewEnvelope(domain.EventTenantReactivated, "test", json.RawMessage(`{"tenant_id":"not-a-uuid"}`))
 	err := c.Handle(context.Background(), env)
@@ -198,7 +198,7 @@ func TestBillingConsumer_FindByTenantIDErrorPropagates(t *testing.T) {
 	repo := &fakeRealmRepo{findFn: func(context.Context, uuid.UUID) (*domain.TenantRealm, error) { return nil, wantErr }}
 	kc := &fakeKeycloakAdmin{}
 	dedup := newStubDedup()
-	c := NewBillingConsumer(repo, kc, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewBillingConsumer(repo, kc, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, domain.EventTenantReactivated, domain.BillingTenantReactivatedPayload{TenantID: uuid.New()})
 	err := c.Handle(context.Background(), env)
@@ -212,7 +212,7 @@ func TestBillingConsumer_EnableRealmErrorPropagates(t *testing.T) {
 	repo := &fakeRealmRepo{findFn: func(context.Context, uuid.UUID) (*domain.TenantRealm, error) { return row, nil }}
 	kc := &fakeKeycloakAdmin{enableRealmErr: errors.New("keycloak unavailable")}
 	dedup := newStubDedup()
-	c := NewBillingConsumer(repo, kc, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewBillingConsumer(repo, kc, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, domain.EventTenantReactivated, domain.BillingTenantReactivatedPayload{TenantID: uuid.New()})
 	err := c.Handle(context.Background(), env)
@@ -230,7 +230,7 @@ func TestBillingConsumer_UpdateErrorPropagates(t *testing.T) {
 	}
 	kc := &fakeKeycloakAdmin{}
 	dedup := newStubDedup()
-	c := NewBillingConsumer(repo, kc, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewBillingConsumer(repo, kc, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, domain.EventTenantReactivated, domain.BillingTenantReactivatedPayload{TenantID: uuid.New()})
 	err := c.Handle(context.Background(), env)
@@ -245,10 +245,10 @@ func TestBillingConsumer_MarkProcessedErrorPropagates(t *testing.T) {
 	kc := &fakeKeycloakAdmin{}
 	dedup := newStubDedup()
 	dedup.markProcessErr = errors.New("dedup write failed")
-	c := NewBillingConsumer(repo, kc, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewBillingConsumer(repo, kc, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, domain.EventTenantReactivated, domain.BillingTenantReactivatedPayload{TenantID: uuid.New()})
 	err := c.Handle(context.Background(), env)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "mark processed")
+	assert.Contains(t, err.Error(), "dedup write failed", "the inbox claim failure propagates")
 }

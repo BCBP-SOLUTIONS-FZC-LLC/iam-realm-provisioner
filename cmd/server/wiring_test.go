@@ -9,8 +9,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
-	"github.com/prometheus/client_golang/prometheus"
-	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -33,13 +31,6 @@ func ensureMetricsRegistered(t *testing.T) {
 	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{Domain: "iam", Environment: "test", ServiceName: "iam-realm-provisioner", BuildVersion: "test"})
 	metrics.Register()
 	libraryMetricsOnce.Do(func() { initLibraryMetrics(libraryMetricsLog) })
-}
-
-func counterValue(t *testing.T, c prometheus.Counter) float64 {
-	t.Helper()
-	var m dto.Metric
-	require.NoError(t, c.Write(&m))
-	return m.GetCounter().GetValue()
 }
 
 // TestInitLibraryMetrics_SharesIdentityAndDependencyHistogram covers
@@ -151,16 +142,4 @@ func TestNoopPublisher_Publish(t *testing.T) {
 func TestNoopPublisher_PublishBatch(t *testing.T) {
 	var p noopPublisher
 	assert.NoError(t, p.PublishBatch(context.Background(), nil))
-}
-
-// TestDlqHandler_AlwaysErrors_NeverDeletesTheMessage guards dlqHandler's
-// safety-critical contract: platform-events deletes an SQS message only if
-// its dead-letter handler returns nil, so a nil return here would silently
-// drop a poison message before it ever reaches the queue's -dlq sibling for
-// operator inspection. This must never happen, so dlqHandler must always
-// return a non-nil error regardless of the envelope it's given.
-func TestDlqHandler_AlwaysErrors_NeverDeletesTheMessage(t *testing.T) {
-	err := dlqHandler("billing")(context.Background(), events.Envelope[json.RawMessage]{Type: "AnythingAtAll"})
-
-	require.Error(t, err, "dlqHandler must never return nil — that would delete the message before it reaches -dlq")
 }

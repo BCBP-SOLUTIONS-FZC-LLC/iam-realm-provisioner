@@ -153,10 +153,11 @@ var (
 	ConsumedSchemaViolationsTotal *prometheus.CounterVec
 
 	// ProcessedEventsDuplicates counts SQS redeliveries filtered by the
-	// processed_events composite PK (IDEMP-4), by consumer (Tier 3). The
-	// registry's platform_duplicate_messages_total{queue,event_type} is
-	// platform-events' own inbox metric; this service dedups in its own
-	// processed_events table, so it keeps this Tier 3 counter instead.
+	// processed_events composite PK (IDEMP-4), by consumer (Tier 3).
+	// platform-events' inbox (which this service dedups through) records
+	// the registry's platform_duplicate_messages_total{queue,event_type}
+	// itself; this Tier 3 counter stays the authoritative alerting source
+	// while that registry entry is proposed.
 	ProcessedEventsDuplicates *prometheus.CounterVec
 
 	// DependencyRequestDuration is the Tier 1
@@ -364,7 +365,7 @@ func registerMetrics() {
 
 	ConsumedSchemaViolationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name:        prefix + "consumed_schema_violations_total",
-		Help:        "Inbound deliveries rejected before the handler because the payload failed its consumed-message schema (retried until SQS redrives to -dlq), by consumer and event type — any nonzero rate means a producer contract break.",
+		Help:        "Inbound deliveries rejected before the handler because the payload failed its consumed-message schema (forwarded straight to -dlq on first delivery), by consumer and event type — any nonzero rate means a producer contract break.",
 		ConstLabels: labels,
 	}, []string{"consumer", "event_type"})
 

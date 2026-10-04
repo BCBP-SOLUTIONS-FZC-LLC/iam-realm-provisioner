@@ -74,6 +74,9 @@ spec:
               containerPort: {{ .Values.service.metricsPort }}
               protocol: TCP
           env:
+            # The migrate hook Job owns the schema; replicas never migrate.
+            - name: RUN_MIGRATIONS
+              value: {{ (not .Values.migrations.job.enabled) | quote }}
             {{- range $key, $val := .Values.env }}
             - name: {{ $key }}
               value: {{ $val | quote }}

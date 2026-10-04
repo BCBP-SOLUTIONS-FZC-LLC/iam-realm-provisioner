@@ -8,6 +8,7 @@ package postgres_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +101,29 @@ func TestPendingAuditEntryRepository(t *testing.T) {
 		backlog, err := gauges.AuditEntryBacklog(ctx)
 		require.NoError(t, err)
 		assert.Equal(t, map[string]int64{"pending": 1, "failed": 1}, backlog)
+
+		_, err = rawPool.Exec(ctx, `DELETE FROM pending_audit_entries`)
+		require.NoError(t, err)
+	})
+
+	// Regression: last_error is truncated to 1024 bytes. A cut through a
+	// multi-byte rune, or invalid bytes from an upstream body, used to make
+	// Postgres reject the UPDATE, so the row never left the retry loop.
+	t.Run("MarkFailed_LongMultibyteOrInvalidError_Persists", func(t *testing.T) {
+		tenantID := uuid.New()
+		require.NoError(t, repo.Enqueue(withTenant(ctx, tenantID), newIdpAuditEntry(tenantID)))
+		require.NoError(t, repo.Enqueue(withTenant(ctx, tenantID), newIdpAuditEntry(tenantID)))
+		claimed, err := sysRepo.ClaimDue(ctx, 10)
+		require.NoError(t, err)
+		require.Len(t, claimed, 2)
+
+		require.NoError(t, sysRepo.MarkFailed(ctx, claimed[0].ID, "x"+strings.Repeat("é", 2000)))
+		require.NoError(t, sysRepo.MarkRetry(ctx, claimed[1].ID, "502 \xff\xfe bad gateway"))
+
+		var lastErr string
+		require.NoError(t, rawPool.QueryRow(ctx, `SELECT last_error FROM pending_audit_entries WHERE id = $1`, claimed[0].ID).Scan(&lastErr))
+		assert.LessOrEqual(t, len(lastErr), 1024)
+		assert.True(t, strings.HasPrefix(lastErr, "xé"))
 
 		_, err = rawPool.Exec(ctx, `DELETE FROM pending_audit_entries`)
 		require.NoError(t, err)

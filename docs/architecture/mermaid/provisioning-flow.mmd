@@ -14,7 +14,7 @@ sequenceDiagram
 
     SG ->>+ RP: POST /api/v1/internal/tenants/provision-trial<br/>{tenant_id, slug, admin_email, admin_name, hashed_password_seed} + Idempotency-Key
 
-    RP ->> RP: idempotency.Begin(key, tenant_id, OpProvisionTrial)<br/>found+succeeded → replay, found+other → 409 operation_in_progress
+    RP ->> RP: idempotency.Begin(key, tenant_id, OpProvisionTrial)<br/>found+succeeded → replay, in_progress within the lease → 409 operation_in_progress,<br/>new/failed/lease-expired → claimed, proceed
 
     RP ->> KC: create user in 'trial' realm<br/>(email_verified=false, attribute tenant_id=<uuid>, sub preserved)
     alt Keycloak create fails

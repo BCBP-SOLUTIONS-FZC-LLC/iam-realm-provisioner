@@ -64,3 +64,14 @@ func TestStartAuditDelivery_UnsetBaseURL_WarnsAndDoesNotStart(t *testing.T) {
 	startAuditDelivery(context.Background(), nil, log)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&log.warnCalls))
 }
+
+// With a base URL set the drainer is wired and started; a canceled
+// context stops it before its first drain touches the (nil) pool.
+func TestStartAuditDelivery_BaseURLSet_StartsDrainer(t *testing.T) {
+	t.Setenv("AUDIT_LOG_BASE_URL", "http://audit-log.invalid")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	log := &fakeLogger{}
+	startAuditDelivery(ctx, nil, log)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&log.warnCalls), "a configured URL is not the disabled warning")
+}

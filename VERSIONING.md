@@ -113,7 +113,7 @@ helm upgrade iam-realm-provisioner ./deploy/helm \
 
 `image.tag` (`deploy/helm/values.yaml`) defaults to the chart's own `appVersion` (`Chart.yaml`) when unset. Chart `version`/`appVersion` are bumped manually alongside the Git tag (see the maintainer process below); they are **not** derived automatically from the tag by any workflow today.
 
-The chart deploys **one** `Deployment` (`/iam-realm-provisioner-server` — HTTP API + three SQS consumers + outbox runner) plus **six** `CronJob`s (`/iam-realm-provisioner-reconciler --job=<name>`), all from the same image.
+The chart deploys **one** `Deployment` (`/iam-realm-provisioner-server` — HTTP API + three SQS consumers + outbox runner + AL-5 audit drainer), a pre-install/pre-upgrade migrate hook `Job` (`/migrate`), and **seven** `CronJob`s (`/iam-realm-provisioner-reconciler --job=<name>`), all from the same image.
 
 ## Maintainer release process
 
@@ -160,7 +160,7 @@ Both should match a `v[0-9]*.[0-9]*.[0-9]*-*` tag trigger and produce a signed, 
 
 | iam-realm-provisioner | Go (`go.mod`) | Keycloak Admin API client | Shared platform libraries | `platform-schemagov` (`schema-gov` CLI) |
 |---|---|---|---|---|
-| Unreleased (`main`) | `1.26.6` | `github.com/Nerzal/gocloak/v13` `v13.9.0` (Keycloak 26 in local compose / integration tests) | `platform-gincommon` v1.3.0, `platform-events` v1.4.0, `platform-pgcommon` v1.3.0 | `0.4` (`SCHEMA_GOV_IMAGE` in `.env-example`) |
+| Unreleased (`main`) | `1.26.6` | `github.com/Nerzal/gocloak/v13` `v13.9.0` (Keycloak 26 in local compose / integration tests) | `platform-gincommon` v1.6.0, `platform-events/v2` v2.0.0, `platform-pgcommon/v2` v2.0.0 | `0.4` (`SCHEMA_GOV_IMAGE` in `.env-example`) |
 
 None of those libraries is re-exported — a consumer of this *service* never needs them as a direct dependency of *this* module. Callers depend on the HTTP/event contract, not on gocloak.
 

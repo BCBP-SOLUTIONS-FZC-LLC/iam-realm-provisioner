@@ -328,7 +328,11 @@ jobs:
       # existingSecret assumes a Kubernetes Secret named
       # iam-realm-provisioner-secrets already exists in the target
       # namespace — this chart's secret.yaml template hard-fails the render
-      # otherwise (see deploy/helm/values.yaml).
+      # otherwise (see deploy/helm/values.yaml). It must hold every
+      # envFromSecret key: DATABASE_URL, SYSTEM_DATABASE_URL,
+      # MIGRATION_DATABASE_URL, KEYCLOAK_ADMIN_CLIENT_SECRET,
+      # SNS_TOPIC_TENANT_ARN, SQS_{MEMBERSHIP,TENANT,BILLING}_REALM_QUEUE_URL
+      # and DOCS_AUTH_TOKEN.
       - name: Deploy with Helm
         run: |
           helm upgrade iam-realm-provisioner ./deploy/helm \

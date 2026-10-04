@@ -11,7 +11,6 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	swaggerFiles "github.com/swaggo/files"
@@ -73,7 +72,11 @@ func NewRouter(cfg RouterConfig) *Router {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
 		c.Next()
 	})
-	r.Use(gincommon.TimeoutMiddleware(30 * time.Second))
+	// The per-request deadline is cfg.GinConfig.RequestTimeout: gincommon
+	// appends its TimeoutMiddleware as the innermost observability handler,
+	// so metrics, the access log and the server span record the same 503 the
+	// client receives (an outer r.Use ran before observability and recorded
+	// 200).
 	r.Use(gincommon.ObservabilityMiddlewares(cfg.GinConfig)...)
 
 	registerInfraRoutes(r, cfg)
@@ -225,29 +228,31 @@ func registerInternalRoutes(r *gin.Engine, cfg RouterConfig) {
 	internal := r.Group("/api/v1/internal", append(protected, RequireSystemRole())...)
 
 	idem := RequireIdempotencyKey()
+	// tm: the path tenant must be the caller's x-tenant-id (RequireTenantMatch).
+	tm := RequireTenantMatch()
 
-	internal.POST("/tenants/provision-trial", idem, h.ProvisionTrial)         // RP-1
-	internal.POST("/tenants/provision-direct", idem, h.ProvisionDirect)       // RP-2
-	internal.POST("/tenants/:id/convert", idem, h.Convert)                    // RP-3
-	internal.POST("/tenants/:id/revert-conversion", idem, h.RevertConversion) // RP-4
-	internal.POST("/tenants/:id/users", idem, h.CreateInvitedUser)            // RP-5
-	internal.PUT("/tenants/:id/idp", idem, h.ConfigureIdp)                    // RP-6
-	internal.DELETE("/tenants/:id/idp/:alias", h.RemoveIdp)                   // RP-7
-	internal.PATCH("/tenants/:id/realm-config", h.ApplyRealmConfig)           // RP-8
+	internal.POST("/tenants/provision-trial", idem, h.ProvisionTrial)             // RP-1
+	internal.POST("/tenants/provision-direct", idem, h.ProvisionDirect)           // RP-2
+	internal.POST("/tenants/:id/convert", tm, idem, h.Convert)                    // RP-3
+	internal.POST("/tenants/:id/revert-conversion", tm, idem, h.RevertConversion) // RP-4
+	internal.POST("/tenants/:id/users", tm, idem, h.CreateInvitedUser)            // RP-5
+	internal.PUT("/tenants/:id/idp", tm, idem, h.ConfigureIdp)                    // RP-6
+	internal.DELETE("/tenants/:id/idp/:alias", tm, h.RemoveIdp)                   // RP-7
+	internal.PATCH("/tenants/:id/realm-config", tm, h.ApplyRealmConfig)           // RP-8
 	// RP-9's frozen §25 path spells the segment ":uid"; Gin requires one
 	// wildcard name per path position across sibling routes sharing this
 	// prefix (RP-15/16 use :keycloak_user_id here) — the capture name is
 	// an internal routing detail, not part of the wire contract (callers
 	// substitute the actual Keycloak user id either way), so this is a
 	// non-breaking rename.
-	internal.POST("/tenants/:id/users/:keycloak_user_id/mfa-reset", h.ResetMFA)             // RP-9
-	internal.POST("/tenants/:id/reactivate", idem, h.Reactivate)                            // RP-10
-	internal.GET("/tenants/:id/realm", h.GetRealm)                                          // RP-11
-	internal.POST("/tenants/:id/expire-trial", idem, h.ExpireTrial)                         // RP-12
-	internal.POST("/tenants/:id/suspend", idem, RequireOperatorRole(), h.Suspend)           // RP-14
-	internal.DELETE("/tenants/:id/users/:keycloak_user_id", h.DeleteUser)                   // RP-15
-	internal.POST("/tenants/:id/users/:keycloak_user_id/revoke-sessions", h.RevokeSessions) // RP-16
-	internal.POST("/tenants/:id/service-account/keys/refresh", h.RefreshServiceAccountKeys) // RP-17
+	internal.POST("/tenants/:id/users/:keycloak_user_id/mfa-reset", tm, h.ResetMFA)             // RP-9
+	internal.POST("/tenants/:id/reactivate", tm, idem, h.Reactivate)                            // RP-10
+	internal.GET("/tenants/:id/realm", tm, h.GetRealm)                                          // RP-11
+	internal.POST("/tenants/:id/expire-trial", tm, idem, h.ExpireTrial)                         // RP-12
+	internal.POST("/tenants/:id/suspend", tm, idem, RequireOperatorRole(), h.Suspend)           // RP-14
+	internal.DELETE("/tenants/:id/users/:keycloak_user_id", tm, h.DeleteUser)                   // RP-15
+	internal.POST("/tenants/:id/users/:keycloak_user_id/revoke-sessions", tm, h.RevokeSessions) // RP-16
+	internal.POST("/tenants/:id/service-account/keys/refresh", tm, h.RefreshServiceAccountKeys) // RP-17
 
 	// Operator-only, whole-estate scan — not tenant-scoped (§5.1).
 	internal.POST("/audit/idp-region-portability", RequireOperatorRole(), h.PortabilityAudit) // RP-13

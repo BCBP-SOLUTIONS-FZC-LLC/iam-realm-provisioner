@@ -470,3 +470,16 @@ func TestNamingConvention_ConformsToPlatformObservabilityStandard(t *testing.T) 
 	}
 	assert.Greater(t, checked, 0, "expected at least one of this service's own metrics to be gathered")
 }
+
+// A second registration of a registry histogram reuses the collector that
+// is already registered (platform-events registers the same name first).
+func TestSharedHistogram_AlreadyRegistered_ReturnsExistingCollector(t *testing.T) {
+	Register()
+	assert.Same(t, DependencyRequestDuration, sharedHistogram("platform_dependency_request_seconds"))
+}
+
+// A name missing from the Platform Observability Registry is a programming
+// error and fails at startup.
+func TestSharedHistogram_UnregisteredName_Panics(t *testing.T) {
+	assert.Panics(t, func() { sharedHistogram("platform_not_in_the_registry_seconds") })
+}

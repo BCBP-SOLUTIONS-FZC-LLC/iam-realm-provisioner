@@ -185,25 +185,3 @@ func stripGlueHeader(encoded []byte) (json.RawMessage, error) {
 	}
 	return json.RawMessage(encoded[glueHeaderSize:]), nil
 }
-
-// GlueDecodeCodec decodes Glue-wire-format payloads WITHOUT a Glue client,
-// registry name, or schema names — stripping the header is fully
-// self-describing, so no registry lookup is needed to decode, only to
-// encode. Used by this service's 3 SQS consumers, which decode events
-// produced by O&M/Billing and may not have those producers' Glue registry
-// configured (§7.1: "both consumers need a decode-capable codec regardless
-// of this service's own publish-side Glue configuration").
-type GlueDecodeCodec struct{}
-
-var _ events.Codec = GlueDecodeCodec{}
-
-// Encode always fails — GlueDecodeCodec is decode-only.
-func (GlueDecodeCodec) Encode(_ context.Context, eventType string, _ json.RawMessage) (encoded []byte, schemaVersionID string, err error) {
-	return nil, "", fmt.Errorf("glue decode codec: Encode is not supported (decode-only, event type %q) — use GlueCodec to publish", eventType)
-}
-
-// Decode strips the Glue wire header from encoded, returning the raw JSON
-// payload.
-func (GlueDecodeCodec) Decode(_ context.Context, _ string, encoded []byte) (json.RawMessage, error) {
-	return stripGlueHeader(encoded)
-}

@@ -1,7 +1,7 @@
 graph TD
     subgraph cmd["Composition Roots  —  cmd/"]
-        main["server/main.go\nwire pool + sysPool (GUCProvider = GUCSetFromContext, RLS-6)\nmigrations · outbox runner · 3 SQS consumers\ngraceful shutdown: SIGTERM → gincommon.Shutdown, terminationGracePeriodSeconds=30"]
-        reconciler["reconciler/main.go\nsingle binary, --job=<name> dispatch\n6 CronJobs: trial-expiry · trial-hard-delete\nsubscription-lapse · realm-config-reconcile\noutbox-prune · processed-events-prune"]
+        main["server/main.go\nwire pool + sysPool (GUCProvider = GUCSetFromContext, RLS-6)\nmigrations · outbox runner · 3 SQS consumers\ngraceful shutdown: SIGTERM → parallel drain (HTTP · consumers · in-flight RP-3), then outbox, then pools; terminationGracePeriodSeconds=75"]
+        reconciler["reconciler/main.go\nsingle binary, --job=<name> dispatch\n7 CronJobs: ledger-prune · trial-expiry · trial-hard-delete\nsubscription-lapse · realm-config-reconcile\noutbox-prune · processed-events-prune"]
     end
 
     subgraph adapters_in["Inbound Adapters  —  internal/adapter/inbound/"]
@@ -26,7 +26,7 @@ graph TD
 
     subgraph core["Core  —  internal/core/"]
         service["service/\nProvisioningService · LifecycleService\nIdpService · RealmConfigService · MfaService"]
-        port["port/\nKeycloakAdmin · TenantRealmRepository · IdpConfigRepository\nIdpValidationRepository · ReconciliationRepository\nIdempotencyStore · ProcessedEventsStore · EventPublisher · TxRunner\nOpenBaoClient · OrgMembershipClient · ObjectStore\nSubscriptionLapseReader (RP-C3) · TokenServiceClient (§2.5)"]
+        port["port/\nKeycloakAdmin · TenantRealmRepository · IdpConfigRepository\nIdpValidationRepository · ReconciliationRepository\nIdempotencyStore · Inbox · InboxPruner · EventPublisher · TxRunner\nOpenBaoClient · OrgMembershipClient · ObjectStore\nSubscriptionLapseReader (RP-C3) · TokenServiceClient (§2.5)"]
         domain["domain/\nTenantRealm · IdpConfig · IdpConfigValidation\nProvisioningOperation · RealmConfigReconciliation\nErrorCode catalogue · 9 event payload types"]
     end
 
