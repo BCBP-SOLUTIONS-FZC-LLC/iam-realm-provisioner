@@ -20,7 +20,8 @@
 # build-image lints the Dockerfile (Hadolint + .dockerignore check) as its
 # first steps, before the expensive build — a lint failure never starts the
 # build, and there's no separate lint-dockerfile job to pay a job-minute for.
-# validate-test runs the race+coverage gate and gates trivy/smoke (correctness).
+# validate-test runs two parallel jobs: the race+coverage gate (`test`) and the
+# end-to-end suite (`e2e`). Both gate trivy/smoke (correctness).
 # validate-quality gates push/release only (style + lint).
 # pr-summary posts a status comment on pull_request events (skipped if upstream jobs fail).
 #

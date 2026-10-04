@@ -17,6 +17,7 @@ This service has never been deployed to any environment — there is no released
 
 ### Added
 
+- **E2E runs as its own CI job.** `validate-test.yml` now has an `e2e` job alongside `test`, matching `iam-authz-enrichment`. It starts in parallel instead of waiting behind the race + coverage run, and a failure shows up as its own job. `ci.yml` and `release.yml` gate on it through the reusable workflow.
 - **Production-readiness fixes from a full review** (LLD rev 1.21):
   - **Idempotency keys no longer get stuck `in_progress`.** Previously a key stuck that way returned 409 forever. `Fail`/`Complete` now run detached from the request context, which is cancelled by the 30s deadline or a client disconnect. `Begin` reclaims an `in_progress` row older than `IDEMPOTENCY_IN_PROGRESS_LEASE` (15m), covering a crash or SIGKILL.
   - **Compensating teardown no longer leaks half-built realms, clients or secrets.** It runs on a detached 30s context instead of the cancelled request context.
