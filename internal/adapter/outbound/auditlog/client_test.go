@@ -31,7 +31,7 @@ func sampleEntry() domain.AuditEntry {
 		Target:     &domain.AuditTarget{Type: "idp", ID: "acme-sso"},
 		OccurredAt: time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC), SourceService: domain.Source,
 		SourceEventType: domain.AuditSourceTenantIdpConfigChanged,
-		Metadata:        map[string]any{"validation_outcome": "pass"},
+		Metadata:        json.RawMessage(`{"validation_outcome":"pass"}`),
 	}
 }
 
@@ -167,9 +167,23 @@ func TestWriteEntry_InvalidBaseURL(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestWriteEntry_UnencodableMetadataIsRejected(t *testing.T) {
+func TestWriteEntry_NilTenantIDIsRejected(t *testing.T) {
 	e := sampleEntry()
-	e.Metadata = map[string]any{"bad": make(chan int)}
+	e.TenantID = uuid.UUID{}
 	err := New("http://example.com", noopLogger{}).WriteEntry(context.Background(), "key-1", e)
 	require.ErrorIs(t, err, port.ErrAuditEntryRejected)
+}
+
+func TestWriteEntry_NilMetadataIsOmitted(t *testing.T) {
+	e := sampleEntry()
+	e.Metadata = nil
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		_, hasMetadata := body["metadata"]
+		assert.False(t, hasMetadata, "nil Metadata must be omitted from the request body")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	require.NoError(t, New(srv.URL, noopLogger{}).WriteEntry(context.Background(), "key-1", e))
 }

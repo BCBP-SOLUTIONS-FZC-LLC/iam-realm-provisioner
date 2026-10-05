@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"time"
@@ -279,13 +280,14 @@ func (s *IdpService) RemoveIdp(ctx context.Context, tenantID uuid.UUID, idpAlias
 // O&M calls as — and trace_id is captured now, since delivery happens
 // later from the drainer on an unrelated trace.
 func idpAuditEntry(ctx context.Context, tenantID uuid.UUID, alias, action string, metadata map[string]any) domain.AuditEntry {
+	metaJSON, _ := json.Marshal(metadata) //nolint:errcheck // map[string]any with plain serialisable values: cannot fail
 	entry := domain.AuditEntry{
 		TenantID: tenantID, EntryType: domain.AuditEntryTypeIdpChanged, Action: action,
 		Actor:      domain.AuditActor{Type: domain.AuditActorIAMSystem, ID: domain.SystemActorID},
 		Target:     &domain.AuditTarget{Type: "idp", ID: alias},
 		OccurredAt: time.Now().UTC(), SourceService: domain.Source,
 		SourceEventType: domain.AuditSourceTenantIdpConfigChanged,
-		Metadata:        metadata,
+		Metadata:        json.RawMessage(metaJSON),
 	}
 	if rc, ok := requestctx.FromContext(ctx); ok {
 		if rc.UserID != uuid.Nil && rc.UserID.String() != domain.SystemActorID {

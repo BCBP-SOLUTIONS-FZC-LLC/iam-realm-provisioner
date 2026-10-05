@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -50,18 +51,18 @@ type AuditTarget struct {
 // `pending_audit_entries.entry` until delivered. Its JSON shape is AL-5's
 // request body.
 type AuditEntry struct {
-	TenantID        uuid.UUID      `json:"tenant_id"`
-	EntryType       string         `json:"entry_type"`
-	Action          string         `json:"action"`
-	Actor           AuditActor     `json:"actor"`
-	Target          *AuditTarget   `json:"target,omitempty"`
-	OccurredAt      time.Time      `json:"occurred_at"`
-	SourceService   string         `json:"source_service"`
-	SourceEventType string         `json:"source_event_type"`
-	IPAddress       string         `json:"ip_address,omitempty"`
-	UserAgent       string         `json:"user_agent,omitempty"`
-	TraceID         string         `json:"trace_id,omitempty"`
-	Metadata        map[string]any `json:"metadata,omitempty"`
+	TenantID        uuid.UUID       `json:"tenant_id"`
+	EntryType       string          `json:"entry_type"`
+	Action          string          `json:"action"`
+	Actor           AuditActor      `json:"actor"`
+	Target          *AuditTarget    `json:"target,omitempty"`
+	OccurredAt      time.Time       `json:"occurred_at"`
+	SourceService   string          `json:"source_service"`
+	SourceEventType string          `json:"source_event_type"`
+	IPAddress       string          `json:"ip_address,omitempty"`
+	UserAgent       string          `json:"user_agent,omitempty"`
+	TraceID         string          `json:"trace_id,omitempty"`
+	Metadata        json.RawMessage `json:"metadata,omitempty"`
 }
 
 // PendingAuditEntry is one claimed `pending_audit_entries` row. ID is the

@@ -8,6 +8,7 @@ package postgres_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -25,7 +26,7 @@ func newIdpAuditEntry(tenantID uuid.UUID) domain.AuditEntry {
 		Target:     &domain.AuditTarget{Type: "idp", ID: "acme-sso"},
 		OccurredAt: time.Now().UTC().Truncate(time.Millisecond), SourceService: domain.Source,
 		SourceEventType: domain.AuditSourceTenantIdpConfigChanged,
-		Metadata:        map[string]any{"validation_outcome": "pass"},
+		Metadata:        json.RawMessage(`{"validation_outcome":"pass"}`),
 	}
 }
 
@@ -54,7 +55,9 @@ func TestPendingAuditEntryRepository(t *testing.T) {
 		assert.Equal(t, want.EntryType, got.Entry.EntryType)
 		assert.Equal(t, want.Target, got.Entry.Target)
 		assert.True(t, want.OccurredAt.Equal(got.Entry.OccurredAt))
-		assert.Equal(t, "pass", got.Entry.Metadata["validation_outcome"])
+		var meta map[string]any
+		require.NoError(t, json.Unmarshal(got.Entry.Metadata, &meta))
+		assert.Equal(t, "pass", meta["validation_outcome"])
 
 		// The claim pushed next_attempt_at out — an immediate re-claim
 		// (e.g. a second replica) must not see the row again.

@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/httpx"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
@@ -67,6 +69,9 @@ func New(baseURL string, log port.Logger) *Client {
 // idempotencyKey) are success; 429 and 5xx are transient; any other
 // non-2xx is a permanent rejection wrapping port.ErrAuditEntryRejected.
 func (c *Client) WriteEntry(ctx context.Context, idempotencyKey string, entry domain.AuditEntry) error {
+	if entry.TenantID == (uuid.UUID{}) {
+		return fmt.Errorf("%w: nil tenant_id in audit entry", port.ErrAuditEntryRejected)
+	}
 	body, err := json.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("%w: encode entry: %v", port.ErrAuditEntryRejected, err)
