@@ -60,6 +60,12 @@ type TokenServiceClient interface {
 	// IssueOrRotateCredential calls TS-1 to generate (or, on a rotation_id
 	// replay, re-return) the principal's credential material.
 	IssueOrRotateCredential(ctx context.Context, tenantID, principalID uuid.UUID, req IssueCredentialRequest) (*IssueCredentialResult, error)
+	// RevokeCredential calls TS-2 to revoke the active credential(s) for
+	// principalID. Called during RP-3 conversion after TS-1 has issued the
+	// new dedicated-realm credential, to retire the old shared-realm
+	// credential so it can no longer authenticate. Must run after TS-1 and
+	// before the old shared-realm Keycloak client is deleted.
+	RevokeCredential(ctx context.Context, tenantID, principalID uuid.UUID) error
 	// ReadPrincipal calls TS-3 to read principal + credential-version
 	// metadata (RP-18) — never a secret.
 	ReadPrincipal(ctx context.Context, tenantID, principalID uuid.UUID) (*ReadPrincipalResult, error)

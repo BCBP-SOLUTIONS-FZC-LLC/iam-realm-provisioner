@@ -231,6 +231,10 @@ func (m *fakeIdempotencyStore) Fail(ctx context.Context, key string) error {
 	return nil
 }
 
+func (m *fakeIdempotencyStore) ExpireStaleInProgress(_ context.Context, _ time.Duration, _ int) (int, error) {
+	return 0, nil
+}
+
 // ── fakeTxRunner — runs fn directly, injecting a fakeEventPublisher that
 // captures every enqueued event for assertions. ─────────────────────────────
 
@@ -407,6 +411,7 @@ func (m *fakeOrgMembershipClient) HasResidualMFARequirement(ctx context.Context,
 type fakeTokenServiceClient struct {
 	RegisterPrincipalFn       func(ctx context.Context, tenantID uuid.UUID, req port.RegisterPrincipalRequest) (*port.RegisterPrincipalResult, error)
 	IssueOrRotateCredentialFn func(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error)
+	RevokeCredentialFn        func(ctx context.Context, tenantID, principalID uuid.UUID) error
 	ReadPrincipalFn           func(ctx context.Context, tenantID, principalID uuid.UUID) (*port.ReadPrincipalResult, error)
 	JWKSURLForFn              func(tenantID uuid.UUID) string
 }
@@ -418,6 +423,12 @@ func (m *fakeTokenServiceClient) RegisterPrincipal(ctx context.Context, tenantID
 }
 func (m *fakeTokenServiceClient) IssueOrRotateCredential(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
 	return m.IssueOrRotateCredentialFn(ctx, tenantID, principalID, req)
+}
+func (m *fakeTokenServiceClient) RevokeCredential(ctx context.Context, tenantID, principalID uuid.UUID) error {
+	if m.RevokeCredentialFn != nil {
+		return m.RevokeCredentialFn(ctx, tenantID, principalID)
+	}
+	return nil
 }
 func (m *fakeTokenServiceClient) ReadPrincipal(ctx context.Context, tenantID, principalID uuid.UUID) (*port.ReadPrincipalResult, error) {
 	return m.ReadPrincipalFn(ctx, tenantID, principalID)

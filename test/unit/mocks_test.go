@@ -263,6 +263,10 @@ func (m *mockIdempotencyStore) Fail(ctx context.Context, key string) error {
 	return nil
 }
 
+func (m *mockIdempotencyStore) ExpireStaleInProgress(_ context.Context, _ time.Duration, _ int) (int, error) {
+	return 0, nil
+}
+
 // ── mockTxRunner — runs fn directly against context.Background()'s child,
 // no real transaction, and injects a mockEventPublisher capturing every
 // enqueued event for assertions. ──────────────────────────────────────────
@@ -447,6 +451,7 @@ func (m *mockLogger) Error(msg string, fields map[string]any) { m.errorCalls++ }
 type mockTokenServiceClient struct {
 	RegisterPrincipalFn       func(ctx context.Context, tenantID uuid.UUID, req port.RegisterPrincipalRequest) (*port.RegisterPrincipalResult, error)
 	IssueOrRotateCredentialFn func(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error)
+	RevokeCredentialFn        func(ctx context.Context, tenantID, principalID uuid.UUID) error
 	ReadPrincipalFn           func(ctx context.Context, tenantID, principalID uuid.UUID) (*port.ReadPrincipalResult, error)
 	JWKSURLForFn              func(tenantID uuid.UUID) string
 }
@@ -458,6 +463,9 @@ func (m *mockTokenServiceClient) RegisterPrincipal(ctx context.Context, tenantID
 }
 func (m *mockTokenServiceClient) IssueOrRotateCredential(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
 	return m.IssueOrRotateCredentialFn(ctx, tenantID, principalID, req)
+}
+func (m *mockTokenServiceClient) RevokeCredential(ctx context.Context, tenantID, principalID uuid.UUID) error {
+	return m.RevokeCredentialFn(ctx, tenantID, principalID)
 }
 func (m *mockTokenServiceClient) ReadPrincipal(ctx context.Context, tenantID, principalID uuid.UUID) (*port.ReadPrincipalResult, error) {
 	return m.ReadPrincipalFn(ctx, tenantID, principalID)
@@ -493,6 +501,9 @@ func wirePlatformAutomationHappyPath(kc *mockKeycloakAdmin) *mockTokenServiceCli
 		},
 		IssueOrRotateCredentialFn: func(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
 			return &port.IssueCredentialResult{Version: 1, Secret: "test-secret", OpenBaoPath: "iam/serviceaccount/test/v1", RecordVersion: 1}, nil
+		},
+		RevokeCredentialFn: func(ctx context.Context, tenantID, principalID uuid.UUID) error {
+			return nil
 		},
 		JWKSURLForFn: func(tenantID uuid.UUID) string {
 			return "http://token-service.test/api/v1/internal/tenants/" + tenantID.String() + "/service-accounts/platform-automation/jwks.json"

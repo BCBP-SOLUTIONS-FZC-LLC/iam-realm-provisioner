@@ -383,6 +383,10 @@ paths:
           description: Internal Server Error
           schema:
             $ref: '#/definitions/http.ErrorResponse'
+        "503":
+          description: db_unavailable OR keycloak_unavailable OR token_service_unavailable
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -710,6 +714,10 @@ paths:
           description: Internal Server Error
           schema:
             $ref: '#/definitions/http.ErrorResponse'
+        "503":
+          description: db_unavailable OR keycloak_unavailable OR token_service_unavailable
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -852,6 +860,10 @@ paths:
           description: Internal Server Error
           schema:
             $ref: '#/definitions/http.ErrorResponse'
+        "503":
+          description: db_unavailable OR keycloak_unavailable OR token_service_unavailable
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -936,6 +948,10 @@ paths:
           description: Internal Server Error
           schema:
             $ref: '#/definitions/http.ErrorResponse'
+        "503":
+          description: db_unavailable OR keycloak_unavailable
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -1015,6 +1031,10 @@ paths:
           description: Internal Server Error
           schema:
             $ref: '#/definitions/http.ErrorResponse'
+        "503":
+          description: db_unavailable OR keycloak_unavailable OR token_service_unavailable
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
       security:
       - SystemRole: []
       - IdempotencyKey: []
@@ -1053,6 +1073,10 @@ paths:
             $ref: '#/definitions/http.ErrorResponse'
         "500":
           description: Internal Server Error
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "503":
+          description: db_unavailable OR keycloak_unavailable OR token_service_unavailable
           schema:
             $ref: '#/definitions/http.ErrorResponse'
       security:

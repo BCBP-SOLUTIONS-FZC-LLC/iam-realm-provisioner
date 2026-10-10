@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -142,6 +143,10 @@ func (m *loadIdempotencyStore) Fail(_ context.Context, key string) error {
 	return nil
 }
 
+func (m *loadIdempotencyStore) ExpireStaleInProgress(_ context.Context, _ time.Duration, _ int) (int, error) {
+	return 0, nil
+}
+
 // loadEventPublisher discards every enqueued event — this suite measures
 // the Keycloak-facing migration loop, not outbox behavior.
 type loadEventPublisher struct{}
@@ -169,6 +174,9 @@ func (loadTokenServiceClient) RegisterPrincipal(context.Context, uuid.UUID, port
 }
 func (loadTokenServiceClient) IssueOrRotateCredential(context.Context, uuid.UUID, uuid.UUID, port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
 	return &port.IssueCredentialResult{Version: 1, Secret: "load-test-secret", OpenBaoPath: "iam/serviceaccount/load/v1", RecordVersion: 1}, nil
+}
+func (loadTokenServiceClient) RevokeCredential(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
 }
 func (loadTokenServiceClient) ReadPrincipal(context.Context, uuid.UUID, uuid.UUID) (*port.ReadPrincipalResult, error) {
 	return nil, nil

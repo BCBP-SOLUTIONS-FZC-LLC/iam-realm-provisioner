@@ -114,6 +114,12 @@ const docTemplate = `{
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
+                    },
+                    "503": {
+                        "description": "db_unavailable OR keycloak_unavailable OR token_service_unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
                     }
                 }
             }
@@ -171,6 +177,12 @@ const docTemplate = `{
                     },
                     "500": {
                         "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "db_unavailable OR keycloak_unavailable OR token_service_unavailable",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -248,6 +260,12 @@ const docTemplate = `{
                     },
                     "500": {
                         "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "db_unavailable OR keycloak_unavailable OR token_service_unavailable",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -739,6 +757,12 @@ const docTemplate = `{
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
+                    },
+                    "503": {
+                        "description": "db_unavailable OR keycloak_unavailable OR token_service_unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
                     }
                 }
             }
@@ -952,6 +976,12 @@ const docTemplate = `{
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
+                    },
+                    "503": {
+                        "description": "db_unavailable OR keycloak_unavailable OR token_service_unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
                     }
                 }
             }
@@ -1071,6 +1101,12 @@ const docTemplate = `{
                     },
                     "500": {
                         "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "db_unavailable OR keycloak_unavailable",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }

@@ -170,6 +170,7 @@ func (s *ProvisioningService) bestEffortDeleteServiceAccountClient(ctx context.C
 // idempotent-replay recovery model, but persists indefinitely if no retry
 // ever happens.
 func (s *ProvisioningService) mintPlatformAutomation(ctx context.Context, idempotencyKey string, tenantID uuid.UUID, realmName, clientID string) (principalID uuid.UUID, err error) {
+	defer func() { metrics.ServiceAccountRegisterTotal.WithLabelValues(outcome(err)).Inc() }()
 	sub, created, err := s.keycloak.CreateServiceAccountClient(ctx, realmName, clientID, s.tokenService.JWKSURLFor(tenantID))
 	if err != nil {
 		return uuid.Nil, err
@@ -706,6 +707,9 @@ func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string
 	if current.ServiceAccountKeycloakClientID != nil {
 		oldClientID = *current.ServiceAccountKeycloakClientID
 	}
+	// Captured before the tx closure overwrites current.ServiceAccountPrincipalID.
+	// nil for a legacy row provisioned before mintPlatformAutomation was added.
+	oldPrincipalID := current.ServiceAccountPrincipalID
 
 	automationClientID := dedicatedPlatformAutomationClientID
 	err = s.tx.RunInTx(ctx, func(ctx context.Context) error {
@@ -750,6 +754,23 @@ func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string
 		return nil, err
 	}
 
+	// TS-2: revoke the old shared-realm credential now that the local commit
+	// has landed and the new dedicated-realm credential (TS-1, issued inside
+	// mintPlatformAutomation above) is live (RP-GAP-004/TS-RP-GAP-002).
+	// Best-effort: a revocation failure leaves the old credential active until
+	// RP-C reconcilers or operator cleanup, which is far less harmful than
+	// blocking an already-committed conversion. Must run AFTER TS-1 (which
+	// issued the new credential) and BEFORE deleting the old Keycloak client
+	// below — the strict TS-4 → TS-1 → TS-2 → client-delete ordering that
+	// avoids any window where the principal has no valid credential.
+	// Skipped for legacy rows that were provisioned before mintPlatformAutomation
+	// was added (oldPrincipalID == nil).
+	if oldPrincipalID != nil {
+		if tsErr := s.tokenService.RevokeCredential(ctx, tenantID, *oldPrincipalID); tsErr != nil {
+			s.log.WarnContext(ctx, "convert: revoke old shared-realm credential failed (non-fatal)", "tenant_id", tenantID, "error", tsErr.Error())
+		}
+	}
+
 	// The conversion has fully committed — the principal now lives on
 	// realmName's client, so the old shared-realm client is retired
 	// (best-effort; a failure here leaves a harmless cleanup item, not an
@@ -788,7 +809,8 @@ func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string
 // trial realm this refreshes every trial tenant's automation client
 // sharing that realm — harmless (extra re-fetches only), not optimized for
 // in v1.
-func (s *ProvisioningService) RefreshServiceAccountKeys(ctx context.Context, tenantID uuid.UUID) error {
+func (s *ProvisioningService) RefreshServiceAccountKeys(ctx context.Context, tenantID uuid.UUID) (err error) {
+	defer func() { metrics.ServiceAccountKeyRefreshTotal.WithLabelValues(outcome(err)).Inc() }()
 	realm, err := s.realms.FindByTenantID(ctx, tenantID)
 	if err != nil {
 		return err

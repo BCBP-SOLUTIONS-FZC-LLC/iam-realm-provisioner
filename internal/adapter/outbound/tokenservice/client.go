@@ -139,6 +139,11 @@ func (c *Client) RegisterPrincipal(ctx context.Context, tenantID uuid.UUID, req 
 	}
 	defer httpx.CloseBody(c.log, resp.Body)
 
+	if resp.StatusCode == http.StatusConflict {
+		return nil, domain.NewError(domain.ErrServiceAccountRotationInFlight,
+			"token service: principal registration conflict — concurrent write in progress").
+			WithDetails(map[string]any{"tenant_id": tenantID})
+	}
 	if err := classifyStatus(resp.StatusCode, "TS-4", resp.Body); err != nil {
 		return nil, err
 	}
@@ -175,13 +180,14 @@ type issueOrRotateResponseBody struct {
 
 // IssueOrRotateCredential calls TS-1
 // POST /api/v1/internal/tenants/:id/service-accounts/:principal_id/credentials.
-// A 409 is surfaced as one of the three §17 causes when TS-1's response body
+// A 409 is surfaced as one of the four §17 causes when TS-1's response body
 // names it explicitly — domain.ErrOptimisticLockConflict (record_version
 // mismatch), domain.ErrCredentialReplayRevoked (TS-D13: a replayed
-// rotation_id whose credential has since been revoked), or
-// domain.ErrServiceAccountRotationInFlight (concurrent rotation on the same
-// principal). An empty/unparseable 409 body falls back to
-// ErrServiceAccountRotationInFlight as the safe retryable default.
+// rotation_id whose credential has since been revoked),
+// domain.ErrCredentialReplayExpired (TS-D22: a replayed rotation_id past
+// ROTATION_REPLAY_WINDOW), or domain.ErrServiceAccountRotationInFlight
+// (concurrent rotation on the same principal). An empty/unparseable 409 body
+// falls back to ErrServiceAccountRotationInFlight as the safe retryable default.
 func (c *Client) IssueOrRotateCredential(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
 	url := fmt.Sprintf("%s/api/v1/internal/tenants/%s/service-accounts/%s/credentials", c.baseURL, tenantID, principalID)
 	httpReq, err := c.newRequest(ctx, http.MethodPost, url, issueOrRotateRequestBody{
@@ -206,6 +212,8 @@ func (c *Client) IssueOrRotateCredential(ctx context.Context, tenantID, principa
 			code = domain.ErrOptimisticLockConflict
 		case string(domain.ErrCredentialReplayRevoked):
 			code = domain.ErrCredentialReplayRevoked
+		case string(domain.ErrCredentialReplayExpired):
+			code = domain.ErrCredentialReplayExpired
 		}
 		return nil, domain.NewError(code, "token service credential issue/rotate conflict").
 			WithDetails(map[string]any{"tenant_id": tenantID, "principal_id": principalID, "upstream_error": errBody.Error})
@@ -230,6 +238,25 @@ func (c *Client) IssueOrRotateCredential(ctx context.Context, tenantID, principa
 		Version: body.Version, Secret: body.Secret, OpenBaoPath: body.OpenBaoPath,
 		ExpiresPriorAt: expiresPriorAt, RecordVersion: body.RecordVersion, Replayed: resp.StatusCode == http.StatusOK,
 	}, nil
+}
+
+// RevokeCredential calls TS-2
+// DELETE /api/v1/internal/tenants/:id/service-accounts/:principal_id/credentials.
+// Used during RP-3 conversion to retire the old shared-realm credential after
+// TS-1 has issued the new dedicated-realm credential — must run before the old
+// shared-realm Keycloak client is deleted.
+func (c *Client) RevokeCredential(ctx context.Context, tenantID, principalID uuid.UUID) error {
+	url := fmt.Sprintf("%s/api/v1/internal/tenants/%s/service-accounts/%s/credentials", c.baseURL, tenantID, principalID)
+	httpReq, err := c.newRequest(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(httpReq, tenantID) //nolint:bodyclose // closed via the shared httpx.CloseBody helper below
+	if err != nil {
+		return err
+	}
+	defer httpx.CloseBody(c.log, resp.Body)
+	return classifyStatus(resp.StatusCode, "TS-2", resp.Body)
 }
 
 type credentialSummaryBody struct {

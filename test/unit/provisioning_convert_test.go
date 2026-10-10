@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
 )
 
@@ -584,4 +585,133 @@ func TestConvert_NoEventPublisherInContext_StillCommitsLocally(t *testing.T) {
 	row, err := realms.FindByTenantID(context.Background(), tenantID)
 	require.NoError(t, err)
 	assert.Equal(t, domain.RealmStrategyDedicated, row.Strategy)
+}
+
+// CRITICAL (RP-GAP-004, TS-RP-GAP-002): RP-3 must call TS-4 (RegisterPrincipal
+// with the new dedicated-realm sub) → TS-1 (IssueOrRotateCredential for the
+// new credential) → TS-2 (RevokeCredential on the old shared-realm credential)
+// in that strict order, all before deleting the old shared-realm Keycloak
+// client. If TS-2 ran before TS-1 there would be a window where the
+// platform-automation principal has no valid credential; if the client deletion
+// ran before TS-2 the old credential would outlive the client it was issued for.
+func TestConvert_PrincipalLifecycleSequence_TS4_TS1_TS2_ThenClientDelete(t *testing.T) {
+	var callOrder []string
+
+	kc := &mockKeycloakAdmin{}
+	kc.CreateServiceAccountClientFn = func(ctx context.Context, realmName, clientID, jwksURL string) (uuid.UUID, bool, error) {
+		return uuid.New(), true, nil
+	}
+	kc.DeleteServiceAccountClientIfExistsFn = func(ctx context.Context, realmName, clientID string) error {
+		callOrder = append(callOrder, "delete-old-client")
+		return nil
+	}
+
+	oldPrincipalID := uuid.New()
+	ts := &mockTokenServiceClient{
+		JWKSURLForFn: func(tenantID uuid.UUID) string {
+			return "http://ts.test/jwks/" + tenantID.String()
+		},
+		RegisterPrincipalFn: func(ctx context.Context, tenantID uuid.UUID, req port.RegisterPrincipalRequest) (*port.RegisterPrincipalResult, error) {
+			callOrder = append(callOrder, "TS-4")
+			return &port.RegisterPrincipalResult{PrincipalID: oldPrincipalID, Created: false, RecordVersion: 2}, nil
+		},
+		IssueOrRotateCredentialFn: func(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
+			callOrder = append(callOrder, "TS-1")
+			return &port.IssueCredentialResult{Version: 2, Secret: "new-secret", OpenBaoPath: "iam/test/v2", RecordVersion: 2}, nil
+		},
+		RevokeCredentialFn: func(ctx context.Context, tenantID, principalID uuid.UUID) error {
+			callOrder = append(callOrder, "TS-2")
+			assert.Equal(t, oldPrincipalID, principalID, "TS-2 must target the old shared-realm principal")
+			return nil
+		},
+	}
+
+	realms := newMockTenantRealmRepository()
+	idem := newMockIdempotencyStore()
+	tx, _ := newMockTxRunner()
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
+
+	tenantID := uuid.New()
+	oldClientID := "platform-automation-" + tenantID.String()
+	seedSharedRealm(realms, tenantID)
+	realms.rows[tenantID].ServiceAccountPrincipalID = &oldPrincipalID
+	realms.rows[tenantID].ServiceAccountKeycloakClientID = &oldClientID
+
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
+	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) { return nil, nil }
+	kc.ListUsersByTenantFn = func(ctx context.Context, realmName string, tid uuid.UUID) ([]uuid.UUID, error) { return nil, nil }
+	kc.ForceLogoutRealmFn = func(ctx context.Context, realmName string) error { return nil }
+
+	result, err := svc.Convert(context.Background(), "conv-seq-key", tenantID, service.ConvertRequest{Plan: "pro"})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	assert.Equal(t, []string{"TS-4", "TS-1", "TS-2", "delete-old-client"}, callOrder,
+		"strict ordering required: TS-4 (RegisterPrincipal) → TS-1 (IssueOrRotate) → "+
+			"TS-2 (RevokeCredential) → delete old shared-realm Keycloak client")
+}
+
+// TS-2 failure is best-effort: a revocation error must not fail an already-
+// committed conversion, only get logged as WARN.
+func TestConvert_TS2RevokeCredentialFails_NonFatal(t *testing.T) {
+	kc := &mockKeycloakAdmin{}
+	ts := wirePlatformAutomationHappyPath(kc)
+	logger := &mockLogger{}
+	ts.RevokeCredentialFn = func(ctx context.Context, tenantID, principalID uuid.UUID) error {
+		return domain.NewError(domain.ErrTokenServiceUnavailable, "ts down")
+	}
+
+	realms := newMockTenantRealmRepository()
+	idem := newMockIdempotencyStore()
+	tx, _ := newMockTxRunner()
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
+	svc.WithLogger(logger)
+
+	tenantID := uuid.New()
+	oldPrincipalID := uuid.New()
+	oldClientID := "platform-automation-" + tenantID.String()
+	seedSharedRealm(realms, tenantID)
+	realms.rows[tenantID].ServiceAccountPrincipalID = &oldPrincipalID
+	realms.rows[tenantID].ServiceAccountKeycloakClientID = &oldClientID
+
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
+	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) { return nil, nil }
+	kc.ListUsersByTenantFn = func(ctx context.Context, realmName string, tid uuid.UUID) ([]uuid.UUID, error) { return nil, nil }
+	kc.ForceLogoutRealmFn = func(ctx context.Context, realmName string) error { return nil }
+
+	result, err := svc.Convert(context.Background(), "conv-ts2-fail", tenantID, service.ConvertRequest{Plan: "pro"})
+	require.NoError(t, err, "TS-2 failure must not fail an already-committed conversion")
+	assert.Equal(t, "dedicated", result.Strategy)
+	assert.GreaterOrEqual(t, logger.warnCalls, 1, "TS-2 failure must be logged as WARN")
+}
+
+// When ServiceAccountPrincipalID is nil (legacy row provisioned before
+// mintPlatformAutomation was added), TS-2 must not be called — there is
+// no old credential to revoke.
+func TestConvert_NoPriorPrincipal_TS2Skipped(t *testing.T) {
+	kc := &mockKeycloakAdmin{}
+	ts := wirePlatformAutomationHappyPath(kc)
+	ts.RevokeCredentialFn = func(ctx context.Context, tenantID, principalID uuid.UUID) error {
+		t.Fatal("TS-2 must not be called when there is no prior principal (oldPrincipalID == nil)")
+		return nil
+	}
+
+	realms := newMockTenantRealmRepository()
+	idem := newMockIdempotencyStore()
+	tx, _ := newMockTxRunner()
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
+
+	tenantID := uuid.New()
+	seedSharedRealm(realms, tenantID)
+	// ServiceAccountPrincipalID intentionally left nil — legacy row with no
+	// prior platform-automation mint.
+
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
+	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) { return nil, nil }
+	kc.ListUsersByTenantFn = func(ctx context.Context, realmName string, tid uuid.UUID) ([]uuid.UUID, error) { return nil, nil }
+	kc.ForceLogoutRealmFn = func(ctx context.Context, realmName string) error { return nil }
+
+	result, err := svc.Convert(context.Background(), "conv-no-old-principal", tenantID, service.ConvertRequest{Plan: "pro"})
+	require.NoError(t, err)
+	assert.Equal(t, "dedicated", result.Strategy)
 }
