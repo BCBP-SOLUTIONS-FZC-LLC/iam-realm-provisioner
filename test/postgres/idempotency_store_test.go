@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
@@ -273,5 +274,96 @@ func TestIdempotencyRepository(t *testing.T) {
 			Scan(&status, &ownerTenantID))
 		assert.Equal(t, "in_progress", status, "tenant A's original row must be completely untouched by tenant B's collision")
 		assert.Equal(t, tenantA.String(), ownerTenantID)
+	})
+}
+
+// TestIdempotencyRepository_ExpireStaleInProgress covers the idempotency-cleanup
+// job path (§9.2): rows that remain in_progress longer than a TTL threshold
+// are transitioned to failed, unblocking callers whose key was stuck after a
+// 503 mid-operation (the transaction rolled back before Fail could run).
+//
+// provisioning_operations is RLS-scoped, so:
+//   - Begin/Complete/Fail use the app pool (tenant GUC injected via tctx).
+//   - ExpireStaleInProgress is a cross-tenant sweep and uses sysPool (BYPASSRLS),
+//     matching how cmd/reconciler wires it: pgadapter.NewIdempotencyRepository(sysPool).
+func TestIdempotencyRepository_ExpireStaleInProgress(t *testing.T) {
+	t.Parallel()
+	appPool, rawPool := setupTestDB(t)
+	sysPool := setupSysPool(t, rawPool)
+	ctx := context.Background()
+	// App-pool repo for tenant-scoped operations (Begin/Complete/Fail).
+	repo := pgadapter.NewIdempotencyRepository(appPool)
+	// Sys-pool repo for the cross-tenant expire sweep — matches reconciler wiring.
+	sysRepo := pgadapter.NewIdempotencyRepository(sysPool)
+	tenantID := uuid.New()
+	tctx := withTenant(ctx, tenantID)
+
+	t.Run("ExpiresRowsOlderThanTTL", func(t *testing.T) {
+		key := "expire-old-" + uuid.NewString()
+		_, _, err := repo.Begin(tctx, key, tenantID, domain.OpProvisionTrial)
+		require.NoError(t, err)
+		// Backdate the row so it appears stale.
+		_, err = rawPool.Exec(ctx,
+			`UPDATE provisioning_operations SET created_at = now() - interval '2 hours' WHERE idempotency_key = $1`, key)
+		require.NoError(t, err)
+
+		n, err := sysRepo.ExpireStaleInProgress(ctx, time.Hour, 100)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, n, 1, "at least the backdated row must be expired")
+
+		var status string
+		require.NoError(t, rawPool.QueryRow(ctx,
+			`SELECT status FROM provisioning_operations WHERE idempotency_key = $1`, key).Scan(&status))
+		assert.Equal(t, "failed", status, "expired row must be transitioned to failed so the next Begin reclaims it")
+	})
+
+	t.Run("DoesNotExpireRecentRows", func(t *testing.T) {
+		key := "expire-recent-" + uuid.NewString()
+		_, _, err := repo.Begin(tctx, key, tenantID, domain.OpProvisionTrial)
+		require.NoError(t, err)
+
+		n, err := sysRepo.ExpireStaleInProgress(ctx, time.Hour, 100)
+		require.NoError(t, err)
+		// Only rows older than 1 hour should be expired; this row was just inserted.
+		var status string
+		require.NoError(t, rawPool.QueryRow(ctx,
+			`SELECT status FROM provisioning_operations WHERE idempotency_key = $1`, key).Scan(&status))
+		assert.Equal(t, "in_progress", status, "a recently inserted row must not be expired")
+		_ = n
+	})
+
+	t.Run("DoesNotExpireSucceededRows", func(t *testing.T) {
+		key := "expire-succeeded-" + uuid.NewString()
+		_, _, err := repo.Begin(tctx, key, tenantID, domain.OpProvisionTrial)
+		require.NoError(t, err)
+		require.NoError(t, repo.Complete(tctx, key, nil))
+		// Backdate to ensure it would be expired if it were in_progress.
+		_, err = rawPool.Exec(ctx,
+			`UPDATE provisioning_operations SET created_at = now() - interval '2 hours' WHERE idempotency_key = $1`, key)
+		require.NoError(t, err)
+
+		_, err = sysRepo.ExpireStaleInProgress(ctx, time.Hour, 100)
+		require.NoError(t, err)
+
+		var status string
+		require.NoError(t, rawPool.QueryRow(ctx,
+			`SELECT status FROM provisioning_operations WHERE idempotency_key = $1`, key).Scan(&status))
+		assert.Equal(t, "succeeded", status, "a succeeded row must never be expired regardless of age")
+	})
+
+	t.Run("RespectsLimit", func(t *testing.T) {
+		// Insert 3 stale rows; expire with limit=2.
+		for i := 0; i < 3; i++ {
+			key := "expire-limit-" + uuid.NewString()
+			_, _, err := repo.Begin(tctx, key, tenantID, domain.OpProvisionTrial)
+			require.NoError(t, err)
+			_, err = rawPool.Exec(ctx,
+				`UPDATE provisioning_operations SET created_at = now() - interval '2 hours' WHERE idempotency_key = $1`, key)
+			require.NoError(t, err)
+		}
+
+		n, err := sysRepo.ExpireStaleInProgress(ctx, time.Hour, 2)
+		require.NoError(t, err)
+		assert.Equal(t, 2, n, "must expire at most limit rows per call")
 	})
 }

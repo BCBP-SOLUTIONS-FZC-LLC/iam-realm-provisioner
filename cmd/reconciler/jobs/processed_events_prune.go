@@ -26,11 +26,14 @@ func ProcessedEventsPrune(ctx context.Context, jctx *Context) (Result, error) {
 		batchLimit = defaultPruneBatchLimit
 	}
 	n, err := jctx.ProcessedEvents.Prune(ctx, jctx.ProcessedEventsTTLDays, batchLimit)
+	// Assign the partial count before checking the error: InboxStoreAdapter.Prune
+	// iterates per-consumer and returns (rowsDeletedSoFar, err) on a mid-loop
+	// failure, so the caller logs the actual deleted count even on partial failure.
+	res.Attempted = n
+	res.Succeeded = n
 	if err != nil {
 		return res, err
 	}
-	res.Attempted = n
-	res.Succeeded = n
 	jctx.Logger.InfoContext(ctx, "processed-events-prune complete", "pruned", n)
 	return res, nil
 }

@@ -10,7 +10,7 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/eventschema"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
 )
 
 // errSchemaViolation marks a consumed payload that fails its
@@ -63,9 +63,13 @@ func validateConsumed(consumer string, h events.Handler, v payloadValidator, log
 	}
 }
 
-// inboundHandler composes the full inbound pipeline for one queue,
-// outermost first: platform_messages_* counters (so schema rejects count as
-// failed) → consumed-schema validation → the consumer's own Handle.
+// inboundHandler composes the full inbound pipeline for one queue:
+// consumed-schema validation → the consumer's own Handle. platform-events v2
+// records platform_messages_received/processed/failed_total and
+// platform_event_propagation_seconds automatically around every handler
+// invocation (the SQS consumer calls ObservePropagation on first receipt
+// only, so DLQ redrives do not corrupt the histogram), so no additional
+// wrapper is needed here.
 func inboundHandler(consumer string, h events.Handler, v payloadValidator, log port.Logger) events.Handler {
-	return instrumentConsumer(consumer, validateConsumed(consumer, h, v, log))
+	return validateConsumed(consumer, h, v, log)
 }

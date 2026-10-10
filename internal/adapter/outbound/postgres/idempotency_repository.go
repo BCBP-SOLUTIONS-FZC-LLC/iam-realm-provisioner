@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -114,4 +115,30 @@ func (r *IdempotencyRepository) Fail(ctx context.Context, key string) error {
 			WHERE idempotency_key = $1`, key)
 		return err
 	})
+}
+
+// ExpireStaleInProgress transitions `in_progress` rows older than olderThan
+// to `failed`, up to limit rows per call. This unblocks callers that received
+// a 503 mid-operation whose transaction rolled back before Fail was called —
+// without this, the key stays stuck in_progress and every retry returns 409.
+// Returns the count of rows transitioned. Uses a subquery+LIMIT so a large
+// backlog converges over multiple job ticks rather than one unbounded UPDATE.
+func (r *IdempotencyRepository) ExpireStaleInProgress(ctx context.Context, olderThan time.Duration, limit int) (int, error) {
+	var n int
+	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE provisioning_operations SET status = 'failed', completed_at = now()
+			WHERE idempotency_key IN (
+				SELECT idempotency_key FROM provisioning_operations
+				WHERE status = 'in_progress'
+				  AND created_at < now() - ($1::float8 * interval '1 second')
+				LIMIT $2
+			)`, olderThan.Seconds(), limit)
+		if err != nil {
+			return err
+		}
+		n = int(tag.RowsAffected())
+		return nil
+	})
+	return n, err
 }

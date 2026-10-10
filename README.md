@@ -1,6 +1,6 @@
 # iam-realm-provisioner
 
-The Realm Provisioner Service — the **single writer to the Keycloak Admin API** (RP-INV-1) and the system of record for tenant identity lifecycle in the IAM subsystem. It provisions and tears down Keycloak realms and users, migrates trial tenants into dedicated realms, configures per-tenant SAML/OIDC identity providers (secrets held only in OpenBao, never Postgres), and drives the tenant lifecycle state machine (trial → active → suspended → offboarded) via six scheduled reconciler jobs.
+The Realm Provisioner Service — the **single writer to the Keycloak Admin API** (RP-INV-1) and the system of record for tenant identity lifecycle in the IAM subsystem. It provisions and tears down Keycloak realms and users, migrates trial tenants into dedicated realms, configures per-tenant SAML/OIDC identity providers (secrets held only in OpenBao, never Postgres), and drives the tenant lifecycle state machine (trial → active → suspended → offboarded) via seven scheduled reconciler jobs.
 
 **Repository:** `github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`
 **Module:** Go 1.26.6 · private module · deployed as two binaries from one image (`cmd/server`, `cmd/reconciler`)
@@ -127,7 +127,7 @@ Clean Architecture — dependencies point inward; outer layers never import inne
 iam-realm-provisioner/
 ├── cmd/
 │   ├── server/                        # HTTP composition root: pool+GUC wiring, migrations, outbox runner, 3 SQS consumers
-│   └── reconciler/                    # Single binary, --job=<name>; jobs/ holds the 6 CronJob entry points
+│   └── reconciler/                    # Single binary, --job=<name>; jobs/ holds the 7 CronJob entry points
 ├── internal/
 │   ├── core/
 │   │   ├── domain/                    # Entities, value objects, ErrorCode taxonomy (§17), event payload structs — no deps beyond google/uuid

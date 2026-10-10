@@ -9,8 +9,8 @@ import (
 	"encoding/json"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/outbox"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/outbox"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 )
 
 // Context is the dependency bag every reconciler function accepts.
@@ -39,6 +39,10 @@ type Context struct {
 	OutboxRetentionDays       int
 	ProcessedEventsTTLDays    int
 	MaxReconciliationAttempts int
+	// InProgressTTLHours is the age threshold (in hours) above which
+	// `in_progress` provisioning_operations rows are expired to `failed` by
+	// the idempotency-cleanup job. Defaults to 1 hour when 0.
+	InProgressTTLHours int
 }
 
 // Result summarizes a reconciler run.

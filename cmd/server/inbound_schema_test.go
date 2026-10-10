@@ -7,13 +7,15 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	eventbusadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/eventbus"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/eventschema"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
 )
 
 // These tests run against the REAL embedded consumed-message schemas
@@ -38,6 +40,14 @@ func realConsumedValidator(t *testing.T, consumer string) payloadValidator {
 
 func envOf(eventType, payload string) events.Envelope[json.RawMessage] {
 	return events.Envelope[json.RawMessage]{ID: uuid.NewString(), Type: eventType, Source: "test", Payload: json.RawMessage(payload)}
+}
+
+// counterVal reads a prometheus.Counter's current value.
+func counterVal(t *testing.T, c prometheus.Counter) float64 {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, c.Write(&m))
+	return m.GetCounter().GetValue()
 }
 
 func TestConsumedValidator_EveryConsumerCompiles(t *testing.T) {
@@ -65,6 +75,7 @@ func TestValidateConsumed_ValidPayloads_ReachHandler(t *testing.T) {
 }
 
 func TestValidateConsumed_Violations_RejectedBeforeHandler(t *testing.T) {
+	ensureMetricsRegistered(t)
 	cases := map[string]struct{ consumer, eventType, payload string }{
 		"missing required field": {"membership", "TenantRoleGranted", `{"user_id":"` + uuid.NewString() + `","tenant_id":"` + uuid.NewString() + `","role_code":"tenant_admin"}`},
 		"enum violation":         {"membership", "DepartmentMembershipLevelChanged", `{"user_id":"` + uuid.NewString() + `","tenant_id":"` + uuid.NewString() + `","department_id":"` + uuid.NewString() + `","previous_level":"reviewer","new_level":"boss","actor_id":"` + uuid.NewString() + `"}`},
@@ -74,8 +85,7 @@ func TestValidateConsumed_Violations_RejectedBeforeHandler(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			ensureMetricsRegistered(t)
-			before := counterValue(t, metrics.ConsumedSchemaViolationsTotal.WithLabelValues(tc.consumer, tc.eventType))
+			before := counterVal(t, metrics.ConsumedSchemaViolationsTotal.WithLabelValues(tc.consumer, tc.eventType))
 			inner := &recordingHandler{}
 			log := &fakeLogger{}
 			h := validateConsumed(tc.consumer, inner.handle, realConsumedValidator(t, tc.consumer), log)
@@ -84,7 +94,7 @@ func TestValidateConsumed_Violations_RejectedBeforeHandler(t *testing.T) {
 			assert.ErrorIs(t, err, errSchemaViolation)
 			assert.Zero(t, inner.calls, "a violating payload must never reach the handler")
 			assert.Equal(t, int32(1), log.warnCalls)
-			assert.Equal(t, before+1, counterValue(t, metrics.ConsumedSchemaViolationsTotal.WithLabelValues(tc.consumer, tc.eventType)))
+			assert.Equal(t, before+1, counterVal(t, metrics.ConsumedSchemaViolationsTotal.WithLabelValues(tc.consumer, tc.eventType)))
 		})
 	}
 }
@@ -134,13 +144,14 @@ func TestValidateConsumed_HandlerErrorPropagatesUnchanged(t *testing.T) {
 	assert.Same(t, transient, err)
 }
 
-// TestInboundHandler_SchemaViolation_CountsAsFailed exercises the composed
-// pipeline: the violation is returned (so SQS retries until redrive) and
-// instrumentConsumer records it as failed, never processed.
-func TestInboundHandler_SchemaViolation_CountsAsFailed(t *testing.T) {
+// TestInboundHandler_SchemaViolation_ReturnedAsError verifies that a schema
+// violation on the composed pipeline is returned as errSchemaViolation (SQS
+// redelivery path) and never reaches the inner handler. platform-events v2
+// records platform_messages_failed_total automatically from its own consumer
+// loop — no additional assertion needed here.
+func TestInboundHandler_SchemaViolation_ReturnedAsError(t *testing.T) {
 	ensureMetricsRegistered(t)
-	beforeFail := counterValue(t, metrics.PlatformMessagesFailedTotal.WithLabelValues("billing"))
-	beforeProc := counterValue(t, metrics.PlatformMessagesProcessedTotal.WithLabelValues("billing"))
+	before := counterVal(t, metrics.ConsumedSchemaViolationsTotal.WithLabelValues("billing", "TenantReactivated"))
 
 	inner := &recordingHandler{}
 	h := inboundHandler("billing", inner.handle, realConsumedValidator(t, "billing"), &fakeLogger{})
@@ -148,6 +159,5 @@ func TestInboundHandler_SchemaViolation_CountsAsFailed(t *testing.T) {
 
 	assert.ErrorIs(t, err, errSchemaViolation)
 	assert.Zero(t, inner.calls)
-	assert.Equal(t, beforeFail+1, counterValue(t, metrics.PlatformMessagesFailedTotal.WithLabelValues("billing")))
-	assert.Equal(t, beforeProc, counterValue(t, metrics.PlatformMessagesProcessedTotal.WithLabelValues("billing")))
+	assert.Equal(t, before+1, counterVal(t, metrics.ConsumedSchemaViolationsTotal.WithLabelValues("billing", "TenantReactivated")))
 }

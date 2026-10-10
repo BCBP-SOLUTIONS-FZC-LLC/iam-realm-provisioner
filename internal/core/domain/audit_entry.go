@@ -37,8 +37,9 @@ const (
 
 // AuditActor is AL-5's actor object.
 type AuditActor struct {
-	Type string `json:"type"`
-	ID   string `json:"id"`
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+	Display string `json:"display,omitempty"`
 }
 
 // AuditTarget is AL-5's target object.

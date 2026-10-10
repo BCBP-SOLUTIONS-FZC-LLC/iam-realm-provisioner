@@ -8,7 +8,7 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
 )
 
 // skipDuplicate is the cheap processed_events probe every known-type
@@ -22,9 +22,6 @@ func skipDuplicate(ctx context.Context, dedup port.ProcessedEventsStore, consume
 	if processed {
 		if metrics.ProcessedEventsDuplicates != nil {
 			metrics.ProcessedEventsDuplicates.WithLabelValues(string(consumer)).Inc()
-		}
-		if metrics.DuplicateMessagesTotal != nil {
-			metrics.DuplicateMessagesTotal.WithLabelValues(string(consumer)).Inc()
 		}
 		return true, nil
 	}
@@ -43,9 +40,9 @@ var sourceTopic = map[domain.ProcessedEventsConsumer]string{
 
 // ackUnknown is the O&M forward-compat path: an event type with no wired
 // handler is logged, counted, and recorded in processed_events inside a
-// RunInTx so redelivery does not storm the same unknown type. platform-events
-// has no processed-events API — Envelope.ID + INSERT ON CONFLICT DO NOTHING
-// is the library's documented consumer pattern.
+// RunInTx so redelivery does not storm the same unknown type. MarkProcessed
+// goes through InboxStoreAdapter which delegates to platform-events
+// inbox.Store for the actual SQL.
 func ackUnknown(ctx context.Context, tx port.TxRunner, dedup port.ProcessedEventsStore, log port.Logger, consumer domain.ProcessedEventsConsumer, env events.Envelope[json.RawMessage]) error {
 	topic := sourceTopic[consumer]
 	if metrics.UnknownEventAcknowledged != nil {

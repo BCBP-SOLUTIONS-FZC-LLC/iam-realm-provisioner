@@ -43,7 +43,9 @@ func TestConfigureIdp_NewConfig_EnqueuesCreateAuditEntry(t *testing.T) {
 	assert.Equal(t, domain.Source, e.SourceService)
 	assert.Equal(t, domain.AuditActionCreate, e.Action)
 	assert.Equal(t, &domain.AuditTarget{Type: "idp", ID: "acme-sso"}, e.Target)
-	assert.Equal(t, domain.AuditActor{Type: domain.AuditActorIAMSystem, ID: domain.SystemActorID}, e.Actor)
+	// idp_service.go stamps the system actor's Display with the service name so
+	// audit consumers can attribute the entry without cross-referencing the actor ID.
+	assert.Equal(t, domain.AuditActor{Type: domain.AuditActorIAMSystem, ID: domain.SystemActorID, Display: domain.Source}, e.Actor)
 	assert.False(t, e.OccurredAt.IsZero())
 	var meta map[string]any
 	require.NoError(t, json.Unmarshal(e.Metadata, &meta))

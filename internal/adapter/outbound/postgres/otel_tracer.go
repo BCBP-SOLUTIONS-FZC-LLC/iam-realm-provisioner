@@ -3,8 +3,7 @@ package postgres
 import (
 	"context"
 
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/trace"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 )
 
 // OTelTracer adapts the process-global TracerProvider that
@@ -13,7 +12,7 @@ import (
 // exports through the same OTLP pipeline as HTTP spans — matching the
 // sibling iam-org-membership wiring.
 type OTelTracer struct {
-	tracer trace.Tracer
+	tracer gincommon.Tracer
 }
 
 // NewOTelTracer returns a pgcommon.Config.Tracer backed by gincommon's
@@ -23,7 +22,7 @@ func NewOTelTracer(serviceName string) *OTelTracer {
 	if serviceName == "" {
 		serviceName = "iam-realm-provisioner"
 	}
-	return &OTelTracer{tracer: otel.Tracer(serviceName)}
+	return &OTelTracer{tracer: gincommon.NewTracer(serviceName)}
 }
 
 // StartSpan starts a span named name and returns the child context together

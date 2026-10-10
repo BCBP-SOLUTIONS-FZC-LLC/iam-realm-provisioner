@@ -159,6 +159,11 @@ env:
   RETENTION_DAYS: "90"
   RECONCILER_BATCH_LIMIT: "100"
   RECONCILER_TIMEOUT: "5m"
+  # idempotency-cleanup CronJob (§9.2): provisioning_operations rows that
+  # remain in_progress longer than this threshold (hours) are expired to
+  # failed, unblocking callers whose key was stuck after a 503 mid-operation.
+  # 1 hour >> any request timeout (35s HTTP + 8s Keycloak) — safe default.
+  IDEMPOTENCY_IN_PROGRESS_TTL_HOURS: "1"
 
   DOCS_ENABLED: "false"
 
@@ -367,7 +372,10 @@ cronjobs:
     concurrencyPolicy: Forbid
     successfulJobsHistoryLimit: 3
     failedJobsHistoryLimit: 3
-    activeDeadlineSeconds: 600
+    # Must exceed RECONCILER_TIMEOUT (5m/300s) so the application's internal
+    # context deadline fires first and the job exits cleanly before Kubernetes
+    # hard-kills it. 360s = 300s + 60s buffer (same as realmConfigReconcile).
+    activeDeadlineSeconds: 360
     resources:
       requests:
         cpu: 100m
@@ -382,7 +390,8 @@ cronjobs:
     concurrencyPolicy: Forbid
     successfulJobsHistoryLimit: 3
     failedJobsHistoryLimit: 3
-    activeDeadlineSeconds: 600
+    # Must exceed RECONCILER_TIMEOUT (5m/300s) — same reasoning as trialExpiry above.
+    activeDeadlineSeconds: 360
     resources:
       requests:
         cpu: 100m
@@ -464,6 +473,22 @@ cronjobs:
     # Must exceed RECONCILER_TIMEOUT (5m/300s) — see realmConfigReconcile's
     # comment above for why an equal value hard-kills the Job before the
     # app's own internal deadline can fire.
+    activeDeadlineSeconds: 360
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 128Mi
+  idempotencyCleanup:
+    enabled: true
+    schedule: "0 5 * * *"        # daily at 05:00 — offset from lifecycle crons
+    jobName: idempotency-cleanup
+    concurrencyPolicy: Forbid
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    # Must exceed RECONCILER_TIMEOUT (5m/300s).
     activeDeadlineSeconds: 360
     resources:
       requests:

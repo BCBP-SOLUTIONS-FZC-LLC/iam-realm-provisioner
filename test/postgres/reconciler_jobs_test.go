@@ -21,8 +21,9 @@ import (
 	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/test/dbseed"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/outbox"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/inbox"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/outbox"
 )
 
 // noopEventPublisher backs the real outbox.Runner these OutboxPrune tests
@@ -328,6 +329,15 @@ func TestProcessedEventsPrune(t *testing.T) {
 	sysPool := setupSysPool(t, rawPool)
 	ctx := context.Background()
 
+	newAdapter := func() *pgadapter.InboxStoreAdapter {
+		newStore := func(c string) *inbox.Store {
+			s, err := inbox.NewStore(sysPool, c)
+			require.NoError(t, err)
+			return s
+		}
+		return pgadapter.NewInboxStoreAdapter(newStore("membership"), newStore("tenant"), newStore("billing"))
+	}
+
 	t.Run("DeletesOnlyRowsOlderThanTTL", func(t *testing.T) {
 		oldEventA := uuid.NewString()
 		oldEventB := uuid.NewString()
@@ -337,7 +347,7 @@ func TestProcessedEventsPrune(t *testing.T) {
 		insertProcessedEventAt(t, ctx, rawPool, recentEvent, "billing", time.Now().UTC().Add(-1*24*time.Hour))
 
 		jctx := &jobs.Context{
-			ProcessedEvents:        pgadapter.NewProcessedEventsRepository(sysPool),
+			ProcessedEvents:        newAdapter(),
 			Logger:                 port.NewSlogStyleLogger(noopLogger{}),
 			ProcessedEventsTTLDays: 7,
 			BatchLimit:             500,
@@ -357,7 +367,7 @@ func TestProcessedEventsPrune(t *testing.T) {
 		insertProcessedEventAt(t, ctx, rawPool, recentEvent, "tenant", time.Now().UTC())
 
 		jctx := &jobs.Context{
-			ProcessedEvents:        pgadapter.NewProcessedEventsRepository(sysPool),
+			ProcessedEvents:        newAdapter(),
 			Logger:                 port.NewSlogStyleLogger(noopLogger{}),
 			ProcessedEventsTTLDays: 7,
 			BatchLimit:             500,
@@ -381,7 +391,7 @@ func TestProcessedEventsPrune(t *testing.T) {
 		insertProcessedEventAt(t, ctx, rawPool, oldEvent, "tenant", time.Now().UTC().Add(-10*24*time.Hour))
 
 		jctx := &jobs.Context{
-			ProcessedEvents:        pgadapter.NewProcessedEventsRepository(sysPool),
+			ProcessedEvents:        newAdapter(),
 			Logger:                 port.NewSlogStyleLogger(noopLogger{}),
 			ProcessedEventsTTLDays: 7,
 			// BatchLimit deliberately left unset (0) — must fall back to

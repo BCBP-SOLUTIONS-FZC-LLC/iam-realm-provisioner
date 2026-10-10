@@ -283,7 +283,7 @@ func idpAuditEntry(ctx context.Context, tenantID uuid.UUID, alias, action string
 	metaJSON, _ := json.Marshal(metadata) //nolint:errcheck // map[string]any with plain serialisable values: cannot fail
 	entry := domain.AuditEntry{
 		TenantID: tenantID, EntryType: domain.AuditEntryTypeIdpChanged, Action: action,
-		Actor:      domain.AuditActor{Type: domain.AuditActorIAMSystem, ID: domain.SystemActorID},
+		Actor:      domain.AuditActor{Type: domain.AuditActorIAMSystem, ID: domain.SystemActorID, Display: domain.Source},
 		Target:     &domain.AuditTarget{Type: "idp", ID: alias},
 		OccurredAt: time.Now().UTC(), SourceService: domain.Source,
 		SourceEventType: domain.AuditSourceTenantIdpConfigChanged,

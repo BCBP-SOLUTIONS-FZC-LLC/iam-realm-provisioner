@@ -17,7 +17,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"go.opentelemetry.io/otel"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/cmd/reconciler/jobs"
 	eventbusadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/eventbus"
@@ -26,12 +25,14 @@ import (
 	orgmembershipadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/orgmembership"
 	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
 	s3adapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/s3"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/outbox"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/inbox"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/outbox"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/logger"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 )
 
 var registry = map[string]jobs.Func{
@@ -41,6 +42,7 @@ var registry = map[string]jobs.Func{
 	"realm-config-reconcile": jobs.RealmConfigReconcile,
 	"outbox-prune":           jobs.OutboxPrune,
 	"processed-events-prune": jobs.ProcessedEventsPrune,
+	"idempotency-cleanup":    jobs.IdempotencyCleanup,
 }
 
 func main() {
@@ -89,6 +91,8 @@ func run() int {
 		Logger:       rawLog,
 		ServiceName:  serviceName,
 		BuildVersion: envOr("BUILD_VERSION", "dev"),
+		Domain:       "iam",
+		Environment:  appEnv,
 	})
 	metrics.Register(appEnv)
 
@@ -101,7 +105,7 @@ func run() int {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	ctx, jobSpan := otel.Tracer(serviceName).Start(ctx, "reconciler."+jobName)
+	ctx, jobSpan := gincommon.NewTracer(serviceName).Start(ctx, "reconciler."+jobName)
 	defer jobSpan.End()
 
 	queryTracer := pgadapter.NewOTelTracer(serviceName)
@@ -110,7 +114,6 @@ func run() int {
 	for _, w := range pgWarnings {
 		log.Warn("postgres config warning", "key", w.Key, "reason", w.Reason)
 	}
-	pgCfg.DSN = pgadapter.DSNFromEnv()
 	pgCfg.GUCProvider = pgcommon.GUCSetFromContext
 	pgCfg.Logger = pgadapter.NewLoggerAdapter(rawLog)
 	pgCfg.Tracer = queryTracer
@@ -146,7 +149,19 @@ func run() int {
 	// (no GUCProvider, PGBouncerMode forced true, ConfigFromEnv pool
 	// sizing). Tracer is wired separately so db.query spans export
 	// through gincommon's TracerProvider.
-	sysCfg := pgadapter.SystemPoolConfig(pgadapter.SystemDSNFromEnv(), rawLog)
+	//
+	// SYSTEM_DATABASE_URL must point to the BYPASSRLS role
+	// (realm_provisioner_migrator, §10.1) in production. Without it, sysPool
+	// falls back to the app DSN and every cross-tenant reconciler query
+	// (RP-C1..RP-C4) is RLS-filtered to zero rows, silently disabling
+	// all lifecycle maintenance including GDPR hard-delete.
+	sysDSNStr := pgadapter.SystemDSNFromEnv()
+	if sysDSNStr == pgCfg.DSN && appEnv != "dev" && appEnv != "development" && appEnv != "local" && appEnv != "test" {
+		drainPools()
+		die("startup aborted: SYSTEM_DATABASE_URL is not set — reconciler jobs require a BYPASSRLS role; " +
+			"without it all cross-tenant queries are RLS-filtered to zero rows and RP-C3 GDPR hard-delete is silently disabled")
+	}
+	sysCfg := pgadapter.SystemPoolConfig(sysDSNStr, rawLog)
 	sysCfg.Tracer = queryTracer
 	sysPool, err = pgcommon.NewPool(ctx, sysCfg)
 	if err != nil {
@@ -166,9 +181,14 @@ func run() int {
 		BaseURL:      mustEnv("KEYCLOAK_BASE_URL", appEnv),
 		AdminRealm:   envOr("KEYCLOAK_ADMIN_REALM", "master"),
 		ClientID:     envOr("KEYCLOAK_ADMIN_CLIENT_ID", "iam-realm-provisioner"),
-		ClientSecret: mustEnv("KEYCLOAK_ADMIN_CLIENT_SECRET", appEnv),
 		RateLimitRPS: envInt("KEYCLOAK_RATE_LIMIT_RPS", 20),
 		Timeout:      envDuration("KEYCLOAK_TIMEOUT_MS", 8*time.Second),
+		SecretProvider: func(_ context.Context) (string, error) {
+			if s := os.Getenv("KEYCLOAK_ADMIN_CLIENT_SECRET"); s != "" {
+				return s, nil
+			}
+			return mustEnv("KEYCLOAK_ADMIN_CLIENT_SECRET", appEnv), nil
+		},
 	}, rawLog)
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(envOr("AWS_REGION", "ap-south-1")))
@@ -185,11 +205,12 @@ func run() int {
 		KMSKey: envOr("REALM_EXPORT_KMS_KEY", "alias/iam-realm-export"),
 	})
 
-	// SubscriptionLapseReader (RP-C3's suspend-phase trigger, O&M's I-16) is
-	// optional at the process level — only the subscription-lapse job needs
-	// it, so an unset base URL degrades that one job (WARN + skip its
-	// suspend phase, see jobs.SubscriptionLapse) rather than failing every
-	// other reconciler job's dispatch.
+	// SubscriptionLapseReader (RP-C3's suspend-phase trigger, O&M's I-16).
+	// ORG_MEMBERSHIP_BASE_URL is optional at the process level so that other
+	// reconciler jobs (RP-C1, RP-C2, RP-C4, prune) are not blocked when O&M
+	// is unreachable. The subscription-lapse job itself errors out (non-zero
+	// exit, CronJob fails) when SubscriptionLapses is nil — do not silently
+	// skip, as that would leave billing-lapsed tenants active indefinitely.
 	var subscriptionLapses port.SubscriptionLapseReader
 	if omBaseURL := envOr("ORG_MEMBERSHIP_BASE_URL", ""); omBaseURL != "" {
 		subscriptionLapses = orgmembershipadapter.New(omBaseURL, envDuration("ORG_MEMBERSHIP_TIMEOUT_MS", 5*time.Second), rawLog)
@@ -205,6 +226,27 @@ func run() int {
 		die("create outbox runner: %v", err)
 	}
 
+	// One inbox.Store per consumer for the prune job (platform-events inbox).
+	// The reconciler uses sysPool (BYPASSRLS) — prune is cross-consumer.
+	// Use domain constants (not bare string literals) so a future §25 consumer
+	// rename is caught by the compiler in both composition roots, not silently
+	// mismatched in the reconciler while the server picks up the new value.
+	membershipInbox, err := inbox.NewStore(sysPool, string(domain.ConsumerMembership))
+	if err != nil {
+		drainPools()
+		die("inbox membership store: %v", err)
+	}
+	tenantInbox, err := inbox.NewStore(sysPool, string(domain.ConsumerTenant))
+	if err != nil {
+		drainPools()
+		die("inbox tenant store: %v", err)
+	}
+	billingInbox, err := inbox.NewStore(sysPool, string(domain.ConsumerBilling))
+	if err != nil {
+		drainPools()
+		die("inbox billing store: %v", err)
+	}
+
 	jctx := &jobs.Context{
 		Pool:                   pool,
 		SysPool:                sysPool,
@@ -213,7 +255,7 @@ func run() int {
 		TenantRealms:           pgadapter.NewTenantRealmRepository(sysPool),
 		Reconciliations:        pgadapter.NewReconciliationRepository(sysPool),
 		Idempotency:            pgadapter.NewIdempotencyRepository(sysPool),
-		ProcessedEvents:        pgadapter.NewProcessedEventsRepository(sysPool),
+		ProcessedEvents:        pgadapter.NewInboxStoreAdapter(membershipInbox, tenantInbox, billingInbox),
 		Keycloak:               keycloakAdmin,
 		ObjectStore:            objectStore,
 		SubscriptionLapses:     subscriptionLapses,
@@ -229,6 +271,11 @@ func run() int {
 		// realm-config setting is given up on and surfaced for operator
 		// attention instead of retrying forever.
 		MaxReconciliationAttempts: envInt("RECONCILER_MAX_ATTEMPTS", 20),
+		// InProgressTTLHours: rows in_progress longer than this are expired to
+		// failed by idempotency-cleanup, unblocking callers whose key got stuck
+		// after a 503 mid-operation. 1 hour >> max request lifetime (35s HTTP +
+		// 8s Keycloak + pgcommon retry budget).
+		InProgressTTLHours: envInt("IDEMPOTENCY_IN_PROGRESS_TTL_HOURS", 1),
 	}
 
 	res, err := fn(ctx, jctx)

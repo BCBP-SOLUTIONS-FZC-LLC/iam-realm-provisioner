@@ -5,6 +5,25 @@ of record for tenant identity lifecycle (RP-1..RP-16), the three inbound
 SQS consumers (membership-realm-q, tenant-realm-q, billing-realm-q), and
 the iam.tenant.events topic's 9 published events.
 
+━━ PRE-INSTALL CHECKLIST ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Step 1 — Register & verify Glue event schemas (required before first install
+         and after any schema change; pod panics at startup if schemas are
+         missing from the registry):
+
+  make schema-register   # registers all 9 iam-tenant-events schemas to Glue
+  make schema-verify     # confirms each schema is AVAILABLE via GetSchemaByDefinition
+  helm install ...       # only then install/upgrade
+
+Step 2 — Verify Keycloak authenticator support (required before any Keycloak
+         version upgrade; EXT-6 platform-automation auth depends on the
+         'client-jwt' authenticator with jwks_uri support):
+
+  Check that the target Keycloak version supports ClientAuthenticatorType=
+  'client-jwt' with a jwks_uri attribute (EXT-6). A Keycloak upgrade that
+  removes or deprecates this authenticator breaks platform-automation auth
+  across all tenants. See Chart.yaml annotations.keycloak/minimum-version.
+
 ━━ REQUIRED ACTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 {{ if not .Values.existingSecret -}}

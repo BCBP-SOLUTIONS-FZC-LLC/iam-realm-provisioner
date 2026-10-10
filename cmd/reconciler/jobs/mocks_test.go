@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -285,6 +286,10 @@ func (m *mockIdempotencyStore) Fail(ctx context.Context, key string) error {
 	return nil
 }
 
+func (m *mockIdempotencyStore) ExpireStaleInProgress(_ context.Context, _ time.Duration, _ int) (int, error) {
+	return 0, nil
+}
+
 // ── mockObjectStore ────────────────────────────────────────────────────────
 
 type mockObjectStore struct {
@@ -403,6 +408,13 @@ func newTestContext() (*Context, *mockKeycloakAdmin, *mockTenantRealmRepository,
 		Logger:                    port.NewSlogStyleLogger(logger),
 		BatchLimit:                100,
 		MaxReconciliationAttempts: 20,
+		// Default no-op reader so offboard-only tests don't fail due to nil
+		// SubscriptionLapses. Override in suspend-phase tests.
+		SubscriptionLapses: &mockSubscriptionLapseReader{
+			ListLapsedSubscriptionsFn: func(_ context.Context) ([]port.LapsedSubscription, error) {
+				return nil, nil
+			},
+		},
 	}
 	return jctx, kc, realms, idem, pub, logger
 }

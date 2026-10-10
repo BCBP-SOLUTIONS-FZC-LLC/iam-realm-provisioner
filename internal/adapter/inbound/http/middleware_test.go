@@ -13,14 +13,17 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/pkg/requestctx"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
-	pgdomain "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/domain"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
+	pgdomain "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/domain"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 )
 
 // testGinConfig is a minimal gincommon.Config for tests that need the real
 // ProtectedMiddlewares chain (RequireAuth + ContextMiddleware) ahead of
 // GUCBridgeMiddleware, matching router.go's actual wiring order.
-var testGinConfig = gincommon.Config{ServiceName: "iam-realm-provisioner-test"}
+// BuildVersion is set explicitly so gincommon does not fall back to reading the
+// BUILD_VERSION env var (which the Makefile sets to the git SHA), which would
+// conflict with testmain_test.go's "test" initialization under make test-ci.
+var testGinConfig = gincommon.Config{ServiceName: "iam-realm-provisioner", Domain: "iam", Environment: "test", BuildVersion: "test"}
 
 func init() { gin.SetMode(gin.TestMode) }
 

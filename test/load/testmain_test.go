@@ -13,6 +13,8 @@ import (
 func TestMain(m *testing.M) {
 	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{
 		ServiceName:  "iam-realm-provisioner",
+		Domain:      "iam",
+		Environment: "test",
 		BuildVersion: "test",
 	})
 	metrics.Register("test")

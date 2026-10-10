@@ -36,12 +36,7 @@ func (a *Admin) begin(ctx context.Context, op string) (opCtx context.Context, do
 	start := time.Now()
 	return ctx, func(err error) {
 		dur := time.Since(start).Seconds()
-		outcome := "success"
-		if err != nil {
-			outcome = "failure"
-		}
 		metrics.KeycloakCallDuration.WithLabelValues(op).Observe(dur)
-		metrics.DependencyRequestDuration.WithLabelValues("keycloak", op, outcome).Observe(dur)
 		if err != nil {
 			metrics.KeycloakCallFailuresTotal.WithLabelValues(op).Inc()
 			span.RecordError(err)

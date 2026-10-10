@@ -52,24 +52,16 @@ func noOffboardCandidates(jctx *Context) {
 		}
 }
 
-// ── SubscriptionLapses == nil: suspend phase skipped, offboard phase still
-// runs (this is the behavior change from the RP-C3 rewrite). ──────────────
+// ── SubscriptionLapses == nil: job returns an error so the CronJob pod
+// exits non-zero and pages on-call rather than silently skipping. ──────────
 
-func TestSubscriptionLapse_NilReader_SkipsSuspendPhase_OffboardStillRuns(t *testing.T) {
-	jctx, _, realms, _, _, logger := newTestContext()
-	jctx.SubscriptionLapses = nil
-	var offboardCalled bool
-	realms.ListSuspendedPastRetentionFn = func(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error) {
-		offboardCalled = true
-		return nil, nil
-	}
+func TestSubscriptionLapse_NilReader_ReturnsError(t *testing.T) {
+	jctx, _, _, _, _, _ := newTestContext()
+	jctx.SubscriptionLapses = nil // covered by TestSubscriptionLapse_NilReader_ReturnsError
 
-	res, err := SubscriptionLapse(context.Background(), jctx)
-	require.NoError(t, err)
-	assert.Equal(t, Result{}, res)
-	assert.True(t, offboardCalled, "the offboard phase must run even when SubscriptionLapses is nil")
-	require.NotEmpty(t, logger.warnMsgs)
-	assert.Contains(t, logger.warnMsgs[0], "no SubscriptionLapseReader wired")
+	_, err := SubscriptionLapse(context.Background(), jctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ORG_MEMBERSHIP_BASE_URL")
 }
 
 // ── Suspend phase ──────────────────────────────────────────────────────────
@@ -383,7 +375,6 @@ func TestSubscriptionLapse_Suspend_BeginHardError_LoggedAsFailure(t *testing.T) 
 
 func TestSubscriptionLapse_Offboard_BeginHardError_LoggedAsFailure(t *testing.T) {
 	jctx, kc, realms, idem, pub, _ := newTestContext()
-	jctx.SubscriptionLapses = nil
 	tenantID := uuid.New()
 	row := newSuspendedForOffboard(tenantID, "tenant-x")
 	realms.ListSuspendedPastRetentionFn = func(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error) {
@@ -465,7 +456,6 @@ func TestSubscriptionLapse_BatchLimit_RemainingBudgetPassedToOffboard(t *testing
 
 func TestSubscriptionLapse_Offboard_BatchLimitBreaksMidPhase(t *testing.T) {
 	jctx, kc, realms, _, _, _ := newTestContext()
-	jctx.SubscriptionLapses = nil
 	jctx.BatchLimit = 1
 	rowA := newSuspendedForOffboard(uuid.New(), "tenant-a")
 	rowB := newSuspendedForOffboard(uuid.New(), "tenant-b")
@@ -494,7 +484,6 @@ func TestSubscriptionLapse_Offboard_BatchLimitBreaksMidPhase(t *testing.T) {
 
 func TestSubscriptionLapse_Offboard_HappyPath_CallOrderAndEvent(t *testing.T) {
 	jctx, kc, realms, idem, pub, _ := newTestContext()
-	jctx.SubscriptionLapses = nil // suspend phase not under test here
 	tenantID := uuid.New()
 	row := newSuspendedForOffboard(tenantID, "tenant-x")
 	realms.ListSuspendedPastRetentionFn = func(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error) {
@@ -552,7 +541,6 @@ func TestSubscriptionLapse_Offboard_HappyPath_CallOrderAndEvent(t *testing.T) {
 // TenantOffboarded event enqueued.
 func TestSubscriptionLapse_Offboard_NoEventPublisherInContext_StillCommitsLocally(t *testing.T) {
 	jctx, kc, realms, _, pub, _ := newTestContext()
-	jctx.SubscriptionLapses = nil
 	jctx.TxRunner = &mockTxRunner{pub: pub, SkipPublisher: true}
 	tenantID := uuid.New()
 	row := newSuspendedForOffboard(tenantID, "tenant-x")
@@ -572,7 +560,6 @@ func TestSubscriptionLapse_Offboard_NoEventPublisherInContext_StillCommitsLocall
 
 func TestSubscriptionLapse_Offboard_ExportFails(t *testing.T) {
 	jctx, kc, realms, idem, pub, _ := newTestContext()
-	jctx.SubscriptionLapses = nil
 	tenantID := uuid.New()
 	row := newSuspendedForOffboard(tenantID, "tenant-x")
 	realms.ListSuspendedPastRetentionFn = func(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error) {
@@ -597,7 +584,6 @@ func TestSubscriptionLapse_Offboard_ExportFails(t *testing.T) {
 
 func TestSubscriptionLapse_Offboard_PutRealmExportFails(t *testing.T) {
 	jctx, kc, realms, idem, pub, _ := newTestContext()
-	jctx.SubscriptionLapses = nil
 	tenantID := uuid.New()
 	row := newSuspendedForOffboard(tenantID, "tenant-x")
 	realms.ListSuspendedPastRetentionFn = func(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error) {
@@ -624,7 +610,6 @@ func TestSubscriptionLapse_Offboard_PutRealmExportFails(t *testing.T) {
 
 func TestSubscriptionLapse_Offboard_DeleteRealmIfExistsFails(t *testing.T) {
 	jctx, kc, realms, idem, pub, _ := newTestContext()
-	jctx.SubscriptionLapses = nil
 	tenantID := uuid.New()
 	row := newSuspendedForOffboard(tenantID, "tenant-x")
 	realms.ListSuspendedPastRetentionFn = func(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error) {
@@ -658,7 +643,6 @@ func TestSubscriptionLapse_Offboard_DeleteRealmIfExistsFails(t *testing.T) {
 // counted as Succeeded.
 func TestSubscriptionLapse_Offboard_UpdateFails_MarksIdempotencyFailed(t *testing.T) {
 	jctx, kc, realms, idem, pub, _ := newTestContext()
-	jctx.SubscriptionLapses = nil
 	tenantID := uuid.New()
 	row := newSuspendedForOffboard(tenantID, "tenant-x")
 	realms.ListSuspendedPastRetentionFn = func(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error) {
@@ -680,7 +664,6 @@ func TestSubscriptionLapse_Offboard_UpdateFails_MarksIdempotencyFailed(t *testin
 
 func TestSubscriptionLapse_Offboard_IdempotentReplay(t *testing.T) {
 	jctx, kc, realms, idem, pub, _ := newTestContext()
-	jctx.SubscriptionLapses = nil
 	tenantID := uuid.New()
 	row := newSuspendedForOffboard(tenantID, "tenant-x")
 	realms.ListSuspendedPastRetentionFn = func(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error) {
@@ -716,7 +699,6 @@ func TestSubscriptionLapse_ListLapsedSubscriptionsFails_Propagates(t *testing.T)
 
 func TestSubscriptionLapse_ListSuspendedPastRetentionFails_Propagates(t *testing.T) {
 	jctx, _, realms, _, _, _ := newTestContext()
-	jctx.SubscriptionLapses = nil
 	realms.ListSuspendedPastRetentionFn = func(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error) {
 		return nil, errors.New("db down")
 	}

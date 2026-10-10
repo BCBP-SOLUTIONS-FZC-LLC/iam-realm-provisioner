@@ -1,83 +1,53 @@
 #!/usr/bin/env bash
 # Enforces the Enterprise Platform Observability Standard's governance
-# rules 11/12 ("services SHALL NOT invent new platform_*/domain-shared
-# metrics unilaterally"; "require observability governance approval
-# before adoption"): a platform_* metric whose PlatformRegistry status
-# (internal/adapter/outbound/metrics/registry.go) is StatusProposed — i.e.
-# submitted but not yet ratified — must never be the live query target of
-# a Prometheus alert, recording rule, or SLO expression anywhere in this
-# repo. Mentioning a Proposed metric name in a comment (documenting the
-# shadow-emission/migration plan) is fine and expected; using it inside an
-# `expr:` is not, until the registry entry's Status flips to
-# StatusCanonical.
+# rules 11/12: this service MUST NOT use any platform_* metric as a live
+# PromQL target (alert expr, recording-rule expr, SLO expr, HPA metric
+# reference) because:
+#
+#   - platform_* metrics are owned by platform-events and platform-gincommon.
+#   - This service's authoritative, alertable metrics are the Tier 3
+#     iam_realm_provisioner_* family registered in
+#     internal/adapter/outbound/metrics/metrics.go.
+#   - Referencing a platform_* name in an alert/SLO before the Platform
+#     Observability Registry has ratified it for that exact label schema
+#     is prohibited (rules 11/12).
+#
+# The check is a simple grep: if any live PromQL expression in the rule
+# files references a platform_* metric name, the build fails.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-REGISTRY_GO="internal/adapter/outbound/metrics/registry.go"
 RULE_FILES=(
   deploy/monitoring/app-alerts.yml
   deploy/monitoring/slo-rules.yml
   deploy/helm/templates/prometheusrule.yaml
-  # HPA + the prometheus-adapter rule that feeds it a custom-metrics-API
-  # series — the standard's own "Update:... HPA metric references" /
-  # "MUST NOT source... an HPA reference" (rule 12) applies here too, not
-  # only to alerts/recording-rules/SLOs. Neither file references a
-  # platform_*/domain-shared name today (both key off gincommon's own
-  # http_requests_total), so this is a forward-looking guard.
   deploy/helm/templates/hpa.yaml
   deploy/monitoring/prometheus-adapter-rule.yaml
 )
 
-if [ ! -f "$REGISTRY_GO" ]; then
-  echo "OK: no $REGISTRY_GO in this repo — nothing to check"
-  exit 0
-fi
-
-# registry.go's PlatformRegistry is a flat slice of struct literals, one
-# field per line (gofmt-aligned) — a small state machine over Name:/
-# Status: pairs is enough for this hand-authored file; this is a repo
-# lint script, not a general Go parser.
-proposed_names=$(awk '
-  /Name:[ \t]*"/ { match($0, /"[^"]+"/); name = substr($0, RSTART+1, RLENGTH-2); next }
-  /Status:[ \t]*StatusProposed/ { if (name != "") print name; name="" }
-  /Status:[ \t]*StatusCanonical/ { name="" }
-' "$REGISTRY_GO")
-
-if [ -z "$proposed_names" ]; then
-  echo "OK: no Proposed (unratified) platform_* metrics in $REGISTRY_GO"
-  exit 0
-fi
-
-echo "Proposed (unratified) platform_* metrics per $REGISTRY_GO:"
-echo "$proposed_names" | sed 's/^/  - /'
-echo
-
 fail=0
-for name in $proposed_names; do
-  for f in "${RULE_FILES[@]}"; do
-    [ -f "$f" ] || continue
-    # Exclude comment lines (grep -n prefixes "N:", so the real content
-    # starts after the first ':' — a comment line's content, ignoring
-    # leading whitespace, starts with '#').
-    matches=$(grep -n "$name" "$f" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' || true)
-    [ -z "$matches" ] && continue
-    # A live PromQL reference carries a selector/function context; a
-    # bare prose mention that somehow escaped the comment filter would
-    # not.
-    live=$(echo "$matches" | grep -E '\{|_count|_bucket|rate\(|increase\(' || true)
-    if [ -n "$live" ]; then
-      echo "FAIL: $f references Proposed metric '$name' outside a comment:"
-      echo "$live" | sed 's/^/  /'
-      fail=1
-    fi
-  done
+for f in "${RULE_FILES[@]}"; do
+  [ -f "$f" ] || continue
+  # Find non-comment lines that contain a platform_* name in a PromQL context
+  # (a selector, _count/_bucket suffix, or a rate/increase call).
+  matches=$(grep -n "platform_" "$f" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+  [ -z "$matches" ] && continue
+  live=$(echo "$matches" | grep -E '\{|_count|_bucket|rate\(|increase\(' || true)
+  if [ -n "$live" ]; then
+    echo "FAIL: $f references a platform_* metric in a live PromQL expression:"
+    echo "$live" | sed 's/^/  /'
+    fail=1
+  fi
 done
 
 if [ "$fail" -ne 0 ]; then
   echo
-  echo "A Proposed platform_* metric (Status: StatusProposed in $REGISTRY_GO) may not source a production alert, recording rule, or SLO expression (Enterprise Platform Observability Standard, rules 11/12). Either point the rule back at its authoritative Tier 3 metric, or flip the registry entry's Status to StatusCanonical only once real observability governance has ratified it — then migrate dashboards/alerts/recording rules/SLOs/HPA together per the standard's Backward Compatibility steps."
+  echo "This service's authoritative metrics are iam_realm_provisioner_* (Tier 3)."
+  echo "platform_* metrics are owned by platform-events/platform-gincommon and must"
+  echo "not source production alerts, recording rules, SLOs, or HPA references"
+  echo "(Enterprise Platform Observability Standard, rules 11/12)."
   exit 1
 fi
 
-echo "OK: no Proposed platform_* metric is used as a live query target in ${RULE_FILES[*]}"
+echo "OK: no platform_* metric is used as a live query target in ${RULE_FILES[*]}"

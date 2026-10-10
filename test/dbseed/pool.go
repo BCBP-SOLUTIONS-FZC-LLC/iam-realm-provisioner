@@ -7,7 +7,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -144,6 +144,7 @@ func (r *bufferedRows) Err() error                                   { return r.
 func (r *bufferedRows) CommandTag() pgconn.CommandTag                { return r.tag }
 func (r *bufferedRows) FieldDescriptions() []pgconn.FieldDescription { return r.fields }
 func (r *bufferedRows) Conn() *pgx.Conn                              { return nil }
+func (r *bufferedRows) TypeMap() *pgtype.Map                         { return r.m }
 
 func (r *bufferedRows) Next() bool {
 	if r.closed {

@@ -78,7 +78,6 @@ func (s *AuditDeliveryService) DrainOnce(ctx context.Context, limit int) (int, e
 				continue
 			}
 			metrics.AuditEntryDeliveryTotal.WithLabelValues("retry").Inc()
-			metrics.PlatformRetryTotal.WithLabelValues("audit-log").Inc()
 			var rae *port.RetryAfterError
 			if errors.As(werr, &rae) && rae.RetryAfter > 0 {
 				s.log.WarnContext(ctx, "audit_delivery: delivery failed, will retry after upstream hint", "entry_id", p.ID, "attempts", p.Attempts, "retry_after", rae.RetryAfter.String(), "error", werr.Error())

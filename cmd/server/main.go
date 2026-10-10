@@ -36,13 +36,14 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/outbox"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/inbox"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/outbox"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/logger"
-	pgmigrate "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/migrate"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgmetrics"
+	pgmigrate "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/migrate"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgmetrics"
 )
 
 // buildVersion is injected by -ldflags at build time (see Dockerfile / Makefile).
@@ -71,6 +72,8 @@ func main() {
 		Logger:       log,
 		ServiceName:  envOr("APP_NAME", "iam-realm-provisioner"),
 		BuildVersion: envOr("BUILD_VERSION", buildVersion),
+		Domain:       "iam",
+		Environment:  appEnv,
 	}
 	// ObservabilityMiddlewares is gincommon's public metrics-init API. Call
 	// it here (before any collector registration or exporter goroutine) so
@@ -85,29 +88,29 @@ func main() {
 	// query/pool metrics share gincommon's registerer so a single /metrics
 	// scrape (promhttp on METRICS_PORT) serves HTTP + business + outbox +
 	// pg collectors together.
-	events.InitWithRegisterer(cfg.ServiceName, cfg.BuildVersion, gincommon.MetricsRegisterer())
-	pgmetrics.InitWithRegisterer(cfg.ServiceName, cfg.BuildVersion, gincommon.MetricsRegisterer())
+	identity := gincommon.MetricsConstLabels()
+	if _, err := events.InitMetrics(events.MetricsIdentityFromLabels(identity), gincommon.MetricsRegisterer()); err != nil {
+		panic("init events metrics: " + err.Error())
+	}
+	if _, err := pgmetrics.InitWithIdentity(pgmetrics.IdentityFromLabels(identity), gincommon.MetricsRegisterer()); err != nil {
+		panic("init pgcommon metrics: " + err.Error())
+	}
 
-	// ── 3. Database — pgcommon.ConfigFromEnv reads DATABASE_URL/PG_* directly
-	// so pool sizing, PgBouncer mode, and DSN assembly have exactly one
-	// implementation instead of a second one hand-rolled here. ────────────
+	// ── 3. Database — pgcommon.ConfigFromEnv reads DATABASE_URL/PG_* vars
+	// (including PG_STATEMENT_TIMEOUT → Config.StatementTimeout applied as
+	// SET LOCAL per transaction by pgcommon, surviving PgBouncer). ─────────
 	queryTracer := pgadapter.NewOTelTracer(cfg.ServiceName)
 
 	pgCfg, pgWarnings := pgcommon.ConfigFromEnv()
 	for _, w := range pgWarnings {
 		log.Warn("postgres config warning", map[string]interface{}{"key": w.Key, "reason": w.Reason})
 	}
-	// DSNFromEnv (not a bare pgCfg.DSN) so the DATABASE_URL bypass applies
-	// here too: PG_STATEMENT_TIMEOUT must be ignored when DATABASE_URL is
-	// set verbatim, per DSNFromEnv/ApplyStatementTimeout's own contract.
-	dsn := pgadapter.DSNFromEnv()
 	// Migrations must bypass PgBouncer because the migration runner acquires
 	// a pg_advisory_lock, which is session-scoped and breaks under
 	// transaction pooling. MIGRATION_DATABASE_URL points directly at
-	// Postgres; falls back to dsn when unset.
-	migrationDSN := pgadapter.MigrationDSNFromEnv()
+	// Postgres; falls back to the app DSN when unset.
+	migrationDSN := pgcommon.MigrationDSNFromEnv()
 
-	pgCfg.DSN = dsn
 	pgCfg.GUCProvider = pgcommon.GUCSetFromContext
 	pgCfg.Logger = pgadapter.NewLoggerAdapter(log)
 	pgCfg.Tracer = queryTracer
@@ -119,7 +122,7 @@ func main() {
 
 	// sysPool: BYPASSRLS pool used by the reconciler jobs and cross-tenant
 	// sweeps. In production SYSTEM_DATABASE_URL must point to
-	// realm_provisioner_migrator (§10.1). Falls back to DSNFromEnv() for
+	// realm_provisioner_migrator (§10.1). Falls back to the app DSN for
 	// dev — cross-tenant queries then RLS-filter to zero rows (safe no-op).
 	sysDSN := pgadapter.SystemDSNFromEnv()
 	// SystemPoolConfig reads ConfigFromEnv internally, forces PGBouncerMode,
@@ -132,21 +135,36 @@ func main() {
 		panic(fmt.Sprintf("connect sysPool: %v", err))
 	}
 	defer sysPool.Close()
-	if sysDSN == dsn {
+	if sysDSN == pgCfg.DSN {
 		log.Warn("SYSTEM_DATABASE_URL not set — sysPool reuses app DSN; cross-tenant queries will be RLS-filtered", nil)
 	}
 
 	ctx, cancelBackground := context.WithCancel(context.Background())
 	defer cancelBackground()
 
-	// Migration order is critical (§19): outbox.ApplySchema creates
-	// outbox_events (JSONB payload) BEFORE the domain migration, which
-	// ALTERs that column to text.
+	// Migration order (§19):
+	//   1. outbox.ApplySchema — creates outbox_events (JSONB) BEFORE the
+	//      domain migration, which ALTERs that column to text.
+	//   2. domain migrations — create all tables including processed_events.
+	//   3. inbox.ApplySchema — idempotent (IF NOT EXISTS); creates
+	//      processed_events when not yet present and records the version in
+	//      inbox_migrations (separate tracking table from the domain one).
 	if err := outbox.ApplySchema(ctx, &pgmigrate.Runner{DSN: migrationDSN}); err != nil {
 		panic(fmt.Sprintf("outbox schema: %v", err))
 	}
 	if err := pgadapter.RunMigrations(ctx, migrationDSN, log); err != nil {
 		panic(fmt.Sprintf("domain migrations: %v", err))
+	}
+	if err := inbox.ApplySchema(ctx, &pgmigrate.Runner{DSN: migrationDSN}); err != nil {
+		if errors.Is(err, pgmigrate.ErrVersionNotInSource) {
+			panic("startup aborted: inbox schema version in inbox_migrations is newer than this library version — " +
+				"run inbox schema DOWN migration before rolling back, or upgrade platform-events: " + err.Error())
+		}
+		if errors.Is(err, pgmigrate.ErrMigrationDirty) {
+			panic("startup aborted: inbox_migrations is dirty (interrupted migration) — " +
+				"repair with `migrate -path ... force <version>` then restart: " + err.Error())
+		}
+		panic(fmt.Sprintf("inbox schema: %v", err))
 	}
 
 	// ── 4. AWS clients ────────────────────────────────────────────────────
@@ -219,9 +237,19 @@ func main() {
 		BaseURL:      mustEnv("KEYCLOAK_BASE_URL", appEnv),
 		AdminRealm:   envOr("KEYCLOAK_ADMIN_REALM", "master"),
 		ClientID:     envOr("KEYCLOAK_ADMIN_CLIENT_ID", "iam-realm-provisioner"),
-		ClientSecret: mustEnv("KEYCLOAK_ADMIN_CLIENT_SECRET", appEnv),
 		RateLimitRPS: envInt("KEYCLOAK_RATE_LIMIT_RPS", 20),
 		Timeout:      envDuration("KEYCLOAK_TIMEOUT_MS", 8*time.Second),
+		// SecretProvider re-reads KEYCLOAK_ADMIN_CLIENT_SECRET at each token
+		// refresh, picking up ESO-rotated credentials without a full restart.
+		// mustEnv provides the dev-mode placeholder when the env var is unset
+		// in dev, preserving the old `make run` experience; in production
+		// validateRequiredEnv has already panicked if it is empty.
+		SecretProvider: func(_ context.Context) (string, error) {
+			if s := os.Getenv("KEYCLOAK_ADMIN_CLIENT_SECRET"); s != "" {
+				return s, nil
+			}
+			return mustEnv("KEYCLOAK_ADMIN_CLIENT_SECRET", appEnv), nil
+		},
 	}, log)
 
 	openbaoClient := openbao.New(openbao.Config{
@@ -247,8 +275,22 @@ func main() {
 	idpValidationRepo := pgadapter.NewIdpValidationRepository(pool)
 	reconRepo := pgadapter.NewReconciliationRepository(pool)
 	idempotencyRepo := pgadapter.NewIdempotencyRepository(pool)
-	processedEventsRepo := pgadapter.NewProcessedEventsRepository(pool)
 	pendingAuditRepo := pgadapter.NewPendingAuditEntryRepository(pool)
+	// One inbox.Store per consumer (platform-events v2.1.0 inbox package).
+	// Use the app pool (GUCProvider) — consumer writes are tenant-scoped.
+	membershipInbox, err := inbox.NewStore(pool, string(domain.ConsumerMembership))
+	if err != nil {
+		panic(fmt.Sprintf("inbox membership store: %v", err))
+	}
+	tenantInbox, err := inbox.NewStore(pool, string(domain.ConsumerTenant))
+	if err != nil {
+		panic(fmt.Sprintf("inbox tenant store: %v", err))
+	}
+	billingInbox, err := inbox.NewStore(pool, string(domain.ConsumerBilling))
+	if err != nil {
+		panic(fmt.Sprintf("inbox billing store: %v", err))
+	}
+	processedEventsRepo := pgadapter.NewInboxStoreAdapter(membershipInbox, tenantInbox, billingInbox)
 
 	// ── 8b. Core services ─────────────────────────────────────────────────
 	sharedRealm := envOr("SHARED_TRIAL_REALM", "trial")
@@ -339,13 +381,23 @@ func main() {
 		},
 		Handlers: internalH,
 		Postgres: pingerFunc(func(ctx context.Context) error {
-			if hs := pool.Health(ctx); !hs.Healthy {
+			// Tight timeout so a saturated PgBouncer or network partition
+			// fails the probe quickly instead of holding a goroutine for the
+			// full HTTP WriteTimeout (35 s). pgcommon's own 5-second guard
+			// only activates when ctx has no deadline — the /readyz handler
+			// passes c.Request.Context() which carries WriteTimeout, so the
+			// library guard is silently skipped without this explicit cap.
+			pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			if hs := pool.Health(pingCtx); !hs.Healthy {
 				return fmt.Errorf("database not healthy")
 			}
 			return nil
 		}),
 		SysPostgres: pingerFunc(func(ctx context.Context) error {
-			if hs := sysPool.Health(ctx); !hs.Healthy {
+			pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			if hs := sysPool.Health(pingCtx); !hs.Healthy {
 				return fmt.Errorf("sys database not healthy")
 			}
 			return nil
@@ -538,6 +590,13 @@ func validateRequiredEnv(appEnv string) {
 	}
 	if os.Getenv("MIGRATION_DATABASE_URL") == "" && os.Getenv("PG_BOUNCER_MODE") == "true" && os.Getenv("DATABASE_URL") == "" {
 		missing = append(missing, "MIGRATION_DATABASE_URL: required when PG_BOUNCER_MODE=true — migrations must bypass PgBouncer")
+	}
+	// SYSTEM_DATABASE_URL must be set in production to point at a BYPASSRLS role
+	// (realm_provisioner_migrator, §10.1). Without it, sysPool falls back to the
+	// app DSN, cross-tenant reconciler queries are RLS-filtered to zero rows, and
+	// RP-C3 offboarding silently does nothing — a data-retention compliance risk.
+	if !isDevEnv(appEnv) && os.Getenv("SYSTEM_DATABASE_URL") == "" {
+		missing = append(missing, "SYSTEM_DATABASE_URL: required in production — sysPool must use a BYPASSRLS role (realm_provisioner_migrator); without it cross-tenant reconciler queries return zero rows and RP-C3 offboarding is silently disabled")
 	}
 	if len(missing) > 0 {
 		msg := "startup aborted — required env vars missing or misconfigured:\n"

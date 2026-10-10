@@ -60,7 +60,7 @@ Every mutating endpoint above marked "required" enforces `RequireIdempotencyKey`
 | `conversion_failed` | 502 | RP-3/RP-4 Keycloak sequence failure (with `WithDetails` context) |
 | `org_membership_unavailable` | 503 | O&M I-8 residual-MFA check unreachable (membership-realm-q consumer) |
 | `object_store_unavailable` | 503 | S3 realm-export failure (RP-C3 offboarding) |
-| `db_unavailable` | 503 | Postgres connectivity / resource SQLSTATE (08/53/57/58) |
+| `db_unavailable` | 503 | Postgres connectivity / resource SQLSTATE classes 08/53/57/58 — class 57 includes 57014 (`query_canceled` / statement_timeout expiry); all map to 503 so clients retry instead of treating a transient timeout as a code bug |
 | `token_service_unavailable` | 503 | Additive — Token Service TS-1/TS-4 unreachable (§2.5) |
 
 `Error.Status()` derives the HTTP code from `Code` via a lookup table; an unrecognized code defaults to 500. `Error.WithDetails(map[string]any)` attaches structured context echoed into the response body's `details` field.

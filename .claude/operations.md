@@ -146,7 +146,7 @@ Grafana "IAM — Realm Provisioner": provision throughput/success by kind, conve
 | `METRICS_PORT` | `9090` | Dedicated `/metrics` listener, never shared with the API |
 | `PG_HOST`/`PG_PORT`/`PG_USER`/`PG_PASSWORD`/`PG_DBNAME`/`PG_SSLMODE` | — | Postgres DSN parts for `provisioner` |
 | `PG_MAX_CONNS`, `PG_BOUNCER_MODE`, `PG_STATEMENT_TIMEOUT`, `PG_SLOW_QUERY_THRESHOLD` | `10` / `false` / `5s` / `200ms` | `pgcommon` pool tuning |
-| `SYSTEM_DATABASE_URL` | (required) | `realm_provisioner_migrator` (`BYPASSRLS`) DSN — the reconciler's cross-tenant sweeps use this, never the app role. Required even in dev. |
+| `SYSTEM_DATABASE_URL` | (required) | `realm_provisioner_migrator` (`BYPASSRLS`) DSN — the reconciler's cross-tenant sweeps use this, never the app role. **Validated at startup for both `cmd/server` and `cmd/reconciler` in non-dev environments** — absence silently disables all lifecycle CronJobs (RP-C1..C4 see zero rows) including GDPR hard-delete. |
 | `MIGRATION_DATABASE_URL` | (required) | Direct (non-PgBouncer) DSN — only `realm_provisioner_migrator` can run `outbox.ApplySchema` / the domain migration; `realm_provisioner_app` has no `CREATE` on schema `public` |
 | `AWS_REGION`, `AWS_ENDPOINT_URL` | `ap-south-1` / — | Region + Floci endpoint override for local dev |
 | `SNS_TOPIC_TENANT_ARN` | (required in prod) | Single outbound topic, `iam-tenant-events` |
@@ -156,7 +156,7 @@ Grafana "IAM — Realm Provisioner": provision throughput/success by kind, conve
 | `PROCESSED_EVENTS_TTL_DAYS` | `8` | Consumer dedup retention (must exceed the 7-day SQS message lifetime) |
 | `KEYCLOAK_BASE_URL` | (required) | e.g. `https://auth.bcbpsolutions.com` — fail-fast on the dev default outside `APP_ENV=dev` |
 | `KEYCLOAK_ADMIN_REALM` | `master` | |
-| `KEYCLOAK_ADMIN_CLIENT_ID` / `KEYCLOAK_ADMIN_CLIENT_SECRET` | `iam-realm-provisioner` / (from OpenBao via ESO) | Fail-fast on empty/dev-default outside `APP_ENV=dev` |
+| `KEYCLOAK_ADMIN_CLIENT_ID` / `KEYCLOAK_ADMIN_CLIENT_SECRET` | `iam-realm-provisioner` / (from OpenBao via ESO) | Fail-fast on empty/dev-default outside `APP_ENV=dev`. The secret is read fresh from env at each token refresh (`Config.SecretProvider`) so an ESO-rotated secret takes effect on the next pod restart without rebuilding the adapter. Future: wire `SecretProvider` to a live OpenBao reader to eliminate the restart requirement. |
 | `KEYCLOAK_RATE_LIMIT_RPS` | `20` | Client-side rate limiter — absorbs bursts during mass migration |
 | `KEYCLOAK_TIMEOUT_MS` | `8000` (as `8s` in `.env-example`) | Per-operation timeout budget |
 | `BAO_ADDR` | e.g. `https://openbao.iam.svc.cluster.local:8200` | OpenBao — Kubernetes auth (pod ServiceAccount token) |
@@ -170,6 +170,7 @@ Grafana "IAM — Realm Provisioner": provision throughput/success by kind, conve
 | `REALM_EXPORT_BUCKET` / `REALM_EXPORT_KMS_KEY` | `iam-realm-exports` / `alias/iam-realm-export` | Offboarding export target |
 | `TRIAL_GRACE_DAYS` / `CANCELLED_GRACE_DAYS` / `RETENTION_DAYS` | `30` / `30` / `90` | Lifecycle timers |
 | `RECONCILER_BATCH_LIMIT` / `RECONCILER_TIMEOUT` / `RECONCILER_MAX_ATTEMPTS` | `100` / `5m` / `20` | Reconciler-job tunables — `RECONCILER_MAX_ATTEMPTS` is RP-C4's poison-pill cap (§13.1) |
+| `IDEMPOTENCY_IN_PROGRESS_TTL_HOURS` | `1` | idempotency-cleanup CronJob: `in_progress` provisioning_operations rows older than this (hours) are expired to `failed`, unblocking callers whose key was stuck after a 503 mid-operation. 1 hour >> max request lifetime (35s HTTP + 8s Keycloak + pgcommon retry). |
 | `DOCS_ENABLED` / `DOCS_AUTH_TOKEN` | `true` / — | AsyncAPI viewer gating — mounted always outside `APP_ENV=production`; opt-in via `DOCS_ENABLED` in prod, optionally bearer-gated |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | (unset) | OTLP collector — provider always installed; export no-op until set |
 
@@ -200,7 +201,7 @@ All six defined in one Helm manifest (`deploy/helm/templates/cronjobs.yaml`), di
 
 Every job is idempotent per tenant (safe to re-run) and batched (`RECONCILER_BATCH_LIMIT`, default 100). **Instrumentation requirement:** every deferring job must *increment* its `*_deferred_total` counter on every defer, not merely register it at startup — otherwise a "deferred > 0 sustained" alert can never fire even when the job is genuinely stuck.
 
-**Helm chart** (`deploy/helm/`) mirrors sibling charts: `deployment.yaml`, `cronjobs.yaml` (all 6 jobs from one templated range), `hpa.yaml`, `pdb.yaml`, `service.yaml` (+ metrics port), `serviceaccount.yaml` (IRSA annotation), `servicemonitor.yaml`, `prometheusrule.yaml`, `networkpolicy.yaml` (monitoring-namespace scrape + mesh egress to Keycloak/O&M/OpenBao/AWS), `securitypolicy.yaml` (Envoy internal-route auth), `secret.yaml` (ESO `ExternalSecret` refs against an OpenBao `ClusterSecretStore`), `httproute.yaml`.
+**Helm chart** (`deploy/helm/`) mirrors sibling charts: `deployment.yaml`, `cronjobs.yaml` (all 7 jobs from one `range .Values.cronjobs` template — adding a new job in `values.yaml` auto-renders a new CronJob), `hpa.yaml`, `pdb.yaml`, `service.yaml` (+ metrics port), `serviceaccount.yaml` (IRSA annotation), `servicemonitor.yaml`, `prometheusrule.yaml`, `networkpolicy.yaml` (monitoring-namespace scrape + mesh egress to Keycloak/O&M/OpenBao/AWS), `securitypolicy.yaml` (Envoy internal-route auth), `secret.yaml` (ESO `ExternalSecret` refs against an OpenBao `ClusterSecretStore`), `httproute.yaml`.
 
 `deploy/iam/` — pod IAM policy for **AWS resources only** (`sns:Publish` to `iam-tenant-events`; `sqs:*` on the 3 queues + DLQs; `glue:GetSchemaByDefinition` (version IDs resolved once at startup by definition — no refresher); `s3:PutObject`/`GetObject` on the export bucket; `kms:*` on the export key). **Secret access is not in this IAM policy** — it is governed entirely by OpenBao.
 

@@ -1,6 +1,13 @@
 # Database Schema
 
-Refines LLD §4, §19. Database `provisioner` on shared RDS PostgreSQL, fronted by PgBouncer in transaction-pooling mode in production (`PG_BOUNCER_MODE=true`). Pool: `pgcommon.NewPool(... GUCProvider: pgcommon.GUCSetFromContext)`. Local dev uses `postgres:16-alpine` (port 5544) in `docker-compose.yml`. Single consolidated migration `000000_initial_schema.{up,down}.sql` (`internal/adapter/outbound/postgres/migrations/`) — this service has never shipped a prior schema version.
+Refines LLD §4, §19. Database `provisioner` on shared RDS PostgreSQL, fronted by PgBouncer in transaction-pooling mode in production (`PG_BOUNCER_MODE=true`). Pool: `pgcommon.NewPool(... GUCProvider: pgcommon.GUCSetFromContext)`. Local dev uses `postgres:16-alpine` (port 5544) in `docker-compose.yml`.
+
+**Migration sequence (startup, §19):**
+1. `outbox.ApplySchema` (platform-events) — creates `outbox_events` before the domain migration, which ALTERs its payload column.
+2. `000000_initial_schema.up.sql` (this service) — creates all 10 domain tables.
+3. `inbox.ApplySchema` (platform-events v2.1.0) — idempotent `CREATE TABLE IF NOT EXISTS processed_events`; records its version in a separate `inbox_migrations` tracking table (not the domain `schema_migrations`). On existing deployments the domain migration already created `processed_events`, so `inbox.ApplySchema` is a no-op for table creation but still records the inbox schema version.
+
+Single consolidated domain migration `000000_initial_schema.{up,down}.sql` (`internal/adapter/outbound/postgres/migrations/`) — this service has never shipped a prior domain schema version.
 
 ## Extensions, Enums, and Helper Functions (§4.1)
 
@@ -37,7 +44,7 @@ Three helper functions back RLS:
 | Table | Notes |
 |---|---|
 | `outbox_events` | Created by `platform-events`' `outbox.ApplySchema`, **not** this migration — this migration only customizes it: `ALTER COLUMN payload TYPE text` (was jsonb) + a `trg_outbox_normalize_payload` trigger that decodes pgx SimpleProtocol's bytea-hex (`\x...`) encoding back to UTF-8 on every INSERT, since PgBouncer forces SimpleProtocol and pgx encodes `[]byte` as bytea-hex even for a `text` column. |
-| `processed_events` | This service's own DDL. PK `(event_id, consumer)`. `consumer` is one of `'membership'`\|`'tenant'`\|`'billing'` (the three SQS consumers). No tenant scoping, no FK, no RLS — a pure global dedup ledger. Index `idx_processed_events_processed_at`. |
+| `processed_events` | Created by the domain migration AND validated/tracked by `platform-events`' `inbox.ApplySchema` (which records its schema version in `inbox_migrations`). PK `(event_id, consumer)`. `consumer` is one of `'membership'`\|`'tenant'`\|`'billing'`. No tenant scoping, no FK, no RLS — a pure global dedup ledger. Index `idx_processed_events_processed_at`. All runtime SQL (INSERT, SELECT) is owned by `platform-events inbox.Store`; this service's `InboxStoreAdapter` routes calls to per-consumer store instances and adds an ambient-tx branch for IDEMP-2 atomicity. Pruned by the `processed-events-prune` CronJob. |
 | `exporter_watermarks` | PK `exporter_name` (text). `last_processed_at timestamptz`. One row per `cmd/server` metric exporter that scrapes an append-only table on a persisted high-water mark instead of a fixed trailing window (today: `rls_violations_total`'s exporter). `GaugeRepository.RLSViolationCounts` takes `SELECT ... FOR UPDATE` on the row so concurrent server replicas (HPA `minReplicas: 2`) serialize on it instead of every replica redundantly re-counting the same `rls_violation_log` rows on every tick — and so a pod restart resumes from the mark instead of re-scraping (and re-`Add`ing onto the Prometheus counter) a window the dying pod already counted. Not admin_readonly-granted (unlike the 8 tables it does grant) — it carries no tenant or compliance-relevant data, just an exporter cursor. |
 
 **1 audit-only table (RLS disabled by design):**

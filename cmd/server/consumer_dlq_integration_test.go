@@ -19,8 +19,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
 )
 
 // TestConsumerOptions_DLQHandlerObservesLastDeliveryBeforeRedrive runs this
@@ -77,8 +76,9 @@ func TestConsumerOptions_DLQHandlerObservesLastDeliveryBeforeRedrive(t *testing.
 	require.NoError(t, err)
 	sqsCall(t, endpoint, "SendMessage", map[string]any{"QueueUrl": queueURL, "MessageBody": string(body)})
 
-	ensureMetricsRegistered(t)
-	dlqBefore := counterValue(t, metrics.PlatformDLQMessagesTotal.WithLabelValues("tenant"))
+	// platform-events v2 records platform_dlq_messages_total internally via
+	// WithDeadLetterHandler; this service no longer maintains its own DLQ
+	// counter. The test verifies behavior via handler-call count + queue depth.
 	var handlerCalls int32
 	failing := func(context.Context, events.Envelope[json.RawMessage]) error {
 		atomic.AddInt32(&handlerCalls, 1)
@@ -98,9 +98,12 @@ func TestConsumerOptions_DLQHandlerObservesLastDeliveryBeforeRedrive(t *testing.
 	go func() { _ = cons.Start(runCtx) }()
 	defer func() { _ = cons.Stop() }()
 
+	// Wait until the handler has been called dlqObserveReceiveCount times —
+	// the dlqHandler fires on the (dlqObserveReceiveCount+1)-th delivery,
+	// leaving the message visible so SQS redrives it to -dlq.
 	require.Eventually(t, func() bool {
-		return counterValue(t, metrics.PlatformDLQMessagesTotal.WithLabelValues("tenant")) == dlqBefore+1
-	}, 60*time.Second, 200*time.Millisecond, "dlqHandler never observed the message")
+		return atomic.LoadInt32(&handlerCalls) >= dlqObserveReceiveCount
+	}, 60*time.Second, 200*time.Millisecond, "handler never reached dlqObserveReceiveCount deliveries")
 	assert.EqualValues(t, dlqObserveReceiveCount, atomic.LoadInt32(&handlerCalls),
 		"the handler sees deliveries 1-4; dlqHandler takes the 5th")
 

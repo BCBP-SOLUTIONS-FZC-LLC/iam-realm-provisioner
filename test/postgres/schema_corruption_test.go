@@ -19,10 +19,10 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/inbox"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -117,41 +117,30 @@ func TestReconciliationRepository_SchemaCorruption(t *testing.T) {
 	require.Error(t, err, "ListPending's SELECT explicitly names the now-missing column")
 }
 
-// TestProcessedEventsRepository_SchemaCorruption drops
-// processed_events.processed_at — referenced by both CleanupExpired's WHERE
-// clause and its own index — forcing a genuine Exec failure.
-func TestProcessedEventsRepository_SchemaCorruption(t *testing.T) {
-	t.Parallel()
-	appPool, rawPool := setupTestDB(t)
-	ctx := context.Background()
-	repo := pgadapter.NewProcessedEventsRepository(appPool)
-
-	_, err := rawPool.Exec(ctx, `ALTER TABLE processed_events DROP COLUMN processed_at CASCADE`)
-	require.NoError(t, err)
-
-	_, err = repo.CleanupExpired(ctx, 24*time.Hour)
-	require.Error(t, err)
-}
-
-// TestProcessedEventsRepository_IsProcessedAndPrune_SchemaCorruption drops
+// TestInboxStoreAdapter_IsProcessedAndPrune_SchemaCorruption drops
 // processed_events.consumer — referenced by IsProcessed's WHERE clause and
-// by Prune's subquery/DELETE — forcing a genuine Query/Exec failure in
-// both. A separate container/test from the CleanupExpired one above since
-// that one corrupts a different column (processed_at, which neither of
-// these two methods' WHERE/column lists need for IsProcessed, though Prune
-// does also reference it — dropping consumer alone is enough to break both
-// without needing to reason about column drop ordering).
-func TestProcessedEventsRepository_IsProcessedAndPrune_SchemaCorruption(t *testing.T) {
+// by Prune's subquery/DELETE — forcing a genuine Query/Exec failure in both.
+func TestInboxStoreAdapter_IsProcessedAndPrune_SchemaCorruption(t *testing.T) {
 	t.Parallel()
 	appPool, rawPool := setupTestDB(t)
 	ctx := context.Background()
-	repo := pgadapter.NewProcessedEventsRepository(appPool)
+
+	mustStore := func(consumer string) *inbox.Store {
+		s, err := inbox.NewStore(appPool, consumer)
+		require.NoError(t, err)
+		return s
+	}
+	repo := pgadapter.NewInboxStoreAdapter(
+		mustStore(string(domain.ConsumerMembership)),
+		mustStore(string(domain.ConsumerTenant)),
+		mustStore(string(domain.ConsumerBilling)),
+	)
 
 	_, err := rawPool.Exec(ctx, `ALTER TABLE processed_events DROP COLUMN consumer CASCADE`)
 	require.NoError(t, err)
 
 	t.Run("IsProcessed_QueryFailure", func(t *testing.T) {
-		_, err := repo.IsProcessed(ctx, domain.ConsumerMembership, "evt-1")
+		_, err := repo.IsProcessed(ctx, domain.ConsumerMembership, uuid.NewString())
 		require.Error(t, err)
 	})
 

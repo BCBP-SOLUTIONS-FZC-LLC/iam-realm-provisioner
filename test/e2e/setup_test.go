@@ -52,10 +52,10 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/test/dbseed"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/outbox"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/outbox"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
-	pgmigrate "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/migrate"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
+	pgmigrate "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/migrate"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 )
 
 // ── package-level test environment, built once by TestMain ─────────────────
@@ -163,6 +163,10 @@ func (fakeTokenService) IssueOrRotateCredential(context.Context, uuid.UUID, uuid
 
 func (fakeTokenService) ReadPrincipal(context.Context, uuid.UUID, uuid.UUID) (*port.ReadPrincipalResult, error) {
 	return nil, nil
+}
+
+func (fakeTokenService) RevokeCredential(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
 }
 
 func (fakeTokenService) JWKSURLFor(tenantID uuid.UUID) string {

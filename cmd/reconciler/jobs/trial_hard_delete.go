@@ -63,6 +63,24 @@ func hardDeleteTrialTenant(ctx context.Context, jctx *Context, row tenantRealmRo
 		return err
 	}
 	return runInTxWithSysPool(ctx, jctx.SysPool, func(ctx context.Context, tx pgx.Tx) error {
+		// §15.2/GDPR: scrub all tenant PII from every tenant-scoped table in
+		// one atomic transaction before marking the row deleted. DELETE is
+		// idempotent — safe to retry if the tx commits after a crash.
+		// outbox_events (platform-events schema) has a tenant_id column but is
+		// not deleted here; its prune job clears it within OUTBOX_RETENTION_DAYS
+		// (default 8 days) after the events are published. Deleting it
+		// synchronously would silently drop the TenantOffboarded event.
+		for _, q := range []string{
+			`DELETE FROM keycloak_idp_configs            WHERE tenant_id = $1`,
+			`DELETE FROM keycloak_idp_config_validations WHERE tenant_id = $1`,
+			`DELETE FROM realm_config_reconciliations    WHERE tenant_id = $1`,
+			`DELETE FROM provisioning_operations         WHERE tenant_id = $1`,
+			`DELETE FROM pending_audit_entries           WHERE tenant_id = $1`,
+		} {
+			if _, err := tx.Exec(ctx, q, row.TenantID); err != nil {
+				return err
+			}
+		}
 		_, err := tx.Exec(ctx, `
 			UPDATE tenant_realms SET status = 'deleted', deleted_at = now(), updated_at = now()
 			WHERE tenant_id = $1`, row.TenantID)

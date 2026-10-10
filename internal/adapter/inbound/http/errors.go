@@ -4,12 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 	"github.com/gin-gonic/gin"
 )
 
@@ -59,10 +58,10 @@ func HandleError(c *gin.Context, err error) {
 	// layer. wrapConnErr maps classes 08/53/57/58 to ErrDBUnavailable, so
 	// the DomainError branch above is the production path. This fallback
 	// still classifies a leaked PgError (tests, future missed wrap) into
-	// 503 db_unavailable per §17 without importing pgconn: classes 08/53
-	// via pgcommon helpers, 57/58 via the SQLSTATE text pgconn puts in
-	// Error().
-	if pgcommon.IsConnectionException(err) || pgcommon.IsInsufficientResources(err) || isOperatorOrSystemErrorSQLState(err) {
+	// 503 db_unavailable per §17 via pgcommon helpers — no pgconn import needed.
+	if pgcommon.IsConnectionException(err) || pgcommon.IsInsufficientResources(err) ||
+		pgcommon.IsOperatorIntervention(err) || pgcommon.IsSystemError(err) ||
+		pgcommon.IsQueryCanceled(err) {
 		er := newErrorResponse(c, string(domain.ErrDBUnavailable), nil)
 		er.Status = http.StatusServiceUnavailable
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, er)
@@ -74,17 +73,4 @@ func HandleError(c *gin.Context, err error) {
 	er := newErrorResponse(c, "internal_error", nil)
 	er.Status = http.StatusInternalServerError
 	c.AbortWithStatusJSON(http.StatusInternalServerError, er)
-}
-
-// isOperatorOrSystemErrorSQLState reports whether err is a Postgres error
-// in SQLSTATE class 57 (operator_intervention) or 58 (system_error).
-// pgcommon v1.3.0 has no dedicated helper for these two, so we match the
-// "(SQLSTATE 57…)" / "(SQLSTATE 58…)" text pgconn puts in Error() instead
-// of type-asserting *pgconn.PgError (inbound HTTP must not import pgconn).
-func isOperatorOrSystemErrorSQLState(err error) bool {
-	if !pgcommon.IsPgError(err) {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "SQLSTATE 57") || strings.Contains(msg, "SQLSTATE 58")
 }

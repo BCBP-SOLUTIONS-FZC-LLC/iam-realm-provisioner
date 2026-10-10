@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/jackc/pgx/v5"
@@ -29,68 +29,6 @@ func clearPgEnv(t *testing.T) {
 	}
 }
 
-func TestDSNFromEnv_UsesDatabaseURLVerbatim(t *testing.T) {
-	clearPgEnv(t)
-	t.Setenv("DATABASE_URL", "postgres://user:pass@host:5432/db?sslmode=disable")
-
-	got := DSNFromEnv()
-
-	assert.Equal(t, "postgres://user:pass@host:5432/db?sslmode=disable", got,
-		"DATABASE_URL must pass through unchanged, not get a statement_timeout option appended")
-}
-
-func TestDSNFromEnv_BuildsFromDiscreteVarsAndAppliesStatementTimeout(t *testing.T) {
-	clearPgEnv(t)
-	t.Setenv("PG_HOST", "localhost")
-	t.Setenv("PG_PORT", "5544")
-	t.Setenv("PG_USER", "realm_provisioner_app")
-	t.Setenv("PG_PASSWORD", "secret")
-	t.Setenv("PG_DBNAME", "provisioner")
-	t.Setenv("PG_STATEMENT_TIMEOUT", "5s")
-
-	got := DSNFromEnv()
-
-	assert.Contains(t, got, "localhost")
-	assert.Contains(t, got, "provisioner")
-	assert.Contains(t, got, "options=-c%20statement_timeout%3D5000")
-}
-
-func TestApplyStatementTimeout_EmptyDSNPassesThrough(t *testing.T) {
-	clearPgEnv(t)
-	assert.Equal(t, "", ApplyStatementTimeout(""))
-}
-
-func TestApplyStatementTimeout_UnsetEnvLeavesDSNUnchanged(t *testing.T) {
-	clearPgEnv(t)
-	dsn := "postgres://host/db"
-	assert.Equal(t, dsn, ApplyStatementTimeout(dsn))
-}
-
-func TestApplyStatementTimeout_InvalidDurationLeavesDSNUnchanged(t *testing.T) {
-	clearPgEnv(t)
-	t.Setenv("PG_STATEMENT_TIMEOUT", "not-a-duration")
-	dsn := "postgres://host/db"
-	assert.Equal(t, dsn, ApplyStatementTimeout(dsn))
-}
-
-func TestApplyStatementTimeout_ZeroOrNegativeDurationLeavesDSNUnchanged(t *testing.T) {
-	clearPgEnv(t)
-	t.Setenv("PG_STATEMENT_TIMEOUT", "0s")
-	dsn := "postgres://host/db"
-	assert.Equal(t, dsn, ApplyStatementTimeout(dsn))
-}
-
-func TestApplyStatementTimeout_ValidDurationAppendsMillisecondOption(t *testing.T) {
-	clearPgEnv(t)
-	t.Setenv("PG_STATEMENT_TIMEOUT", "250ms")
-	dsn := "postgres://host/db"
-
-	got := ApplyStatementTimeout(dsn)
-
-	assert.True(t, strings.HasPrefix(got, dsn))
-	assert.Contains(t, got, "options=-c%20statement_timeout%3D250")
-}
-
 func TestSystemDSNFromEnv_PrefersSystemDatabaseURL(t *testing.T) {
 	clearPgEnv(t)
 	t.Setenv("SYSTEM_DATABASE_URL", "postgres://migrator@host/db")
@@ -99,40 +37,11 @@ func TestSystemDSNFromEnv_PrefersSystemDatabaseURL(t *testing.T) {
 	assert.Equal(t, "postgres://migrator@host/db", SystemDSNFromEnv())
 }
 
-func TestSystemDSNFromEnv_FallsBackToDSNFromEnv(t *testing.T) {
+func TestSystemDSNFromEnv_FallsBackToAppDSN(t *testing.T) {
 	clearPgEnv(t)
 	t.Setenv("DATABASE_URL", "postgres://app@host/db")
 
 	assert.Equal(t, "postgres://app@host/db", SystemDSNFromEnv())
-}
-
-func TestMigrationDSNFromEnv_PrefersMigrationDatabaseURL(t *testing.T) {
-	clearPgEnv(t)
-	t.Setenv("MIGRATION_DATABASE_URL", "postgres://migrator@host/db")
-	t.Setenv("DATABASE_URL", "postgres://app@host/db")
-
-	assert.Equal(t, "postgres://migrator@host/db", MigrationDSNFromEnv())
-}
-
-func TestMigrationDSNFromEnv_AppliesStatementTimeout(t *testing.T) {
-	clearPgEnv(t)
-	t.Setenv("MIGRATION_DATABASE_URL", "postgres://m:x@migrations.example:5432/db?sslmode=disable")
-	t.Setenv("PG_STATEMENT_TIMEOUT", "5s")
-	assert.Contains(t, MigrationDSNFromEnv(), "statement_timeout%3D5000")
-}
-
-func TestMigrationDSNFromEnv_FallsBackToDSNFromEnv(t *testing.T) {
-	clearPgEnv(t)
-	t.Setenv("DATABASE_URL", "postgres://app@host/db")
-
-	assert.Equal(t, "postgres://app@host/db", MigrationDSNFromEnv())
-}
-
-func TestApplyStatementTimeout_Idempotent(t *testing.T) {
-	clearPgEnv(t)
-	t.Setenv("PG_STATEMENT_TIMEOUT", "5s")
-	once := ApplyStatementTimeout("postgres://u@h/db?sslmode=disable")
-	assert.Equal(t, once, ApplyStatementTimeout(once))
 }
 
 func TestSystemPoolConfig_ForcesPGBouncerMode(t *testing.T) {
@@ -150,11 +59,14 @@ func TestSystemPoolConfig_ForcesPGBouncerMode(t *testing.T) {
 	assert.Equal(t, int32(20), cfg.MaxConns, "sysPool inherits pool sizing from ConfigFromEnv")
 }
 
-func TestSystemPoolConfig_AppliesStatementTimeout(t *testing.T) {
+func TestSystemPoolConfig_StatementTimeoutFromEnv(t *testing.T) {
 	clearPgEnv(t)
 	t.Setenv("PG_STATEMENT_TIMEOUT", "5s")
 	cfg := SystemPoolConfig("postgres://sys@host/db?sslmode=disable", nil)
-	assert.Contains(t, cfg.DSN, "statement_timeout%3D5000")
+	// pgcommon v2 reads PG_STATEMENT_TIMEOUT into Config.StatementTimeout and
+	// applies it as SET LOCAL per transaction — not appended to the DSN.
+	assert.Equal(t, 5*time.Second, cfg.StatementTimeout)
+	assert.NotContains(t, cfg.DSN, "statement_timeout")
 }
 
 // noopPortLogger is a minimal port.Logger for exercising SystemPoolConfig's
@@ -199,7 +111,13 @@ func TestWrapConnErr_PgConnErrorPassesThroughUnchanged(t *testing.T) {
 }
 
 func TestWrapConnErr_AvailabilitySQLStateMapsToDBUnavailable(t *testing.T) {
-	for _, code := range []string{"08006", "53300", "57P01", "58030"} {
+	for _, code := range []string{
+		"08006", // connection_failure (class 08)
+		"53300", // too_many_connections (class 53)
+		"57P01", // admin_shutdown (class 57, operator_intervention)
+		"57014", // query_canceled — statement_timeout or explicit cancel; MUST be 503
+		"58030", // io_error (class 58, system_error)
+	} {
 		t.Run(code, func(t *testing.T) {
 			pgErr := &pgconn.PgError{Code: code}
 			got := wrapConnErr(pgErr)
@@ -248,11 +166,9 @@ func TestWrapConnErr_UnrecognizedGenericErrorPassesThroughUnchanged(t *testing.T
 	assert.True(t, errors.Is(got, businessErr))
 }
 
-// puddle.ErrClosedPool (surfaced by pgxpool.Pool.BeginTx/Acquire on a
-// closed pool) is the one non-PgError shape wrapConnErr does positively
-// recognize as a genuine connectivity failure — a closed pool is never a
-// SQL-protocol response, but is unambiguously "the database is
-// unavailable", not a caller's business error.
+// pgcommon.IsPoolClosed covers puddle.ErrClosedPool and pgcommon's own
+// closed-pool sentinel. A closed pool is never a SQL-protocol response
+// but is unambiguously "the database is unavailable".
 func TestWrapConnErr_ClosedPoolMapsToDBUnavailable(t *testing.T) {
 	got := wrapConnErr(puddle.ErrClosedPool)
 

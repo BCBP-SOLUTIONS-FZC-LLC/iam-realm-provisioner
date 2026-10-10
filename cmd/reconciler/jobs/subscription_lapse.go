@@ -2,7 +2,10 @@ package jobs
 
 import (
 	"context"
+	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
@@ -33,7 +36,7 @@ func SubscriptionLapse(ctx context.Context, jctx *Context) (Result, error) {
 	var res Result
 
 	if jctx.SubscriptionLapses == nil {
-		jctx.Logger.WarnContext(ctx, "subscription-lapse: no SubscriptionLapseReader wired — skipping suspend phase", nil)
+		return res, fmt.Errorf("subscription-lapse: ORG_MEMBERSHIP_BASE_URL is not set — suspend phase cannot run; configure the env var before scheduling RP-C3")
 	} else if err := runSuspendPhase(ctx, jctx, &res); err != nil {
 		return res, err
 	}
@@ -191,6 +194,32 @@ func offboardTenant(ctx context.Context, jctx *Context, realm *domain.TenantReal
 	metrics.RealmExportTotal.WithLabelValues("success").Inc()
 
 	if err := jctx.Keycloak.DeleteRealmIfExists(ctx, realm.RealmName); err != nil {
+		failIdempotency(ctx, jctx, idemKey)
+		return err
+	}
+
+	// §15.2/GDPR: scrub all tenant PII from every tenant-scoped table.
+	// Runs in its own sysPool transaction (idempotent on retry) before the
+	// final commit so the deletions succeed even if the event-emission
+	// transaction later rolls back — re-deleting already-gone rows is a no-op.
+	// SysPool is always set in production; a nil check guards unit tests that
+	// construct a minimal Context without a real pool.
+	if jctx.SysPool == nil {
+		jctx.Logger.WarnContext(ctx, "offboard: SysPool not set — GDPR PII deletion skipped; this must not occur in production", "tenant_id", realm.TenantID)
+	} else if err := runInTxWithSysPool(ctx, jctx.SysPool, func(ctx context.Context, tx pgx.Tx) error {
+		for _, q := range []string{
+			`DELETE FROM keycloak_idp_configs            WHERE tenant_id = $1`,
+			`DELETE FROM keycloak_idp_config_validations WHERE tenant_id = $1`,
+			`DELETE FROM realm_config_reconciliations    WHERE tenant_id = $1`,
+			`DELETE FROM provisioning_operations         WHERE tenant_id = $1`,
+			`DELETE FROM pending_audit_entries           WHERE tenant_id = $1`,
+		} {
+			if _, err := tx.Exec(ctx, q, realm.TenantID); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
 		failIdempotency(ctx, jctx, idemKey)
 		return err
 	}

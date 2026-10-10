@@ -3,6 +3,7 @@ package port
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/google/uuid"
@@ -75,17 +76,25 @@ type IdempotencyStore interface {
 	Begin(ctx context.Context, key string, tenantID uuid.UUID, operation string) (existing *domain.ProvisioningOperation, found bool, err error)
 	Complete(ctx context.Context, key string, result json.RawMessage) error
 	Fail(ctx context.Context, key string) error
+	// ExpireStaleInProgress transitions `in_progress` rows older than
+	// olderThan to `failed`, up to limit rows per call. This unblocks callers
+	// that received a 503 mid-operation and cannot retry because their key
+	// appears stuck in_progress (the operation's transaction rolled back but
+	// Fail was never reached). Returns the count of rows transitioned.
+	ExpireStaleInProgress(ctx context.Context, olderThan time.Duration, limit int) (int, error)
 }
 
 // ProcessedEventsStore implements the consumer dedup ledger (§4.5, §7).
-// platform-events has no processed-events API of its own — consumers
-// implement Envelope.ID + INSERT ON CONFLICT DO NOTHING against a local
-// table, matching iam-org-membership's IdempotencyStore.
+// The concrete implementation is InboxStoreAdapter, which routes to three
+// platform-events inbox.Store instances — one per inbound consumer. All
+// processed_events SQL is owned by inbox.Store; this port defines the
+// per-consumer lookup/mark/prune contract used by consumers and the
+// reconciler's processed-events-prune job.
 type ProcessedEventsStore interface {
 	IsProcessed(ctx context.Context, consumer domain.ProcessedEventsConsumer, eventID string) (bool, error)
 	MarkProcessed(ctx context.Context, consumer domain.ProcessedEventsConsumer, eventID string) error
-	// Prune deletes up to limit rows older than ttlDays (PE-1 / IDEMP-4).
-	// Batched so a backlog larger than one tick converges over several
-	// ticks instead of one unbounded DELETE.
+	// Prune deletes up to limit rows older than ttlDays across all consumers
+	// (PE-1 / IDEMP-4). Batched so a backlog larger than one tick converges
+	// over several ticks instead of one unbounded DELETE.
 	Prune(ctx context.Context, ttlDays, limit int) (int, error)
 }

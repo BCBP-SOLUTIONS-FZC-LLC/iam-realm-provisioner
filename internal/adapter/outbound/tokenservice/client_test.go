@@ -474,6 +474,59 @@ func TestReadPrincipal_ServerErrorMapsToTokenServiceUnavailable(t *testing.T) {
 	assert.Equal(t, domain.ErrTokenServiceUnavailable, derr.Code)
 }
 
+// TestReadPrincipal_ResponseShapePinned pins the TS-3 response JSON field
+// names and types that RP-18 will rely on. If Token Service renames, drops,
+// or changes the type of any field, this test fails before RP-18 ships —
+// catching contract drift at the unit-test layer rather than in staging.
+func TestReadPrincipal_ResponseShapePinned(t *testing.T) {
+	tenantID, principalID := uuid.New(), uuid.New()
+	cadence := 30
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, fmt.Sprintf("/api/v1/internal/tenants/%s/service-accounts/%s", tenantID, principalID), r.URL.Path)
+		assert.Equal(t, domain.SystemActorID, r.Header.Get("x-user-id"))
+		assert.Equal(t, tenantID.String(), r.Header.Get("x-tenant-id"))
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, `{
+			"principal_id": "%s",
+			"tenant_id": "%s",
+			"keycloak_client_id": "platform-automation",
+			"principal_type": "platform_automation",
+			"status": "active",
+			"record_version": 3,
+			"credentials": [{
+				"version": 2,
+				"status": "active",
+				"openbao_path": "secret/data/iam/ts/tenants/%s/credentials/v2",
+				"issued_at": "2026-09-01T00:00:00Z",
+				"expires_at": "2027-09-01T00:00:00Z",
+				"rotation_cadence_days": %d,
+				"next_rotation_at": "2026-12-01T00:00:00Z"
+			}]
+		}`, principalID, tenantID, tenantID, cadence)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, noopLogger{})
+	res, err := c.ReadPrincipal(context.Background(), tenantID, principalID)
+	require.NoError(t, err)
+
+	assert.Equal(t, principalID, res.PrincipalID)
+	assert.Equal(t, tenantID, res.TenantID)
+	assert.Equal(t, "platform-automation", res.KeycloakClientID)
+	assert.Equal(t, "platform_automation", res.PrincipalType)
+	assert.Equal(t, "active", res.Status)
+	assert.Equal(t, 3, res.RecordVersion)
+	require.Len(t, res.Credentials, 1)
+	cred := res.Credentials[0]
+	assert.Equal(t, 2, cred.Version)
+	assert.Equal(t, "active", cred.Status)
+	assert.NotNil(t, cred.ExpiresAt)
+	assert.NotNil(t, cred.RotationCadenceDays)
+	assert.Equal(t, cadence, *cred.RotationCadenceDays)
+	assert.NotNil(t, cred.NextRotationAt)
+}
+
 func TestReadPrincipal_DecodeErrorPropagates(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
