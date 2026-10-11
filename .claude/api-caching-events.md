@@ -4,7 +4,7 @@
 
 All 17 endpoints live under **one** prefix: `/api/v1/internal/*` — this service has almost no public surface; every route is mesh-internal, called by the Signup BFF, Org & Membership, Billing (via events, not directly), or operator tooling. Three infra routes (`/healthz`, `/readyz`) and two docs routes (`/asyncapi`, `/asyncapi.yaml`) sit outside that group, unauthenticated. `/metrics` is served on a **separate port** (`METRICS_PORT=9090`), never on the main router.
 
-Middleware chain (`router.go`): 1 MB body-size cap → `gincommon.TimeoutMiddleware(30s)` → `gincommon.ObservabilityMiddlewares` → (per-route-group) `gincommon.ProtectedMiddlewares` → `GUCBridgeMiddleware` (binds `app.tenant_id` transaction-locally) → `RequireJSONContentType` → `RequireSystemRole` (defense-in-depth; mesh mTLS + NetworkPolicy is primary) → per-route `RequireIdempotencyKey` / `RequireOperatorRole` where applicable.
+Middleware chain (`router.go`): 1 MB body-size cap → `gincommon.ObservabilityMiddlewares` (with `TimeoutMiddleware(30s)` innermost, via `Config.RequestTimeout`) → (per-route-group) `gincommon.ProtectedMiddlewares` → `GUCBridgeMiddleware` (binds `app.tenant_id` transaction-locally) → `RequireJSONContentType` → `RequireSystemRole` (defense-in-depth; mesh mTLS + NetworkPolicy is primary) → per-route `RequireIdempotencyKey` / `RequireOperatorRole` where applicable.
 
 ## Endpoint Catalogue (RP-1..RP-17)
 
@@ -30,7 +30,7 @@ Middleware chain (`router.go`): 1 MB body-size cap → `gincommon.TimeoutMiddlew
 
 **RP-9's route param note:** the frozen §25 path spells the segment `:uid`; Gin requires one wildcard name per path position across sibling routes sharing a prefix, and RP-15/RP-16 already use `:keycloak_user_id` at that position — so RP-9 uses the same internal capture name. This is a routing-internals detail only; the actual URL a caller hits is unchanged, and no wire contract is broken.
 
-Every mutating endpoint above marked "required" enforces `RequireIdempotencyKey` — a missing header is `400 missing_idempotency_key`; a reused key against an in-flight or previously-failed operation is `409 operation_in_progress`; a reused key against a `succeeded` operation replays the stored JSON result rather than re-executing.
+Every mutating endpoint above marked "required" enforces `RequireIdempotencyKey` — a missing header is `400 missing_idempotency_key`; a reused key against an in-flight operation is `409 operation_in_progress`; a reused key against a `failed` operation, or an `in_progress` one older than `IDEMPOTENCY_IN_PROGRESS_LEASE` (15m — its pod died), is reclaimed and re-executed (every step is a Keycloak-effect-first reconcile, so it converges); a reused key against a `succeeded` operation replays the stored JSON result rather than re-executing.
 
 ## Error Taxonomy (§17, `internal/core/domain/errors.go`)
 
@@ -61,6 +61,8 @@ Every mutating endpoint above marked "required" enforces `RequireIdempotencyKey`
 | `object_store_unavailable` | 503 | S3 realm-export failure (RP-C3 offboarding) |
 | `db_unavailable` | 503 | Postgres connectivity / resource SQLSTATE (08/53/57/58) |
 | `token_service_unavailable` | 503 | Additive — Token Service TS-1/TS-4 unreachable (§2.5) |
+| `request_timeout` | 503 | Additive — Postgres statement/lock timeout (57014/55P03); retryable, not an outage |
+| `tenant_mismatch` | 403 | Additive — `RequireTenantMatch`: the `/tenants/:id` (or provision body) tenant is not the caller's `x-tenant-id`; rejected before any Keycloak call |
 
 `Error.Status()` derives the HTTP code from `Code` via a lookup table; an unrecognized code defaults to 500. `Error.WithDetails(map[string]any)` attaches structured context echoed into the response body's `details` field.
 
@@ -94,7 +96,7 @@ Every payload is validated against an embedded JSON Schema (`internal/eventschem
 
 Each queue has a `-dlq` sibling, `maxReceiveCount=5`. Dedup via `processed_events` PK `(event_id, consumer)`, `consumer ∈ {membership, tenant, billing}`.
 
-**Inbound pipeline** (`cmd/server/inbound_schema.go`'s `inboundHandler`, options from `wiring.go`'s `consumerOptions`): `GlueDecodeCodec` strips the Glue header → `instrumentConsumer` (`platform_messages_*{consumer}`) → `validateConsumed` → `Handle`. `validateConsumed` checks the payload against the consumer's own consumed-message schema (`eventschema.ConsumedByConsumer` — 6 schemas, per consumer, so billing's `TenantReactivated` uses `billing_tenant_reactivated.json`, never the produced one); unknown types pass to `ackUnknown` (`unknown_event_acknowledged_total{topic=<source topic>,event_type}`); a violation increments `iam_realm_provisioner_consumed_schema_violations_total{consumer,event_type}` (critical alert) and is returned as an error. Failing messages reach the handler on deliveries 1–4; `dlqHandler` takes the 5th (`platform_dlq_messages_total{consumer}`, returns an error so the message isn't deleted), then SQS redrives to `-dlq`. No straight-to-DLQ `SendMessage` (arch-lint events invariant).
+**Inbound pipeline** (`internal/adapter/inbound/sqspipeline`: `NewConsumer` from `eventcfg.LoadSQS` + `EnvForQueue`, `Handler`; `RequireDLQ` fails startup for a queue with no RedrivePolicy): the library's `GlueDecodeCodec` strips the Glue header → straight-to-DLQ route → consumer span → `validateConsumed` → `Handle` (platform-events records `platform_messages_received/processed/failed_total{queue,event_type}` around the handler). `validateConsumed` checks the payload against the consumer's own consumed-message schema (`eventschema.ConsumedByConsumer` — 6 schemas, per consumer, so billing's `TenantReactivated` uses `billing_tenant_reactivated.json`, never the produced one); unknown types pass to `ackUnknown` (`unknown_event_acknowledged_total{topic=<source topic>,event_type}`); a violation increments `iam_realm_provisioner_consumed_schema_violations_total{consumer,event_type}` (critical alert) and is sent straight to `-dlq` on its first delivery (`SendToDLQ`, original body and attributes, reason `schema_violation`). Persistently failing messages reach the handler on deliveries 1–4; platform-events forwards the 5th to `-dlq` itself (`WithDLQForwarding`, `platform_dlq_messages_total`), before SQS's own redrive. Both go through the library's DLQ publisher, so arch-lint's events invariant holds. Dedup: platform-events' `pkg/inbox` over `processed_events`.
 
 ### AsyncAPI & Schema Drift
 

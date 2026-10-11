@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/test/dbseed"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 	"github.com/stretchr/testify/require"
 )
 
@@ -40,7 +40,7 @@ func setupSysPool(t testing.TB, rawPool *dbseed.Pool) *pgcommon.Pool {
 	// equivalent grant is Terraform-owned (this repo has no rls_violation_log
 	// GRANT of its own to realm_provisioner_migrator; see the comment on
 	// RLSViolationCounts).
-	_, err = rawPool.Exec(ctx, `GRANT SELECT ON rls_violation_log TO realm_provisioner_migrator`)
+	_, err = rawPool.Exec(ctx, `GRANT SELECT, DELETE ON rls_violation_log TO realm_provisioner_migrator`)
 	require.NoError(t, err)
 
 	// RLSViolationCounts's persisted high-water mark (§4.2) — read via

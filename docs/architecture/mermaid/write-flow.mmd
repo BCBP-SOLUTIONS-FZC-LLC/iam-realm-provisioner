@@ -17,11 +17,11 @@ sequenceDiagram
     alt key already succeeded
         IDEM -->> SVC: existing row, status=succeeded
         SVC -->> H: replay stored result (no Keycloak call, no tx — IDEMP-3)
-    else key in_progress or failed
-        IDEM -->> SVC: existing row, status != succeeded
+    else key in_progress, within IDEMPOTENCY_IN_PROGRESS_LEASE
+        IDEM -->> SVC: existing row, status=in_progress
         SVC -->> H: 409 operation_in_progress
-    else new key
-        IDEM -->>- SVC: not found — proceed, row now in_progress
+    else new, failed, or lease-expired key
+        IDEM -->>- SVC: (re)claimed — proceed, row now in_progress
 
         rect rgb(255, 245, 230)
         Note over SVC,KC: Phase 1 — Keycloak effect (no Postgres transaction open)
@@ -59,4 +59,4 @@ sequenceDiagram
     SNS -->>- Runner: MessageID
     Runner ->> OB: UPDATE outbox_events SET published_at = now()
 
-    Note over SVC,DB: Crash recovery (CONS-2): if the process dies after the Keycloak<br/>effect but before RunInTx commits, the ledger row is stuck in_progress<br/>with a real Keycloak user already created. A caller retry with the SAME<br/>Idempotency-Key re-enters ProvisionTrial — CreateTrialUser reconciles to a<br/>no-op (user already exists), then the local commit lands. A committed<br/>local row therefore ALWAYS reflects a real Keycloak state — never the<br/>reverse, and a Keycloak failure at any point leaves NO local trace.
+    Note over SVC,DB: Crash recovery (CONS-2): if the process dies after the Keycloak<br/>effect but before RunInTx commits, the ledger row is left in_progress<br/>with a real Keycloak user already created. Once IDEMPOTENCY_IN_PROGRESS_LEASE<br/>(15m) passes, a caller retry with the SAME Idempotency-Key reclaims it and re-enters ProvisionTrial — CreateTrialUser reconciles to a<br/>no-op (user already exists), then the local commit lands. A committed<br/>local row therefore ALWAYS reflects a real Keycloak state — never the<br/>reverse, and a Keycloak failure at any point leaves NO local trace.

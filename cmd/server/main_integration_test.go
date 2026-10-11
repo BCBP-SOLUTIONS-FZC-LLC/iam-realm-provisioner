@@ -52,6 +52,10 @@ func freePort(t *testing.T) string {
 func setServerTestEnv(t *testing.T, dsn, appPort, metricsPort string) {
 	t.Helper()
 	t.Setenv("APP_ENV", "test")
+	// The same metrics identity the rest of this test binary registered
+	// (ensureMetricsRegistered) — gincommon rejects a second one, and `make
+	// test` exports BUILD_VERSION as `git describe`.
+	t.Setenv("BUILD_VERSION", "test")
 	t.Setenv("APP_PORT", appPort)
 	t.Setenv("METRICS_PORT", metricsPort)
 	t.Setenv("DATABASE_URL", dsn)

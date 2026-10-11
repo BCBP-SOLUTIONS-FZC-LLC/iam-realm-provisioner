@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
 )
 
 func TestTenantConsumer_TrialStarted_UpsertsTrialEndsAtOnly(t *testing.T) {
@@ -23,7 +23,7 @@ func TestTenantConsumer_TrialStarted_UpsertsTrialEndsAtOnly(t *testing.T) {
 		return existing, nil
 	}}
 	dedup := newStubDedup()
-	c := NewTenantConsumer(repo, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewTenantConsumer(repo, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	wantEndsAt := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
 	env := envelope(t, domain.EventTrialStarted, domain.TrialStartedPayload{
@@ -47,7 +47,7 @@ func TestTenantConsumer_Redelivery_IsIdempotentNotDoubleWrite(t *testing.T) {
 		return &domain.TenantRealm{TenantID: tenantID, Strategy: domain.RealmStrategyShared, Status: domain.RealmStatusActive}, nil
 	}}
 	dedup := newStubDedup()
-	c := NewTenantConsumer(repo, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewTenantConsumer(repo, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, domain.EventTrialStarted, domain.TrialStartedPayload{
 		TenantID: tenantID, Plan: "starter", TrialEndsAt: time.Now().UTC().Format(time.RFC3339),
@@ -70,7 +70,7 @@ func TestTenantConsumer_UpdateAndMarkShareOneTransaction(t *testing.T) {
 	}}
 	dedup := newStubDedup()
 	tx := newFakeTxRunner(repo, dedup)
-	c := NewTenantConsumer(repo, dedup, tx, stubLogger{})
+	c := NewTenantConsumer(repo, tx, stubLogger{})
 
 	env := envelope(t, domain.EventTrialStarted, domain.TrialStartedPayload{
 		TenantID: tenantID, Plan: "starter", TrialEndsAt: time.Now().UTC().Format(time.RFC3339),
@@ -92,7 +92,7 @@ func TestTenantConsumer_MarkFailureRollsBackTheUpdate(t *testing.T) {
 	dedup := newStubDedup()
 	dedup.markProcessErr = errors.New("dedup write failed")
 	tx := newFakeTxRunner(repo, dedup)
-	c := NewTenantConsumer(repo, dedup, tx, stubLogger{})
+	c := NewTenantConsumer(repo, tx, stubLogger{})
 
 	env := envelope(t, domain.EventTrialStarted, domain.TrialStartedPayload{
 		TenantID: uuid.New(), TrialEndsAt: time.Now().Format(time.RFC3339),
@@ -113,7 +113,7 @@ func TestTenantConsumer_UpdateFailureLeavesEventUnmarked(t *testing.T) {
 	}
 	dedup := newStubDedup()
 	tx := newFakeTxRunner(repo, dedup)
-	c := NewTenantConsumer(repo, dedup, tx, stubLogger{})
+	c := NewTenantConsumer(repo, tx, stubLogger{})
 
 	env := envelope(t, domain.EventTrialStarted, domain.TrialStartedPayload{
 		TenantID: uuid.New(), TrialEndsAt: time.Now().Format(time.RFC3339),
@@ -135,7 +135,7 @@ func TestTenantConsumer_UnknownEventType_Acknowledged(t *testing.T) {
 		return nil, nil
 	}}
 	dedup := newStubDedup()
-	c := NewTenantConsumer(repo, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewTenantConsumer(repo, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, "TrialExpired", map[string]any{})
 	require.NoError(t, c.Handle(context.Background(), env))
@@ -151,7 +151,7 @@ func TestTenantConsumer_UnknownEventType_MarkProcessedFailurePropagates(t *testi
 	repo := &fakeRealmRepo{}
 	dedup := newStubDedup()
 	dedup.markProcessErr = errors.New("dedup write failed")
-	c := NewTenantConsumer(repo, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewTenantConsumer(repo, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, "TrialExpired", map[string]any{})
 	err := c.Handle(context.Background(), env)
@@ -159,22 +159,27 @@ func TestTenantConsumer_UnknownEventType_MarkProcessedFailurePropagates(t *testi
 	assert.Contains(t, err.Error(), "tenant consumer")
 }
 
-func TestTenantConsumer_IsProcessedErrorPropagates(t *testing.T) {
-	repo := &fakeRealmRepo{}
+// TenantConsumer has no IsProcessed pre-check: its only effect is a
+// Postgres write, so the inbox claim (in the same transaction) is the
+// dedup — a pre-check failure path does not exist.
+func TestTenantConsumer_DoesNotPreCheckProcessedEvents(t *testing.T) {
+	tenantID := uuid.New()
+	repo := &fakeRealmRepo{findFn: func(context.Context, uuid.UUID) (*domain.TenantRealm, error) {
+		return &domain.TenantRealm{TenantID: tenantID}, nil
+	}}
 	dedup := newStubDedup()
-	dedup.isProcessedErr = errors.New("dedup store unreachable")
-	c := NewTenantConsumer(repo, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	dedup.isProcessedErr = errors.New("would fail if consulted")
+	c := NewTenantConsumer(repo, newFakeTxRunner(repo, dedup), stubLogger{})
 
-	env := envelope(t, domain.EventTrialStarted, domain.TrialStartedPayload{TenantID: uuid.New(), TrialEndsAt: time.Now().Format(time.RFC3339)})
-	err := c.Handle(context.Background(), env)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "check processed_events")
+	env := envelope(t, domain.EventTrialStarted, domain.TrialStartedPayload{TenantID: tenantID, TrialEndsAt: time.Now().Format(time.RFC3339)})
+	require.NoError(t, c.Handle(context.Background(), env))
+	assert.Len(t, dedup.marked, 1)
 }
 
 func TestTenantConsumer_MalformedPayload_DecodeErrorPropagates(t *testing.T) {
 	repo := &fakeRealmRepo{}
 	dedup := newStubDedup()
-	c := NewTenantConsumer(repo, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewTenantConsumer(repo, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := events.NewEnvelope(domain.EventTrialStarted, "test", json.RawMessage(`{"tenant_id":"not-a-uuid"}`))
 	err := c.Handle(context.Background(), env)
@@ -185,7 +190,7 @@ func TestTenantConsumer_MalformedPayload_DecodeErrorPropagates(t *testing.T) {
 func TestTenantConsumer_InvalidTrialEndsAtFormat_ParseErrorPropagates(t *testing.T) {
 	repo := &fakeRealmRepo{}
 	dedup := newStubDedup()
-	c := NewTenantConsumer(repo, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewTenantConsumer(repo, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, domain.EventTrialStarted, domain.TrialStartedPayload{TenantID: uuid.New(), TrialEndsAt: "not-a-timestamp"})
 	err := c.Handle(context.Background(), env)
@@ -197,7 +202,7 @@ func TestTenantConsumer_FindByTenantIDErrorPropagates(t *testing.T) {
 	wantErr := errors.New("row not found")
 	repo := &fakeRealmRepo{findFn: func(context.Context, uuid.UUID) (*domain.TenantRealm, error) { return nil, wantErr }}
 	dedup := newStubDedup()
-	c := NewTenantConsumer(repo, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewTenantConsumer(repo, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, domain.EventTrialStarted, domain.TrialStartedPayload{TenantID: uuid.New(), TrialEndsAt: time.Now().Format(time.RFC3339)})
 	err := c.Handle(context.Background(), env)
@@ -212,7 +217,7 @@ func TestTenantConsumer_UpdateErrorPropagates(t *testing.T) {
 		updateErr: errors.New("optimistic lock conflict"),
 	}
 	dedup := newStubDedup()
-	c := NewTenantConsumer(repo, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewTenantConsumer(repo, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, domain.EventTrialStarted, domain.TrialStartedPayload{TenantID: uuid.New(), TrialEndsAt: time.Now().Format(time.RFC3339)})
 	err := c.Handle(context.Background(), env)
@@ -225,10 +230,10 @@ func TestTenantConsumer_MarkProcessedErrorPropagates(t *testing.T) {
 	repo := &fakeRealmRepo{findFn: func(context.Context, uuid.UUID) (*domain.TenantRealm, error) { return &domain.TenantRealm{}, nil }}
 	dedup := newStubDedup()
 	dedup.markProcessErr = errors.New("dedup write failed")
-	c := NewTenantConsumer(repo, dedup, newFakeTxRunner(repo, dedup), stubLogger{})
+	c := NewTenantConsumer(repo, newFakeTxRunner(repo, dedup), stubLogger{})
 
 	env := envelope(t, domain.EventTrialStarted, domain.TrialStartedPayload{TenantID: uuid.New(), TrialEndsAt: time.Now().Format(time.RFC3339)})
 	err := c.Handle(context.Background(), env)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "mark processed")
+	assert.Contains(t, err.Error(), "dedup write failed", "the inbox claim failure propagates")
 }

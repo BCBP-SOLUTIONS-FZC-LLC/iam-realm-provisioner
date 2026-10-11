@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -15,22 +16,33 @@ import (
 // (test/unit/mocks_test.go): unset *Fn fields panic if called, so each test
 // wires only the methods its scenario actually exercises.
 
-// ── mockProcessedEventsStore ─────────────────────────────────────────────
+// ── mockInboxPruner ──────────────────────────────────────────────────────
 
-type mockProcessedEventsStore struct {
-	PruneFn func(ctx context.Context, ttlDays, limit int) (int, error)
+type mockInboxPruner struct {
+	PruneFn func(ctx context.Context, consumer domain.ProcessedEventsConsumer, retention time.Duration, batch int) (int64, error)
 }
 
-var _ port.ProcessedEventsStore = (*mockProcessedEventsStore)(nil)
+var _ port.InboxPruner = (*mockInboxPruner)(nil)
 
-func (m *mockProcessedEventsStore) IsProcessed(ctx context.Context, consumer domain.ProcessedEventsConsumer, eventID string) (bool, error) {
-	panic("not implemented")
+func (m *mockInboxPruner) Prune(ctx context.Context, consumer domain.ProcessedEventsConsumer, retention time.Duration, batch int) (int64, error) {
+	return m.PruneFn(ctx, consumer, retention, batch)
 }
-func (m *mockProcessedEventsStore) MarkProcessed(ctx context.Context, consumer domain.ProcessedEventsConsumer, eventID string) error {
-	panic("not implemented")
+
+// ── mockRetentionPruner ──────────────────────────────────────────────────
+
+type mockRetentionPruner struct {
+	OpsFn func(ctx context.Context, olderThan time.Duration, batch int) (int64, error)
+	RLSFn func(ctx context.Context, olderThan time.Duration, batch int) (int64, error)
 }
-func (m *mockProcessedEventsStore) Prune(ctx context.Context, ttlDays, limit int) (int, error) {
-	return m.PruneFn(ctx, ttlDays, limit)
+
+var _ port.RetentionPruner = (*mockRetentionPruner)(nil)
+
+func (m *mockRetentionPruner) PruneProvisioningOperations(ctx context.Context, olderThan time.Duration, batch int) (int64, error) {
+	return m.OpsFn(ctx, olderThan, batch)
+}
+
+func (m *mockRetentionPruner) PruneRLSViolationLog(ctx context.Context, olderThan time.Duration, batch int) (int64, error) {
+	return m.RLSFn(ctx, olderThan, batch)
 }
 
 // ── mockKeycloakAdmin ─────────────────────────────────────────────────────

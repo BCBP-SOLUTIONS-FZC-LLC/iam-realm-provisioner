@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,7 +44,20 @@ type ProvisioningService struct {
 	log          port.SlogStyleLogger
 	sharedRealm  string
 	shardIDs     []string
+
+	// convertTimeout bounds one detached RP-3 conversion (Convert).
+	convertTimeout time.Duration
+	// inflight tracks detached conversions so shutdown can wait for them
+	// (Drain) before the pools close.
+	inflight sync.WaitGroup
 }
+
+// DefaultConvertTimeout bounds a detached RP-3 conversion. The LLD budget is
+// p95 ≤ 8s + ~0.3s per migrated user (§11.1), so 10 minutes covers ~2,000
+// trial users. It must stay below the idempotency ledger's in_progress
+// lease (postgres.DefaultInProgressLease, 15m), or a still-running
+// conversion could be reclaimed and run twice.
+const DefaultConvertTimeout = 10 * time.Minute
 
 // NewProvisioningService wires ProvisioningService's dependencies.
 func NewProvisioningService(
@@ -63,7 +77,32 @@ func NewProvisioningService(
 	}
 	return &ProvisioningService{
 		realms: realms, idempotency: idempotency, keycloak: keycloak, tokenService: tokenService,
-		tx: tx, sharedRealm: sharedRealm, shardIDs: shardIDs,
+		tx: tx, sharedRealm: sharedRealm, shardIDs: shardIDs, convertTimeout: DefaultConvertTimeout,
+	}
+}
+
+// WithConvertTimeout overrides the detached RP-3 conversion budget
+// (CONVERT_TIMEOUT) and returns s. Non-positive values are ignored.
+func (s *ProvisioningService) WithConvertTimeout(d time.Duration) *ProvisioningService {
+	if d > 0 {
+		s.convertTimeout = d
+	}
+	return s
+}
+
+// Drain waits for detached conversions to finish, or for ctx to be done.
+// Called at shutdown before the pools close; a conversion cut off by the
+// shutdown budget leaves its key in_progress until the ledger lease expires,
+// after which a retry resumes it (every step is a Keycloak-effect-first
+// reconcile).
+func (s *ProvisioningService) Drain(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() { s.inflight.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -88,6 +127,8 @@ func (s *ProvisioningService) failIdempotency(ctx context.Context, idempotencyKe
 // primary error to return, so a teardown failure here is only logged (an
 // orphaned realm is caught by the RP-C reconcilers / manual cleanup).
 func (s *ProvisioningService) bestEffortDeleteRealm(ctx context.Context, realmName string) {
+	ctx, cancel := compensationContext(ctx)
+	defer cancel()
 	if err := s.keycloak.DeleteRealmIfExists(ctx, realmName); err != nil {
 		s.log.WarnContext(ctx, "compensating teardown: delete realm failed", "realm", realmName, "error", err.Error())
 	}
@@ -130,6 +171,8 @@ func sharedPlatformAutomationClientID(tenantID uuid.UUID) string {
 // dedicated realm. Best-effort: the caller already has the primary result
 // to return, so a teardown failure here is only logged.
 func (s *ProvisioningService) bestEffortDeleteServiceAccountClient(ctx context.Context, realmName, clientID string) {
+	ctx, cancel := compensationContext(ctx)
+	defer cancel()
 	if err := s.keycloak.DeleteServiceAccountClientIfExists(ctx, realmName, clientID); err != nil {
 		s.log.WarnContext(ctx, "compensating teardown: delete service-account client failed", "realm", realmName, "client_id", clientID, "error", err.Error())
 	}
@@ -543,9 +586,24 @@ type ConvertResult struct {
 	SharedSessionsTerminated bool      `json:"shared_sessions_terminated"`
 }
 
+type convertOutcome struct {
+	out *ConvertResult
+	err error
+}
+
 // Convert implements RP-3 (§8.3): trial->paid conversion with user
 // migration. Requires the tenant to currently be `shared` strategy.
-func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string, tenantID uuid.UUID, req ConvertRequest) (out *ConvertResult, err error) {
+//
+// Conversion is O(users) Keycloak calls (§11.1: p95 ≤ 8s + ~0.3s/user), so
+// for a large trial it can outrun the 30s request deadline. Once the key is
+// claimed the work therefore runs on a context detached from the request,
+// bounded by convertTimeout. If the request is done first (deadline or
+// client disconnect) the caller gets 409 operation_in_progress — the
+// existing contract tells it to retry with the same Idempotency-Key — and
+// the conversion keeps going; the retry replays its stored result once it
+// has finished. Canceling half-way through a user migration would instead
+// leave a partially-migrated dedicated realm behind.
+func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string, tenantID uuid.UUID, req ConvertRequest) (*ConvertResult, error) {
 	existing, found, err := s.idempotency.Begin(ctx, idempotencyKey, tenantID, domain.OpConvert)
 	if err != nil {
 		return nil, err
@@ -553,6 +611,36 @@ func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string
 	if found {
 		return replayOrConflict[ConvertResult](existing)
 	}
+
+	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.convertTimeout)
+	done := make(chan convertOutcome, 1)
+	s.inflight.Add(1)
+	go func() {
+		defer s.inflight.Done()
+		defer cancel()
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.ErrorContext(runCtx, "convert: panic in detached conversion", "tenant_id", tenantID, "panic", fmt.Sprint(r))
+				s.failIdempotency(runCtx, idempotencyKey)
+				done <- convertOutcome{err: fmt.Errorf("convert: panic: %v", r)}
+			}
+		}()
+		out, err := s.convertClaimed(runCtx, idempotencyKey, tenantID, req)
+		done <- convertOutcome{out: out, err: err}
+	}()
+
+	select {
+	case r := <-done:
+		return r.out, r.err
+	case <-ctx.Done():
+		return nil, domain.NewError(domain.ErrOperationInProgress, "conversion is still running; retry with the same Idempotency-Key").
+			WithDetails(map[string]any{"tenant_id": tenantID})
+	}
+}
+
+// convertClaimed is the RP-3 conversion body, run after Convert has claimed
+// idempotencyKey.
+func (s *ProvisioningService) convertClaimed(ctx context.Context, idempotencyKey string, tenantID uuid.UUID, req ConvertRequest) (out *ConvertResult, err error) {
 	defer func() { metrics.ProvisionTotal.WithLabelValues("convert", outcome(err)).Inc() }()
 
 	current, err := s.realms.FindByTenantID(ctx, tenantID)
@@ -974,5 +1062,5 @@ func replayOrConflict[T any](op *domain.ProvisioningOperation) (*T, error) {
 		}
 		return &out, nil
 	}
-	return nil, domain.NewError(domain.ErrOperationInProgress, "a call with this Idempotency-Key is already in progress or previously failed — retry")
+	return nil, domain.NewError(domain.ErrOperationInProgress, "a call with this Idempotency-Key is already in progress — retry with the same key")
 }

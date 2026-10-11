@@ -7,7 +7,7 @@ import (
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
 )
 
 // BillingConsumer handles billing-realm-q (§7.1, §8.11, RP-EVT-7):
@@ -19,26 +19,25 @@ import (
 type BillingConsumer struct {
 	realms   port.TenantRealmRepository
 	keycloak port.KeycloakAdmin
-	dedup    port.ProcessedEventsStore
-	tx       port.TxRunner
+	inbox    port.Inbox
 	log      port.Logger
 }
 
 // NewBillingConsumer constructs a BillingConsumer for billing-realm-q.
-func NewBillingConsumer(realms port.TenantRealmRepository, keycloak port.KeycloakAdmin, dedup port.ProcessedEventsStore, tx port.TxRunner, log port.Logger) *BillingConsumer {
-	return &BillingConsumer{realms: realms, keycloak: keycloak, dedup: dedup, tx: tx, log: log}
+func NewBillingConsumer(realms port.TenantRealmRepository, keycloak port.KeycloakAdmin, inbox port.Inbox, log port.Logger) *BillingConsumer {
+	return &BillingConsumer{realms: realms, keycloak: keycloak, inbox: inbox, log: log}
 }
 
 // Handle dispatches one billing-realm-q message (RP-EVT-7).
 func (c *BillingConsumer) Handle(ctx context.Context, env events.Envelope[json.RawMessage]) error {
 	if env.Type != domain.EventTenantReactivated {
-		if err := ackUnknown(ctx, c.tx, c.dedup, c.log, domain.ConsumerBilling, env); err != nil {
+		if err := ackUnknown(ctx, c.inbox, c.log, domain.ConsumerBilling, env); err != nil {
 			return fmt.Errorf("billing consumer: %w", err)
 		}
 		return nil
 	}
 
-	processed, err := skipDuplicate(ctx, c.dedup, domain.ConsumerBilling, env.ID)
+	processed, err := skipDuplicate(ctx, c.inbox, domain.ConsumerBilling, env.ID)
 	if err != nil {
 		return fmt.Errorf("billing consumer: check processed_events: %w", err)
 	}
@@ -59,10 +58,9 @@ func (c *BillingConsumer) Handle(ctx context.Context, env events.Envelope[json.R
 
 	if row.Status != domain.RealmStatusSuspended {
 		// Never reached suspended (only cancelled/read-only) -> no Keycloak //nolint:misspell // "cancelled" mirrors O&M's actual enum spelling (frozen contract term)
-		// effect and no local write. MarkProcessed still goes through
-		// RunInTx so it joins withPool the same way iam-org-membership's
-		// no-op / unknown-type path does.
-		if err := markProcessedInTx(gucCtx, c.tx, c.dedup, domain.ConsumerBilling, env.ID); err != nil {
+		// effect and no local write — only the processed_events claim
+		// commits, the same way iam-org-membership's no-op path does.
+		if err := processOnce(gucCtx, c.inbox, domain.ConsumerBilling, env, noLocalWrite); err != nil {
 			return fmt.Errorf("billing consumer: %w", err)
 		}
 		return nil
@@ -75,16 +73,17 @@ func (c *BillingConsumer) Handle(ctx context.Context, env events.Envelope[json.R
 	if err := c.keycloak.EnableRealm(ctx, row.RealmName); err != nil {
 		return fmt.Errorf("billing consumer: enable realm: %w", err)
 	}
-	return c.tx.RunInTx(gucCtx, func(txCtx context.Context) error {
+	err = processOnce(gucCtx, c.inbox, domain.ConsumerBilling, env, func(txCtx context.Context) error {
 		row.Status = domain.RealmStatusActive
 		row.DisabledAt = nil
 		row.SuspensionSource = nil
 		if err := c.realms.Update(txCtx, row); err != nil {
 			return fmt.Errorf("billing consumer: update tenant_realms: %w", err)
 		}
-		if err := c.dedup.MarkProcessed(txCtx, domain.ConsumerBilling, env.ID); err != nil {
-			return fmt.Errorf("billing consumer: mark processed: %w", err)
-		}
 		return nil
 	})
+	if err != nil {
+		return fmt.Errorf("billing consumer: %w", err)
+	}
+	return nil
 }

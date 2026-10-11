@@ -3,16 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/glue"
 
 	eventbusadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/eventbus"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/eventschema"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
 )
 
 // eventschemaByType exposes the embedded schema map for the SNS Glue codec
@@ -56,60 +55,11 @@ func (noopPublisher) PublishBatch(context.Context, []events.Envelope[json.RawMes
 	return nil
 }
 
-// instrumentConsumer wraps handler with the Enterprise Platform
-// Observability Standard's Canonical Tier 1 message-lifecycle counters
-// (platform_messages_received_total/_processed_total/_failed_total,
-// registry.go) — pure observation, no behavior change: it always calls
-// through to handler and returns its result unmodified.
-func instrumentConsumer(consumer string, handler events.Handler) events.Handler {
-	return func(ctx context.Context, env events.Envelope[json.RawMessage]) error {
-		metrics.PlatformMessagesReceivedTotal.WithLabelValues(consumer).Inc()
-		err := handler(ctx, env)
-		if err != nil {
-			metrics.PlatformMessagesFailedTotal.WithLabelValues(consumer).Inc()
-		} else {
-			metrics.PlatformMessagesProcessedTotal.WithLabelValues(consumer).Inc()
-		}
-		return err
-	}
-}
-
-// dlqObserveReceiveCount is the ApproximateReceiveCount above which
-// platform-events routes a delivery to dlqHandler instead of the consumer
-// handler — one short of the inbound queues' own RedrivePolicy
-// maxReceiveCount=5 (§7.1, scripts/init-floci.sh), so the observer fires on
-// the 5th and last delivery before SQS redrives the message to -dlq.
-const dlqObserveReceiveCount = 4
-
-// consumerOptions is the option set every inbound SQS consumer is built
-// with: the decode-only Glue codec (upstream producers' Glue-framed
-// payloads), the queue's concurrency, and the dead-letter observer
-// (dlqHandler at dlqObserveReceiveCount).
-func consumerOptions(consumer string, concurrency int) []events.ConsumerOption {
-	return []events.ConsumerOption{
-		events.WithConsumerCodec(eventbusadapter.GlueDecodeCodec{}),
-		events.WithConcurrency(concurrency),
-		events.WithMaxReceiveCount(dlqObserveReceiveCount),
-		events.WithDeadLetterHandler(dlqHandler(consumer)),
-	}
-}
-
-// dlqHandler backs events.WithDeadLetterHandler, paired with
-// events.WithMaxReceiveCount(4) — one delivery short of this service's
-// queues' own maxReceiveCount=5 redrive-policy threshold (§7.1,
-// scripts/init-floci.sh) — so it fires exactly once per poison message,
-// on the last delivery SQS would give this consumer before redirecting
-// the message to the queue's -dlq sibling itself on the next attempt.
-// Deliberately returns a non-nil error unconditionally: per
-// platform-events' own documented contract ("The message is deleted only
-// if the dead-letter handler succeeds"), returning nil here would delete
-// the message immediately and it would never reach -dlq for operator
-// inspection — this handler exists only to observe
-// platform_dlq_messages_total (registry.go) before that pre-existing,
-// unaltered outcome plays out.
-func dlqHandler(consumer string) events.Handler {
-	return func(context.Context, events.Envelope[json.RawMessage]) error {
-		metrics.PlatformDLQMessagesTotal.WithLabelValues(consumer).Inc()
-		return errors.New("dead-letter threshold reached — left visible for SQS's own redrive to -dlq")
-	}
+// runMigrationsAtStartup reports whether this process migrates the schema
+// itself. RUN_MIGRATIONS=false is set on every Kubernetes replica, where the
+// migrate Job (cmd/migrate, a Helm pre-install/pre-upgrade hook) migrates
+// once per release instead; unset or any other value keeps startup
+// migration on (local dev, docker-compose, tests).
+func runMigrationsAtStartup() bool {
+	return !strings.EqualFold(strings.TrimSpace(os.Getenv("RUN_MIGRATIONS")), "false")
 }

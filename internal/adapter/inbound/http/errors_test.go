@@ -234,3 +234,20 @@ func TestHandleError_ConstraintViolationSQLState_Returns500(t *testing.T) {
 		t.Fatalf("expected internal_error, got %q", er.Error)
 	}
 }
+
+// A statement_timeout (57014) or lock_timeout (55P03) that leaked past the
+// service layer is a timed-out request, not a database outage.
+func TestHandleError_StatementOrLockTimeout_Returns503RequestTimeout(t *testing.T) {
+	for _, code := range []string{"57014", "55P03"} {
+		t.Run(code, func(t *testing.T) {
+			c, w := newErrorTestContext()
+			HandleError(c, &pgconn.PgError{Code: code})
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected 503, got %d", w.Code)
+			}
+			if er := decodeError(t, w); er.Error != string(domain.ErrRequestTimeout) {
+				t.Fatalf("expected request_timeout, got %q", er.Error)
+			}
+		})
+	}
+}

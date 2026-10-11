@@ -75,10 +75,13 @@ spec:
         - port: 443
           protocol: TCP
 
-    # Allow PostgreSQL connections. Container-internal port 5432.
+    # Allow PostgreSQL connections: direct Postgres (MIGRATION_DATABASE_URL,
+    # 5432) and PgBouncer (DATABASE_URL / SYSTEM_DATABASE_URL, commonly 6432).
     - ports:
-        - port: 5432
+        {{- range .Values.networkPolicy.databasePorts }}
+        - port: {{ . }}
           protocol: TCP
+        {{- end }}
 
     # Allow HTTP to Keycloak's Admin API — RP-INV-1's sole seam
     # (internal/adapter/outbound/keycloak/).
@@ -105,6 +108,13 @@ spec:
     # port 4318 some sibling services use).
     - ports:
         - port: 4317
+          protocol: TCP
+
+    # Allow the reconciler CronJobs (same pod labels) to push their metrics
+    # to the Prometheus Pushgateway (PROMETHEUS_PUSHGATEWAY_URL) — they have
+    # no /metrics listener, so without this every reconciler alert is dark.
+    - ports:
+        - port: {{ .Values.networkPolicy.pushgatewayPort }}
           protocol: TCP
 
     {{- with .Values.networkPolicy.additionalEgressRules }}

@@ -297,25 +297,6 @@ func (f *fakeWarnLogger) errorCount() int {
 	return len(f.error)
 }
 
-// TestGlueDecodeCodec_DecodeOnly confirms GlueDecodeCodec strips headers
-// without needing any Glue client/registry configuration (used by this
-// service's SQS consumers to decode events from producers whose Glue
-// registry this service does not have configured).
-func TestGlueDecodeCodec_DecodeOnly(t *testing.T) {
-	versionID := uuid.New().String()
-	payload := []byte(`{"x":1}`)
-	encoded, err := prependGlueHeader(versionID, payload)
-	require.NoError(t, err)
-
-	decoded, err := GlueDecodeCodec{}.Decode(context.Background(), "SomeEvent", encoded)
-	require.NoError(t, err)
-	assert.JSONEq(t, string(payload), string(decoded))
-
-	_, _, err = GlueDecodeCodec{}.Encode(context.Background(), "SomeEvent", payload)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "decode-only")
-}
-
 // ── GetSchemaByDefinition resolution ──────────────────────────────────────
 
 // TestNewGlueCodec_SendsRegisteredDefinition verifies the real embedded

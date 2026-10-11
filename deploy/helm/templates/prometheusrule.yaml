@@ -6,18 +6,14 @@ only the job/service label's literal "iam-realm-provisioner" here becomes
 the chart's fullname template (they coincide under the default release
 name). If you add or change an alert, update BOTH files.
 
-Enterprise Platform Observability Standard: three of this service's
-metrics (Keycloak call latency/failures, RLS-6 violations) have a
-shadow-emitted Tier 1 platform_* candidate — see
-internal/adapter/outbound/metrics/registry.go's PlatformRegistry and
-deploy/monitoring/app-alerts.yml's header. All three are Status:
-Proposed (submitted, not yet ratified), so every alert below
-intentionally still reads the authoritative iam_realm_provisioner_*
-metric per the standard's governance rules (11/12: no unilateral
-adoption of an unratified shared metric into production alerting). Cut
-an alert over to its platform_* candidate only after PlatformRegistry
-flips that entry's Status to Canonical, updating both this file and
-deploy/monitoring/app-alerts.yml together.
+Enterprise Platform Observability Standard: HTTP, outbox and SQS alerts
+read the Tier 1 platform_* metrics emitted by platform-gincommon and
+platform-events (the pre-standard http_, outbox_ and sqs_ names were removed);
+business alerts read this service's Tier 3 iam_realm_provisioner_* metrics.
+Every series carries {domain, service, environment}; platform-metric alerts
+aggregate by them. Alerts reading a metric whose Platform Observability
+Registry status is still "proposed" carry `metric_status: proposed` — see
+deploy/monitoring/app-alerts.yml's header.
 */ -}}
 {{- if .Values.serviceMonitor.enabled }}
 {{- $job := include "iam-realm-provisioner.fullname" . }}
@@ -44,6 +40,7 @@ spec:
             severity: critical
             team: platform
           annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerdown"
             summary: iam-realm-provisioner has no healthy instances
             description: >-
               No iam-realm-provisioner pods have been scraped as healthy for 2
@@ -62,6 +59,7 @@ spec:
             severity: warning
             team: platform
           annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerreplicasmissing"
             summary: iam-realm-provisioner running below minimum replica count
             description: >-
               Fewer than {{ .Values.autoscaling.minReplicas }} replicas are healthy. Current healthy count: {{ "{{ $value }}" }}.
@@ -72,15 +70,17 @@ spec:
         # ── HTTP 5xx error rate ───────────────────────────────────────────
         - alert: IAMRealmProvisionerHighErrorRate
           expr: |
-            sum(rate(http_requests_total{job={{ $job | quote }}, status=~"5.."}[5m]))
+            sum by (domain, service, environment) (rate(platform_http_requests_total{job={{ $job | quote }}, status_class="5xx"}[5m]))
               /
-            sum(rate(http_requests_total{job={{ $job | quote }}}[5m]))
+            sum by (domain, service, environment) (rate(platform_http_requests_total{job={{ $job | quote }}}[5m]))
             > 0.05
           for: 5m
           labels:
+            metric_status: proposed
             severity: warning
             team: platform
           annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerhigherrorrate"
             summary: iam-realm-provisioner 5xx error rate above 5%
             description: >-
               {{ "{{ $value | humanizePercentage }}" }} of requests are returning 5xx errors
@@ -90,15 +90,17 @@ spec:
         # ── HTTP 5xx error rate — critical ────────────────────────────────
         - alert: IAMRealmProvisionerCriticalErrorRate
           expr: |
-            sum(rate(http_requests_total{job={{ $job | quote }}, status=~"5.."}[5m]))
+            sum by (domain, service, environment) (rate(platform_http_requests_total{job={{ $job | quote }}, status_class="5xx"}[5m]))
               /
-            sum(rate(http_requests_total{job={{ $job | quote }}}[5m]))
+            sum by (domain, service, environment) (rate(platform_http_requests_total{job={{ $job | quote }}}[5m]))
             > 0.20
           for: 2m
           labels:
+            metric_status: proposed
             severity: critical
             team: platform
           annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionercriticalerrorrate"
             summary: iam-realm-provisioner 5xx error rate above 20%
             description: >-
               {{ "{{ $value | humanizePercentage }}" }} of requests are returning 5xx errors.
@@ -118,6 +120,7 @@ spec:
             severity: warning
             team: platform
           annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerkeycloakcallfailurerate"
             summary: iam-realm-provisioner Keycloak Admin API failure rate above 5%
             description: >-
               {{ "{{ $value | humanizePercentage }}" }} of Keycloak Admin API calls are
@@ -133,6 +136,7 @@ spec:
             severity: warning
             team: platform
           annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisioneradmintokenrefresh401spike"
             summary: iam-realm-provisioner admin token is being reactively refreshed on 401s
             description: >-
               {{ "{{ $value | humanize }}" }} reactive (401-triggered) admin token
@@ -147,15 +151,17 @@ spec:
         - alert: IAMRealmProvisionerHighLatency
           expr: |
             histogram_quantile(0.99,
-              sum by (le) (
-                rate(http_request_duration_seconds_bucket{job={{ $job | quote }}}[5m])
+              sum by (le, domain, service, environment) (
+                rate(platform_http_request_duration_seconds_bucket{job={{ $job | quote }}}[5m])
               )
             ) > 1
           for: 10m
           labels:
+            metric_status: proposed
             severity: warning
             team: platform
           annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerhighlatency"
             summary: iam-realm-provisioner p99 latency above 1s
             description: >-
               The p99 request duration is {{ "{{ $value | humanizeDuration }}" }}.
@@ -170,12 +176,13 @@ spec:
         # ── RP-C1 trial-expiry deferrals sustained (§11.5) ────────────────
         - alert: IAMRealmProvisionerTrialExpiryDeferredSustained
           expr: |
-            increase(iam_realm_provisioner_trial_expiry_deferred_total{job={{ $job | quote }}}[1h]) > 0
-          for: 1h
+            max by (domain, service, environment) (iam_realm_provisioner_trial_expiry_deferred_total{service="iam-realm-provisioner", cronjob="trial-expiry"}) > 0
+          for: 5m
           labels:
             severity: warning
             team: platform
           annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionertrialexpirydeferredsustained"
             summary: iam-realm-provisioner trial-expiry reconciler is deferring rows
             description: >-
               The trial-expiry CronJob (RP-C1) has been deferring rows to the
@@ -192,6 +199,7 @@ spec:
             severity: warning
             team: platform
           annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerrealmconfigpendingsustained"
             summary: iam-realm-provisioner has realm-config changes stuck pending
             description: >-
               {{ "{{ $value | humanize }}" }} realm_config_reconciliations row(s) have
@@ -202,11 +210,12 @@ spec:
         # ── RP-11 realm export failure — critical (§11.5) ─────────────────
         - alert: IAMRealmProvisionerRealmExportFailure
           expr: |
-            increase(iam_realm_provisioner_realm_export_total{job={{ $job | quote }}, result="fail"}[15m]) > 0
+            max by (domain, service, environment) (iam_realm_provisioner_realm_export_total{service="iam-realm-provisioner", cronjob="subscription-lapse", result="fail"}) > 0
           labels:
             severity: critical
             team: platform
           annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerrealmexportfailure"
             summary: iam-realm-provisioner failed to export a realm before offboarding
             description: >-
               {{ "{{ $value | humanize }}" }} realm export(s) to S3 failed in the last
@@ -217,19 +226,28 @@ spec:
     - name: iam_realm_provisioner_outbox_and_queues
       rules:
 
-        # ── Transactional outbox dead-letters (§11.5) — outbox_dead_letters_total
-        #    is platform-events' own metric (registered automatically by
-        #    events.Init), not something this service defines itself. Mirrors
-        #    the sibling IAM services' identical outbox-stuck alert — keep in
-        #    sync with deploy/monitoring/app-alerts.yml.
+        # ── Transactional outbox dead-letters (§11.5) — platform-events'
+        #    platform_dlq_messages_total{operation="outbox_publish",
+        #    reason="max_attempts"} (approved Tier 1). Keyed by event_type,
+        #    so series born at 1 are added via `unless last_over_time`. Keep
+        #    in sync with deploy/monitoring/app-alerts.yml.
         - alert: IAMRealmProvisionerOutboxStuck
           expr: |
-            increase(outbox_dead_letters_total{service={{ $job | quote }}}[30m]) > 0
+            sum by (domain, service, environment) (
+              (
+                platform_dlq_messages_total{service={{ $job | quote }}, operation="outbox_publish", reason="max_attempts"}
+                  unless
+                last_over_time(platform_dlq_messages_total{service={{ $job | quote }}, operation="outbox_publish", reason="max_attempts"}[1h] offset 30m)
+              )
+                or
+              increase(platform_dlq_messages_total{service={{ $job | quote }}, operation="outbox_publish", reason="max_attempts"}[30m])
+            ) > 0
           for: 15m
           labels:
             severity: warning
             team: platform
           annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisioneroutboxstuck"
             summary: iam-realm-provisioner outbox events moved to the dead-letter table
             description: >-
               One or more produced tenant-lifecycle events (TrialTenantProvisioned,
@@ -239,21 +257,27 @@ spec:
               connectivity; outbox_dead_letters is queryable/retryable via
               standard SQL.
 
-        # ── SQS ReceiveMessage errors — an application-visible signal that a
-        #    consumer loop can't reach its queue at all ────────────────────
+        # ── SQS ReceiveMessage errors — platform-events'
+        #    platform_dependency_request_seconds_count{dependency="sqs",
+        #    operation="receive_message", outcome="error"}; no queue label. ─
         - alert: IAMRealmProvisionerSQSReceiveErrors
           expr: |
-            increase(sqs_receive_errors_total{service={{ $job | quote }}}[30m]) > 0
+            sum by (domain, service, environment) (
+              increase(platform_dependency_request_seconds_count{service={{ $job | quote }}, dependency="sqs", operation="receive_message", outcome="error"}[30m])
+            ) > 0
           labels:
             severity: warning
             team: platform
+            metric_status: proposed
           annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionersqsreceiveerrors"
             summary: iam-realm-provisioner is failing to receive from an inbound queue
             description: >-
-              {{ "{{ $value | humanize }}" }} SQS ReceiveMessage error(s) on
-              {{ "{{ $labels.queue }}" }} in the last 30 minutes (excludes context
-              cancellation). Check IAM permissions and queue connectivity for
-              membership-realm-q / tenant-realm-q / billing-realm-q.
+              {{ "{{ $value | humanize }}" }} SQS ReceiveMessage error(s) in the last
+              30 minutes (excludes context cancellation; the metric has no
+              queue label — check the consumer logs for which queue). Check
+              IAM permissions and queue connectivity for membership-realm-q /
+              tenant-realm-q / billing-realm-q.
 
         # ── Inbound SQS DLQ depth (§11.5: "{membership,billing,tenant}-realm-q
         #    DLQ depth > 0 — warning"). NOTE: no application-level DLQ-depth
@@ -270,6 +294,7 @@ spec:
             severity: warning
             team: platform
           annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerinbounddlqdepth"
             summary: "iam-realm-provisioner: messages stuck on {{ "{{ $labels.queue_name }}" }}"
             description: >-
               {{ "{{ $value | humanize }}" }} message(s) visible on
@@ -286,6 +311,7 @@ spec:
             severity: ticket
             team: platform
           annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerunknowneventtype"
             summary: "A producer is emitting an event type this consumer doesn't handle"
             description: >-
               iam-realm-provisioner is silently ack'ing events of type
@@ -303,13 +329,15 @@ spec:
             severity: critical
             team: platform
           annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerconsumedschemaviolation"
             summary: "Consumed {{ "{{ $labels.event_type }}" }} events on {{ "{{ $labels.consumer }}" }} violate their schema"
             description: >-
               iam-realm-provisioner is rejecting {{ "{{ $labels.event_type }}" }}
               events on the {{ "{{ $labels.consumer }}" }} consumer because the
-              payload fails its consumed-message schema (internal/eventschema).
-              Either the producer broke its contract or api/asyncapi.yaml is
-              stale. Inspect the -dlq message, fix the wrong side, then redrive.
+              payload fails its consumed-message schema (internal/eventschema) and
+              forwarding it straight to -dlq (DLQReason=schema_violation). Either
+              the producer broke its contract or api/asyncapi.yaml is stale.
+              Inspect the -dlq message, fix the wrong side, then redrive.
 
     - name: iam_realm_provisioner_tenant_isolation
       rules:
@@ -326,6 +354,7 @@ spec:
             team: platform
             compliance: tenant-isolation
           annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerrlscrosstenantaccess"
             summary: RLS blocked a cross-tenant access attempt
             description: >-
               A caller with a valid tenant GUC attempted to read/write a row
@@ -343,6 +372,7 @@ spec:
             severity: warning
             team: platform
           annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerrlsmissingguc"
             summary: RLS violations from missing or invalid tenant GUC
             description: >-
               Sustained rate of missing_or_invalid_guc violations over 10m.
@@ -350,4 +380,120 @@ spec:
               (RLS-6) before touching a tenant-scoped table. Check
               GUCBridgeMiddleware wiring for the HTTP path, or the
               SysPool/RLS-scoped pool choice for a reconciler/consumer path.
+
+    # ── Platform-library health and AL-5 audit delivery ──────────────────────
+    #    Ported from iam-org-membership's platform-libraries group. Rules on
+    #    proposed registry metrics carry metric_status: proposed
+    #    (metrics-registry-lint.sh).
+    - name: iam_realm_provisioner_platform_libraries
+      rules:
+
+        - alert: IAMRealmProvisionerOutboxBacklog
+          expr: |
+            max by (domain, service, environment) (platform_outbox_oldest_pending_age{service="iam-realm-provisioner"}) > 300
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+            metric_status: proposed
+          annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisioneroutboxbacklog"
+            summary: "iam-realm-provisioner outbox delivery is more than 5 minutes behind"
+            description: >-
+              The oldest unpublished outbox event is older than 5 minutes. Transient SNS failures never dead-letter, so this is the signal that tenant-lifecycle events have stopped reaching O&M, AuthZ Enrichment and Audit Log even when nothing dead-letters.
+
+        - alert: IAMRealmProvisionerDLQBacklog
+          expr: |
+            max by (domain, service, environment, queue) (platform_dlq_depth{service="iam-realm-provisioner"}) > 0
+          for: 30m
+          labels:
+            severity: warning
+            team: platform
+            metric_status: proposed
+          annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerdlqbacklog"
+            summary: "Messages are waiting in the {{ "{{ $labels.queue }}" }} DLQ"
+            description: >-
+              platform-events samples the DLQ attached to {{ "{{ $labels.queue }}" }} (SQS_QUEUE_DEPTH_INTERVAL) and it has held messages for 30 minutes. Inspect their DLQReason attribute, fix the cause, then redrive.
+
+        - alert: IAMRealmProvisionerConsumerDead
+          expr: |
+            sum by (domain, service, environment) (rate(platform_dependency_request_seconds_count{service="iam-realm-provisioner", dependency="sqs", operation="receive_message"}[10m])) == 0
+          for: 10m
+          labels:
+            severity: critical
+            team: platform
+            metric_status: proposed
+          annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerconsumerdead"
+            summary: "iam-realm-provisioner SQS consumers have stopped polling"
+            description: >-
+              No ReceiveMessage call has been made for 10 minutes. The consumers long-poll every ~20s even on an idle queue, so this means they have stopped (not that the queues are quiet): MFA role sync, trial timers and Billing reactivations are not being applied.
+
+        - alert: IAMRealmProvisionerDBPoolSaturated
+          expr: |
+            max by (domain, service, environment, pool) (sum by (domain, service, environment, pool, instance) (platform_db_pool_connections{service="iam-realm-provisioner", state="acquired"}) / (sum by (domain, service, environment, pool, instance) (platform_db_pool_max_connections{service="iam-realm-provisioner"}) > 0)) > 0.9
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+            metric_status: proposed
+          annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerdbpoolsaturated"
+            summary: "iam-realm-provisioner Postgres pool {{ "{{ $labels.pool }}" }} is over 90% utilised"
+            description: >-
+              More than 90% of the {{ "{{ $labels.pool }}" }} pool (default = API, system = BYPASSRLS reconciler/exporter/audit-drainer pool) has been checked out for 10 minutes on the busiest replica.
+
+        - alert: IAMRealmProvisionerDBAcquireErrors
+          expr: |
+            max by (domain, service, environment, pool) ((sum by (domain, service, environment, pool, instance) (rate(platform_db_pool_acquires_total{service="iam-realm-provisioner", outcome="error"}[5m])) or sum by (domain, service, environment, pool, instance) (rate(platform_db_pool_acquires_total{service="iam-realm-provisioner"}[5m])) * 0) / (sum by (domain, service, environment, pool, instance) (rate(platform_db_pool_acquires_total{service="iam-realm-provisioner"}[5m])) > 0)) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+            metric_status: proposed
+          annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerdbacquireerrors"
+            summary: "iam-realm-provisioner cannot get Postgres connections from pool {{ "{{ $labels.pool }}" }}"
+            description: >-
+              More than 5% of connection acquires fail on the worst replica (timeouts, closed pool, Postgres/PgBouncer unreachable). Requests answer 503 db_unavailable.
+
+        - alert: IAMRealmProvisionerDBRetriesExhausted
+          expr: |
+            sum by (domain, service, environment, pool, reason) (increase(platform_db_transaction_retries_exhausted_total{service="iam-realm-provisioner"}[15m])) > 0
+          labels:
+            severity: warning
+            team: platform
+            metric_status: proposed
+          annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerdbretriesexhausted"
+            summary: "iam-realm-provisioner transactions failed after exhausting {{ "{{ $labels.reason }}" }} retries"
+            description: >-
+              Transactions kept hitting deadlocks or serialization failures through every pgcommon retry.
+
+        - alert: IAMRealmProvisionerAuditEntriesRejected
+          expr: |
+            max by (domain, service, environment) (iam_realm_provisioner_audit_entry_backlog_gauge{service="iam-realm-provisioner", status="failed"}) > 0
+          for: 15m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerauditentriesrejected"
+            summary: "TenantIdpConfigChanged audit entries were permanently rejected by Audit Log"
+            description: >-
+              pending_audit_entries holds rows Audit Log rejected with a 4xx (AL-5). Those IdP-configuration changes have no audit record until the cause is fixed and the rows are re-queued.
+
+        - alert: IAMRealmProvisionerAuditEntriesUndelivered
+          expr: |
+            max by (domain, service, environment) (iam_realm_provisioner_audit_entry_backlog_gauge{service="iam-realm-provisioner", status="pending"}) > 0
+          for: 30m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            runbook: "docs/observability/runbooks.md#iamrealmprovisionerauditentriesundelivered"
+            summary: "TenantIdpConfigChanged audit entries are not reaching Audit Log"
+            description: >-
+              pending_audit_entries has held undelivered rows for 30 minutes: Audit Log is unreachable, or AUDIT_LOG_BASE_URL is unset (the drainer is then off). Nothing is lost — rows deliver once the cause is fixed.
 {{- end }}

@@ -116,11 +116,11 @@ echo "OK: database connections/config/operations route through platform-pgcommon
 
 # Events invariant: every SNS publish, SQS consume, and outbox write must
 # flow through platform-events only — no independent messaging path.
-# Dedup (processed_events) is the one deliberate exception: platform-events
-# exposes no dedup API (its own documented pattern is Envelope.ID + INSERT
-# ON CONFLICT DO NOTHING, which internal/adapter/inbound/consumer/dedup.go
-# follows verbatim), so processed_events is entirely this service's own
-# table/repository and is not checked here.
+# Dedup included: processed_events is read and written only through
+# platform-events' pkg/inbox (inbox.Store, wrapped by
+# internal/adapter/outbound/postgres/inbox_repository.go) — check 5 below
+# forbids a second, hand-rolled writer. The table's DDL stays in this
+# service's migration (in inbox's own shape) so its grants live with it.
 #
 #   1. Publish — events.NewSNSPublisher (cmd/server/wiring.go) is the only
 #      way this repo puts a message on iam-tenant-events; no file may
@@ -144,7 +144,10 @@ echo "OK: database connections/config/operations route through platform-pgcommon
 #   4. Envelope — events.Envelope (platform-events) is the only envelope
 #      type; a local "type Envelope struct" would be a second, incompatible
 #      wire shape.
-echo "Checking events invariant (SNS/SQS/outbox via platform-events only)..."
+#   5. Inbox — inbox.Store (platform-events' pkg/inbox) is the only
+#      processed_events writer; a hand-rolled INSERT would be a second dedup
+#      ledger outside the library's claim-in-the-same-transaction contract.
+echo "Checking events invariant (SNS/SQS/outbox/inbox via platform-events only)..."
 
 offenders=$(grep -rlE '"github\.com/aws/aws-sdk-go-v2/service/sns"' --include="*.go" . 2>/dev/null || true)
 if [ -n "$offenders" ]; then
@@ -153,7 +156,11 @@ if [ -n "$offenders" ]; then
   exit 1
 fi
 
-offenders=$(grep -rlE '"github\.com/aws/aws-sdk-go-v2/service/sqs"' --include="*.go" . 2>/dev/null | grep -v "^\./cmd/server/main\.go$" || true)
+# Test files are exempt (matching iam-org-membership's
+# check-forbidden-events-bypass.sh): a fake SQS transport implementing
+# events.SQSClientLike legitimately uses the SDK's request/response types to
+# simulate the external queue.
+offenders=$(grep -rlE '"github\.com/aws/aws-sdk-go-v2/service/sqs(/[a-z0-9]+)*"' --include="*.go" . 2>/dev/null | grep -v "^\./cmd/server/main\.go$" | grep -v "_test\.go$" || true)
 if [ -n "$offenders" ]; then
   echo "FAIL: raw aws-sdk-go-v2/service/sqs imported outside cmd/server/main.go (the events.NewSQSConsumerWithClient wiring site):"
   echo "$offenders"
@@ -174,7 +181,14 @@ if [ -n "$offenders" ]; then
   exit 1
 fi
 
-echo "OK: events/outbox route through platform-events only (dedup/processed_events is this service's own, by design — see script comment)"
+offenders=$(grep -rlE 'INSERT INTO (public\.)?processed_events' --include="*.go" . 2>/dev/null | grep -v "_test\.go$" || true)
+if [ -n "$offenders" ]; then
+  echo "FAIL: a hand-rolled processed_events writer exists outside platform-events' inbox.Store:"
+  echo "$offenders"
+  exit 1
+fi
+
+echo "OK: events/outbox/inbox route through platform-events only"
 
 # RLS-6 (no session-scoped tenant GUC) is checked once, inline in
 # validate-quality.yml's "Reject non-transaction-local SET app.tenant_id"

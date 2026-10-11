@@ -14,6 +14,9 @@
 #                                        --job=<name>. No long-running
 #                                        HTTP/metrics server, no ports
 #                                        exposed for it.
+#   /migrate                            schema migration (cmd/migrate), run
+#                                        once per release by the Helm
+#                                        pre-install/pre-upgrade hook Job.
 #
 # One image: the Deployment runs it unmodified; each CronJob template
 # (deploy/helm/templates/cronjobs.yaml) overrides `command` to invoke
@@ -66,7 +69,12 @@ RUN CGO_ENABLED=0 GOOS=linux \
     -trimpath \
     -ldflags="-s -w -X main.buildVersion=${BUILD_VERSION}" \
     -o /out/iam-realm-provisioner-reconciler \
-    ./cmd/reconciler
+    ./cmd/reconciler && \
+    go build \
+    -trimpath \
+    -ldflags="-s -w -X main.buildVersion=${BUILD_VERSION}" \
+    -o /out/migrate \
+    ./cmd/migrate
 
 ########################################
 # Stage: runtime
@@ -88,6 +96,7 @@ WORKDIR /
 
 COPY --from=builder /out/iam-realm-provisioner-server /iam-realm-provisioner-server
 COPY --from=builder /out/iam-realm-provisioner-reconciler /iam-realm-provisioner-reconciler
+COPY --from=builder /out/migrate /migrate
 COPY --from=builder /src/deploy/keycloak/realm-template.json /deploy/keycloak/realm-template.json
 
 USER nonroot:nonroot

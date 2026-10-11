@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 )
 
 // OutboxPrune wraps platform-events' outbox.Runner.PrunePublished, a
@@ -33,7 +36,7 @@ func TestProcessedEventsPrune_NilStore_SkipsAndWarns(t *testing.T) {
 	assert.Equal(t, Result{}, res)
 	assert.GreaterOrEqual(t, logger.warnCalls, 1)
 	require.NotEmpty(t, logger.warnMsgs)
-	assert.Contains(t, logger.warnMsgs[0], "no ProcessedEventsStore wired")
+	assert.Contains(t, logger.warnMsgs[0], "no inbox pruner wired")
 }
 
 // The repository-level Prune failure propagates unwrapped — this job adds
@@ -41,8 +44,10 @@ func TestProcessedEventsPrune_NilStore_SkipsAndWarns(t *testing.T) {
 func TestProcessedEventsPrune_StorePruneFails_PropagatesError(t *testing.T) {
 	jctx, _, _, _, _, _ := newTestContext()
 	pruneErr := errors.New("db unavailable")
-	jctx.ProcessedEvents = &mockProcessedEventsStore{
-		PruneFn: func(ctx context.Context, ttlDays, limit int) (int, error) { return 0, pruneErr },
+	jctx.ProcessedEvents = &mockInboxPruner{
+		PruneFn: func(context.Context, domain.ProcessedEventsConsumer, time.Duration, int) (int64, error) {
+			return 0, pruneErr
+		},
 	}
 
 	_, err := ProcessedEventsPrune(context.Background(), jctx)
@@ -55,17 +60,24 @@ func TestProcessedEventsPrune_StorePruneFails_PropagatesError(t *testing.T) {
 func TestProcessedEventsPrune_BatchLimitUnset_UsesDefault(t *testing.T) {
 	jctx, _, _, _, _, _ := newTestContext()
 	jctx.BatchLimit = 0
+	jctx.ProcessedEventsTTLDays = 8
 	var gotLimit int
-	jctx.ProcessedEvents = &mockProcessedEventsStore{
-		PruneFn: func(ctx context.Context, ttlDays, limit int) (int, error) {
-			gotLimit = limit
-			return 3, nil
+	var gotRetention time.Duration
+	var consumers []domain.ProcessedEventsConsumer
+	jctx.ProcessedEvents = &mockInboxPruner{
+		PruneFn: func(_ context.Context, consumer domain.ProcessedEventsConsumer, retention time.Duration, batch int) (int64, error) {
+			gotLimit, gotRetention = batch, retention
+			consumers = append(consumers, consumer)
+			return 1, nil
 		},
 	}
 
 	res, err := ProcessedEventsPrune(context.Background(), jctx)
 	require.NoError(t, err)
 	assert.Equal(t, defaultPruneBatchLimit, gotLimit)
+	assert.Equal(t, 8*24*time.Hour, gotRetention)
+	assert.ElementsMatch(t, []domain.ProcessedEventsConsumer{domain.ConsumerMembership, domain.ConsumerTenant, domain.ConsumerBilling}, consumers,
+		"every consumer's inbox store is pruned")
 	assert.Equal(t, 3, res.Attempted)
 	assert.Equal(t, 3, res.Succeeded)
 }

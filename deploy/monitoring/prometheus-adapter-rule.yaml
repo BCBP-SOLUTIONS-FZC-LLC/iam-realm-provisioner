@@ -1,5 +1,5 @@
 # Prometheus Adapter ConfigMap — maps Prometheus metrics to the Custom Metrics API
-# so the HPA can scale on http_requests_per_second (see values.yaml's
+# so the HPA can scale on platform_http_requests_per_second (see values.yaml's
 # autoscaling.targetRPSPerReplica, unset/0 by default — this service's write
 # volume is driven by tenant lifecycle events (signup/conversion/trial
 # expiry), not sustained high RPS, so CPU/memory scaling is the default;
@@ -8,9 +8,15 @@
 #
 # Deploy into the namespace where prometheus-adapter runs (typically kube-system
 # or monitoring). This rule fragment is generic (matches any service's
-# http_requests_total) — merge with any existing prometheus-adapter ConfigMap
-# rather than replacing it; every gincommon-based IAM service shares this
-# same fragment.
+# platform_http_requests_total) — merge with any existing prometheus-adapter
+# ConfigMap rather than replacing it; every gincommon-based IAM service shares
+# this same fragment.
+#
+# platform_http_requests_total is platform-gincommon's Tier 1 successor of the
+# removed unprefixed name; its Platform Observability Registry status is
+# still "proposed" (metric_status: proposed — awaiting governance
+# ratification). The exposed custom metric was renamed with it, so the HPA
+# (templates/hpa.yaml) references platform_http_requests_per_second.
 #
 # Reference:
 #   https://github.com/kubernetes-sigs/prometheus-adapter/blob/master/docs/config.md
@@ -28,11 +34,12 @@ metadata:
 data:
   config.yaml: |
     rules:
-      # Expose per-pod RPS as http_requests_per_second so the HPA can use
-      # type: Pods / metric: http_requests_per_second.
-      # Computed from the Prometheus counter http_requests_total scraped by
-      # the ServiceMonitor (serviceMonitor.enabled: true in Helm values).
-      - seriesQuery: 'http_requests_total{namespace!="",pod!=""}'
+      # Expose per-pod RPS as platform_http_requests_per_second so the HPA can
+      # use type: Pods / metric: platform_http_requests_per_second.
+      # Computed from the Prometheus counter platform_http_requests_total
+      # scraped by the ServiceMonitor (serviceMonitor.enabled: true in Helm
+      # values). metric_status: proposed.
+      - seriesQuery: 'platform_http_requests_total{namespace!="",pod!=""}'
         resources:
           overrides:
             namespace:

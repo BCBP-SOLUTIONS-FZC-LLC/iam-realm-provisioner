@@ -74,9 +74,9 @@ func (c *tokenCache) Token(ctx context.Context) (string, error) {
 	start := time.Now()
 	tok, expiresIn, err := c.refresh(ctx)
 	dur := time.Since(start).Seconds()
-	outcome := "success"
+	outcome := "success" // registry outcome vocabulary: success|error
 	if err != nil {
-		outcome = "failure"
+		outcome = "error"
 	}
 	metrics.KeycloakCallDuration.WithLabelValues("token").Observe(dur)
 	metrics.DependencyRequestDuration.WithLabelValues("keycloak", "token", outcome).Observe(dur)

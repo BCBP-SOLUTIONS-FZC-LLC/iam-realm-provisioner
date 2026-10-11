@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/jackc/pgx/v5"
@@ -23,7 +23,7 @@ func clearPgEnv(t *testing.T) {
 	for _, k := range []string{
 		"DATABASE_URL", "PG_HOST", "PG_PORT", "PG_USER", "PG_PASSWORD", "PG_DBNAME", "PG_SSLMODE",
 		"PG_STATEMENT_TIMEOUT", "SYSTEM_DATABASE_URL", "MIGRATION_DATABASE_URL",
-		"PG_BOUNCER_MODE", "PG_MAX_CONNS", "PG_SLOW_QUERY_THRESHOLD",
+		"PG_BOUNCER_MODE", "PG_MAX_CONNS", "PG_MIN_CONNS", "PG_SLOW_QUERY_THRESHOLD",
 	} {
 		t.Setenv(k, "")
 	}
@@ -39,7 +39,10 @@ func TestDSNFromEnv_UsesDatabaseURLVerbatim(t *testing.T) {
 		"DATABASE_URL must pass through unchanged, not get a statement_timeout option appended")
 }
 
-func TestDSNFromEnv_BuildsFromDiscreteVarsAndAppliesStatementTimeout(t *testing.T) {
+// PG_STATEMENT_TIMEOUT is never baked into the DSN: pgcommon applies
+// Config.StatementTimeout per transaction (SET LOCAL), which is safe behind
+// PgBouncer transaction pooling.
+func TestDSNFromEnv_BuildsFromDiscreteVarsWithoutStatementTimeout(t *testing.T) {
 	clearPgEnv(t)
 	t.Setenv("PG_HOST", "localhost")
 	t.Setenv("PG_PORT", "5544")
@@ -52,43 +55,7 @@ func TestDSNFromEnv_BuildsFromDiscreteVarsAndAppliesStatementTimeout(t *testing.
 
 	assert.Contains(t, got, "localhost")
 	assert.Contains(t, got, "provisioner")
-	assert.Contains(t, got, "options=-c%20statement_timeout%3D5000")
-}
-
-func TestApplyStatementTimeout_EmptyDSNPassesThrough(t *testing.T) {
-	clearPgEnv(t)
-	assert.Equal(t, "", ApplyStatementTimeout(""))
-}
-
-func TestApplyStatementTimeout_UnsetEnvLeavesDSNUnchanged(t *testing.T) {
-	clearPgEnv(t)
-	dsn := "postgres://host/db"
-	assert.Equal(t, dsn, ApplyStatementTimeout(dsn))
-}
-
-func TestApplyStatementTimeout_InvalidDurationLeavesDSNUnchanged(t *testing.T) {
-	clearPgEnv(t)
-	t.Setenv("PG_STATEMENT_TIMEOUT", "not-a-duration")
-	dsn := "postgres://host/db"
-	assert.Equal(t, dsn, ApplyStatementTimeout(dsn))
-}
-
-func TestApplyStatementTimeout_ZeroOrNegativeDurationLeavesDSNUnchanged(t *testing.T) {
-	clearPgEnv(t)
-	t.Setenv("PG_STATEMENT_TIMEOUT", "0s")
-	dsn := "postgres://host/db"
-	assert.Equal(t, dsn, ApplyStatementTimeout(dsn))
-}
-
-func TestApplyStatementTimeout_ValidDurationAppendsMillisecondOption(t *testing.T) {
-	clearPgEnv(t)
-	t.Setenv("PG_STATEMENT_TIMEOUT", "250ms")
-	dsn := "postgres://host/db"
-
-	got := ApplyStatementTimeout(dsn)
-
-	assert.True(t, strings.HasPrefix(got, dsn))
-	assert.Contains(t, got, "options=-c%20statement_timeout%3D250")
+	assert.NotContains(t, got, "statement_timeout")
 }
 
 func TestSystemDSNFromEnv_PrefersSystemDatabaseURL(t *testing.T) {
@@ -114,11 +81,28 @@ func TestMigrationDSNFromEnv_PrefersMigrationDatabaseURL(t *testing.T) {
 	assert.Equal(t, "postgres://migrator@host/db", MigrationDSNFromEnv())
 }
 
-func TestMigrationDSNFromEnv_AppliesStatementTimeout(t *testing.T) {
+// Long DDL and the advisory-lock wait must never be cut short.
+func TestMigrationDSNFromEnv_NeverAppliesStatementTimeout(t *testing.T) {
 	clearPgEnv(t)
 	t.Setenv("MIGRATION_DATABASE_URL", "postgres://m:x@migrations.example:5432/db?sslmode=disable")
 	t.Setenv("PG_STATEMENT_TIMEOUT", "5s")
-	assert.Contains(t, MigrationDSNFromEnv(), "statement_timeout%3D5000")
+	assert.Equal(t, "postgres://m:x@migrations.example:5432/db?sslmode=disable", MigrationDSNFromEnv())
+}
+
+// The system pool reports its platform_db_* series under its own pool
+// label, inherits the per-transaction statement timeout, and — PgBouncer
+// mode being forced — lets PgBouncer manage backends unless PG_MIN_CONNS is
+// set deliberately.
+func TestSystemPoolConfig_PoolNameStatementTimeoutAndMinConns(t *testing.T) {
+	clearPgEnv(t)
+	t.Setenv("PG_STATEMENT_TIMEOUT", "5s")
+	cfg := SystemPoolConfig("postgres://m@h/db", nil)
+	assert.Equal(t, SystemPoolName, cfg.PoolName)
+	assert.Equal(t, 5*time.Second, cfg.StatementTimeout)
+	assert.Zero(t, cfg.MinConns)
+
+	t.Setenv("PG_MIN_CONNS", "3")
+	assert.Equal(t, int32(3), SystemPoolConfig("postgres://m@h/db", nil).MinConns)
 }
 
 func TestMigrationDSNFromEnv_FallsBackToDSNFromEnv(t *testing.T) {
@@ -126,13 +110,6 @@ func TestMigrationDSNFromEnv_FallsBackToDSNFromEnv(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://app@host/db")
 
 	assert.Equal(t, "postgres://app@host/db", MigrationDSNFromEnv())
-}
-
-func TestApplyStatementTimeout_Idempotent(t *testing.T) {
-	clearPgEnv(t)
-	t.Setenv("PG_STATEMENT_TIMEOUT", "5s")
-	once := ApplyStatementTimeout("postgres://u@h/db?sslmode=disable")
-	assert.Equal(t, once, ApplyStatementTimeout(once))
 }
 
 func TestSystemPoolConfig_ForcesPGBouncerMode(t *testing.T) {
@@ -148,13 +125,6 @@ func TestSystemPoolConfig_ForcesPGBouncerMode(t *testing.T) {
 	assert.Nil(t, cfg.Tracer, "Tracer is wired by the call site, not SystemPoolConfig")
 	assert.Nil(t, cfg.Logger, "nil log must leave Logger unset")
 	assert.Equal(t, int32(20), cfg.MaxConns, "sysPool inherits pool sizing from ConfigFromEnv")
-}
-
-func TestSystemPoolConfig_AppliesStatementTimeout(t *testing.T) {
-	clearPgEnv(t)
-	t.Setenv("PG_STATEMENT_TIMEOUT", "5s")
-	cfg := SystemPoolConfig("postgres://sys@host/db?sslmode=disable", nil)
-	assert.Contains(t, cfg.DSN, "statement_timeout%3D5000")
 }
 
 // noopPortLogger is a minimal port.Logger for exercising SystemPoolConfig's
@@ -207,6 +177,19 @@ func TestWrapConnErr_AvailabilitySQLStateMapsToDBUnavailable(t *testing.T) {
 			assert.True(t, errors.As(got, &de))
 			assert.Equal(t, domain.ErrDBUnavailable, de.Code)
 		})
+	}
+}
+
+// 57014 (query_canceled — statement_timeout fired) and 55P03
+// (lock_not_available — lock_timeout fired) are slow-query/contention
+// signals, not outages: request_timeout (503), never db_unavailable.
+func TestWrapConnErr_StatementOrLockTimeoutMapsToRequestTimeout(t *testing.T) {
+	for _, code := range []string{"57014", "55P03"} {
+		got := wrapConnErr(&pgconn.PgError{Code: code})
+		var de *domain.Error
+		require.True(t, errors.As(got, &de), code)
+		assert.Equal(t, domain.ErrRequestTimeout, de.Code, code)
+		assert.Equal(t, 503, de.Status())
 	}
 }
 

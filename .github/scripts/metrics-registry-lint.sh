@@ -1,83 +1,34 @@
 #!/usr/bin/env bash
-# Enforces the Enterprise Platform Observability Standard's governance
-# rules 11/12 ("services SHALL NOT invent new platform_*/domain-shared
-# metrics unilaterally"; "require observability governance approval
-# before adoption"): a platform_* metric whose PlatformRegistry status
-# (internal/adapter/outbound/metrics/registry.go) is StatusProposed — i.e.
-# submitted but not yet ratified — must never be the live query target of
-# a Prometheus alert, recording rule, or SLO expression anywhere in this
-# repo. Mentioning a Proposed metric name in a comment (documenting the
-# shadow-emission/migration plan) is fine and expected; using it inside an
-# `expr:` is not, until the registry entry's Status flips to
-# StatusCanonical.
+# Enforces the Enterprise Platform Observability Standard's registry rules on
+# everything in this repo that queries metrics (alerts, recording rules,
+# SLOs, the HPA and the prometheus-adapter rule), against the central
+# Platform Observability Registry shipped in platform-gincommon
+# (pkg/obsregistry) — there is no local copy of the registry any more:
+#
+#   1. No removed (pre-standard) metric name may appear in those files, even
+#      in a comment: the platform libraries no longer emit them
+#      (TestMonitoring_NoRemovedMetrics names each replacement).
+#   2. Every alert that depends on a metric whose registry status is still
+#      "proposed" (awaiting governance ratification) — directly or through a
+#      recording rule — carries `metric_status: proposed`, and no other alert
+#      does; an HPA scaling on one carries the
+#      observability.platform/metric-status: proposed annotation
+#      (TestMonitoring_ProposedMetricsAreLabelled).
+#   3. Optionally, when METRICSLINT is set (e.g. METRICSLINT="go run
+#      github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/cmd/metricslint"),
+#      `metricslint refs` also scans deploy/, .github/, cmd/, internal/, the
+#      runbooks and the top-level docs for removed or unregistered names. The
+#      LLD and CHANGELOG are excluded: their revision history intentionally
+#      names metrics that no longer exist.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-REGISTRY_GO="internal/adapter/outbound/metrics/registry.go"
-RULE_FILES=(
-  deploy/monitoring/app-alerts.yml
-  deploy/monitoring/slo-rules.yml
-  deploy/helm/templates/prometheusrule.yaml
-  # HPA + the prometheus-adapter rule that feeds it a custom-metrics-API
-  # series — the standard's own "Update:... HPA metric references" /
-  # "MUST NOT source... an HPA reference" (rule 12) applies here too, not
-  # only to alerts/recording-rules/SLOs. Neither file references a
-  # platform_*/domain-shared name today (both key off gincommon's own
-  # http_requests_total), so this is a forward-looking guard.
-  deploy/helm/templates/hpa.yaml
-  deploy/monitoring/prometheus-adapter-rule.yaml
-)
+go test ./internal/adapter/outbound/metrics/... \
+  -run 'TestMonitoring_NoRemovedMetrics|TestMonitoring_ProposedMetricsAreLabelled' \
+  -count=1 -v
 
-if [ ! -f "$REGISTRY_GO" ]; then
-  echo "OK: no $REGISTRY_GO in this repo — nothing to check"
-  exit 0
+if [ -n "${METRICSLINT:-}" ]; then
+  # shellcheck disable=SC2086 # METRICSLINT may be a multi-word command.
+  $METRICSLINT refs -ext .yml,.yaml,.json,.sh,.go,.md deploy .github cmd internal docs/runbook.md docs/architecture README.md ARCHITECTURE.md VERSIONING.md
 fi
-
-# registry.go's PlatformRegistry is a flat slice of struct literals, one
-# field per line (gofmt-aligned) — a small state machine over Name:/
-# Status: pairs is enough for this hand-authored file; this is a repo
-# lint script, not a general Go parser.
-proposed_names=$(awk '
-  /Name:[ \t]*"/ { match($0, /"[^"]+"/); name = substr($0, RSTART+1, RLENGTH-2); next }
-  /Status:[ \t]*StatusProposed/ { if (name != "") print name; name="" }
-  /Status:[ \t]*StatusCanonical/ { name="" }
-' "$REGISTRY_GO")
-
-if [ -z "$proposed_names" ]; then
-  echo "OK: no Proposed (unratified) platform_* metrics in $REGISTRY_GO"
-  exit 0
-fi
-
-echo "Proposed (unratified) platform_* metrics per $REGISTRY_GO:"
-echo "$proposed_names" | sed 's/^/  - /'
-echo
-
-fail=0
-for name in $proposed_names; do
-  for f in "${RULE_FILES[@]}"; do
-    [ -f "$f" ] || continue
-    # Exclude comment lines (grep -n prefixes "N:", so the real content
-    # starts after the first ':' — a comment line's content, ignoring
-    # leading whitespace, starts with '#').
-    matches=$(grep -n "$name" "$f" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' || true)
-    [ -z "$matches" ] && continue
-    # A live PromQL reference carries a selector/function context; a
-    # bare prose mention that somehow escaped the comment filter would
-    # not.
-    live=$(echo "$matches" | grep -E '\{|_count|_bucket|rate\(|increase\(' || true)
-    if [ -n "$live" ]; then
-      echo "FAIL: $f references Proposed metric '$name' outside a comment:"
-      echo "$live" | sed 's/^/  /'
-      fail=1
-    fi
-  done
-done
-
-if [ "$fail" -ne 0 ]; then
-  echo
-  echo "A Proposed platform_* metric (Status: StatusProposed in $REGISTRY_GO) may not source a production alert, recording rule, or SLO expression (Enterprise Platform Observability Standard, rules 11/12). Either point the rule back at its authoritative Tier 3 metric, or flip the registry entry's Status to StatusCanonical only once real observability governance has ratified it — then migrate dashboards/alerts/recording rules/SLOs/HPA together per the standard's Backward Compatibility steps."
-  exit 1
-fi
-
-echo "OK: no Proposed platform_* metric is used as a live query target in ${RULE_FILES[*]}"

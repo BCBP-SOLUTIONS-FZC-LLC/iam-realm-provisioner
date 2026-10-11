@@ -38,10 +38,10 @@ func setAllRequiredEnv(t *testing.T) {
 }
 
 func TestIsDevEnv(t *testing.T) {
-	for _, v := range []string{"dev", "development", "local", "test"} {
+	for _, v := range []string{"dev", "local", "test"} {
 		assert.True(t, isDevEnv(v), v)
 	}
-	for _, v := range []string{"staging", "production", "prod", ""} {
+	for _, v := range []string{"staging", "prod", ""} {
 		assert.False(t, isDevEnv(v), v)
 	}
 }
@@ -49,7 +49,7 @@ func TestIsDevEnv(t *testing.T) {
 func TestValidateRequiredEnv_AllSet_NoPanic(t *testing.T) {
 	clearRequiredEnv(t)
 	setAllRequiredEnv(t)
-	assert.NotPanics(t, func() { validateRequiredEnv("production") })
+	assert.NotPanics(t, func() { validateRequiredEnv("prod") })
 }
 
 func TestValidateRequiredEnv_MissingOutsideDev_Panics(t *testing.T) {
@@ -58,7 +58,7 @@ func TestValidateRequiredEnv_MissingOutsideDev_Panics(t *testing.T) {
 	t.Setenv("KEYCLOAK_BASE_URL", "")
 	assert.PanicsWithValue(t,
 		"startup aborted — required env vars missing or misconfigured:\n  • KEYCLOAK_BASE_URL: Keycloak Admin API base URL — RP-INV-1's sole seam\n",
-		func() { validateRequiredEnv("production") })
+		func() { validateRequiredEnv("prod") })
 }
 
 func TestValidateRequiredEnv_MissingInDev_NoPanic(t *testing.T) {
@@ -82,7 +82,7 @@ func TestValidateRequiredEnv_DevDefaultValueOutsideDev_Panics(t *testing.T) {
 			clearRequiredEnv(t)
 			setAllRequiredEnv(t)
 			t.Setenv(key, devVal)
-			assert.Panics(t, func() { validateRequiredEnv("production") },
+			assert.Panics(t, func() { validateRequiredEnv("prod") },
 				"%s holding its dev-default value %q must fail fast outside APP_ENV=dev", key, devVal)
 		})
 	}
@@ -105,7 +105,7 @@ func TestValidateRequiredEnv_DatabaseURLMissing_Panics(t *testing.T) {
 	clearRequiredEnv(t)
 	setAllRequiredEnv(t)
 	t.Setenv("DATABASE_URL", "")
-	assert.Panics(t, func() { validateRequiredEnv("production") })
+	assert.Panics(t, func() { validateRequiredEnv("prod") })
 }
 
 func TestValidateRequiredEnv_PGBouncerWithoutMigrationURL_Panics(t *testing.T) {
@@ -116,17 +116,17 @@ func TestValidateRequiredEnv_PGBouncerWithoutMigrationURL_Panics(t *testing.T) {
 	t.Setenv("PG_USER", "app")
 	t.Setenv("PG_PASSWORD", "secret")
 	t.Setenv("PG_BOUNCER_MODE", "true")
-	assert.Panics(t, func() { validateRequiredEnv("production") })
+	assert.Panics(t, func() { validateRequiredEnv("prod") })
 }
 
 func TestMustEnv_SetValue_Returned(t *testing.T) {
 	t.Setenv("MUST_ENV_TEST_KEY", "real-value")
-	assert.Equal(t, "real-value", mustEnv("MUST_ENV_TEST_KEY", "production"))
+	assert.Equal(t, "real-value", mustEnv("MUST_ENV_TEST_KEY", "prod"))
 }
 
 func TestMustEnv_UnsetOutsideDev_Panics(t *testing.T) {
 	t.Setenv("MUST_ENV_TEST_KEY", "")
-	assert.Panics(t, func() { mustEnv("MUST_ENV_TEST_KEY", "production") })
+	assert.Panics(t, func() { mustEnv("MUST_ENV_TEST_KEY", "prod") })
 }
 
 func TestMustEnv_UnsetInDev_ReturnsFallback(t *testing.T) {

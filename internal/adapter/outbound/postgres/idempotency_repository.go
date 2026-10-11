@@ -4,23 +4,57 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
+// DefaultInProgressLease is how long an `in_progress` row is trusted to
+// belong to a live execution. After it, Begin reclaims the row (a crashed
+// pod, a SIGKILL, or a Fail that could not be written). It must exceed the
+// longest operation this service runs — RP-3 conversion's detached budget
+// (CONVERT_TIMEOUT, 10m default) — or a still-running conversion could be
+// executed a second time concurrently.
+const DefaultInProgressLease = 15 * time.Minute
+
+// ledgerWriteTimeout bounds Complete/Fail, which run detached from the
+// caller's context (see detachedLedgerContext).
+const ledgerWriteTimeout = 10 * time.Second
+
 // IdempotencyRepository implements port.IdempotencyStore against
 // `provisioning_operations` (§4.4, §9.2).
 type IdempotencyRepository struct {
-	pool *pgcommon.Pool
+	pool  *pgcommon.Pool
+	lease time.Duration
 }
 
 // NewIdempotencyRepository constructs an IdempotencyRepository backed by
-// pool.
+// pool, with DefaultInProgressLease.
 func NewIdempotencyRepository(pool *pgcommon.Pool) *IdempotencyRepository {
-	return &IdempotencyRepository{pool: pool}
+	return &IdempotencyRepository{pool: pool, lease: DefaultInProgressLease}
+}
+
+// WithInProgressLease overrides the in_progress lease (IDEMPOTENCY_IN_PROGRESS_LEASE)
+// and returns r. Non-positive values are ignored.
+func (r *IdempotencyRepository) WithInProgressLease(d time.Duration) *IdempotencyRepository {
+	if d > 0 {
+		r.lease = d
+	}
+	return r
+}
+
+// detachedLedgerContext returns a context that keeps ctx's values (the
+// joined transaction, the RLS GUC set, the trace) but not its cancellation,
+// bounded by ledgerWriteTimeout. Complete and Fail run on it: they are
+// called exactly when the request context is most likely to be done — the
+// 30s request deadline fired, or the client disconnected — and a ledger
+// write that fails then leaves the key `in_progress`, which every retry
+// would answer with 409 operation_in_progress until the lease expires.
+func detachedLedgerContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), ledgerWriteTimeout)
 }
 
 // Begin inserts an in_progress row, reclaims one left `failed` by a prior
@@ -37,12 +71,14 @@ func NewIdempotencyRepository(pool *pgcommon.Pool) *IdempotencyRepository {
 // key, which every 409 response explicitly instructs the caller to do,
 // would 409 forever instead of ever re-executing.
 //
-// `in_progress` is deliberately never reclaimed here, even though it can
-// go stale the same way (a hard crash before Fail/Complete ever runs):
-// reclaiming it risks two concurrent executions of the same operation if
-// the original caller is in fact still running, which is worse than the
-// key staying stuck. That residual case needs a staleness/lease mechanism
-// this method does not implement.
+// An `in_progress` row is reclaimed too once it is older than the lease
+// (r.lease, DefaultInProgressLease): by then the execution that claimed it
+// is gone (a hard crash, a SIGKILL during shutdown) or could not record
+// its outcome. Within the lease it is never reclaimed — two concurrent
+// executions of the same operation are worse than a short 409 window.
+// Every operation behind this ledger is a Keycloak-effect-first reconcile
+// (an already-applied step replays as a no-op), so re-running a reclaimed
+// key converges rather than duplicating.
 func (r *IdempotencyRepository) Begin(ctx context.Context, key string, tenantID uuid.UUID, operation string) (*domain.ProvisioningOperation, bool, error) {
 	var out *domain.ProvisioningOperation
 	var found bool
@@ -53,8 +89,10 @@ func (r *IdempotencyRepository) Begin(ctx context.Context, key string, tenantID 
 			ON CONFLICT (idempotency_key) DO UPDATE
 				SET status = 'in_progress', result = NULL, created_at = now(), completed_at = NULL
 				WHERE provisioning_operations.status = 'failed'
+				   OR (provisioning_operations.status = 'in_progress'
+				       AND provisioning_operations.created_at < now() - make_interval(secs => $4))
 			RETURNING idempotency_key, tenant_id, operation, status, result, created_at, completed_at`,
-			key, tenantID, operation)
+			key, tenantID, operation, r.lease.Seconds())
 		var op domain.ProvisioningOperation
 		var result []byte
 		scanErr := row.Scan(&op.IdempotencyKey, &op.TenantID, &op.Operation, &op.Status, &result, &op.CreatedAt, &op.CompletedAt)
@@ -94,8 +132,11 @@ func (r *IdempotencyRepository) Begin(ctx context.Context, key string, tenantID 
 }
 
 // Complete marks key succeeded with result (the response body to replay on
-// a duplicate call, §9.2).
+// a duplicate call, §9.2). Runs detached from ctx's cancellation
+// (detachedLedgerContext): the operation already succeeded.
 func (r *IdempotencyRepository) Complete(ctx context.Context, key string, result json.RawMessage) error {
+	ctx, cancel := detachedLedgerContext(ctx)
+	defer cancel()
 	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
 			UPDATE provisioning_operations SET status = 'succeeded', result = $2, completed_at = now()
@@ -106,8 +147,12 @@ func (r *IdempotencyRepository) Complete(ctx context.Context, key string, result
 
 // Fail marks key failed (no result to replay — caller retries with the
 // same key, which re-executes the operation since it never reached
-// succeeded, §9.2).
+// succeeded, §9.2). Runs detached from ctx's cancellation
+// (detachedLedgerContext): a timed-out or abandoned request is exactly when
+// this must still land.
 func (r *IdempotencyRepository) Fail(ctx context.Context, key string) error {
+	ctx, cancel := detachedLedgerContext(ctx)
+	defer cancel()
 	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
 			UPDATE provisioning_operations SET status = 'failed', completed_at = now()

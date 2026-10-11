@@ -117,48 +117,25 @@ func TestReconciliationRepository_SchemaCorruption(t *testing.T) {
 	require.Error(t, err, "ListPending's SELECT explicitly names the now-missing column")
 }
 
-// TestProcessedEventsRepository_SchemaCorruption drops
-// processed_events.processed_at — referenced by both CleanupExpired's WHERE
-// clause and its own index — forcing a genuine Exec failure.
-func TestProcessedEventsRepository_SchemaCorruption(t *testing.T) {
+// TestInboxRepository_SchemaCorruption drops processed_events.consumer —
+// referenced by inbox.Store's IsProcessed, claim and Prune statements —
+// forcing a genuine Query/Exec failure in each, which must surface as an
+// error (never a silent "not processed" / "nothing pruned").
+func TestInboxRepository_SchemaCorruption(t *testing.T) {
 	t.Parallel()
 	appPool, rawPool := setupTestDB(t)
 	ctx := context.Background()
-	repo := pgadapter.NewProcessedEventsRepository(appPool)
-
-	_, err := rawPool.Exec(ctx, `ALTER TABLE processed_events DROP COLUMN processed_at CASCADE`)
-	require.NoError(t, err)
-
-	_, err = repo.CleanupExpired(ctx, 24*time.Hour)
-	require.Error(t, err)
-}
-
-// TestProcessedEventsRepository_IsProcessedAndPrune_SchemaCorruption drops
-// processed_events.consumer — referenced by IsProcessed's WHERE clause and
-// by Prune's subquery/DELETE — forcing a genuine Query/Exec failure in
-// both. A separate container/test from the CleanupExpired one above since
-// that one corrupts a different column (processed_at, which neither of
-// these two methods' WHERE/column lists need for IsProcessed, though Prune
-// does also reference it — dropping consumer alone is enough to break both
-// without needing to reason about column drop ordering).
-func TestProcessedEventsRepository_IsProcessedAndPrune_SchemaCorruption(t *testing.T) {
-	t.Parallel()
-	appPool, rawPool := setupTestDB(t)
-	ctx := context.Background()
-	repo := pgadapter.NewProcessedEventsRepository(appPool)
+	inbox := pgadapter.NewInboxRepository(appPool, nil)
 
 	_, err := rawPool.Exec(ctx, `ALTER TABLE processed_events DROP COLUMN consumer CASCADE`)
 	require.NoError(t, err)
 
-	t.Run("IsProcessed_QueryFailure", func(t *testing.T) {
-		_, err := repo.IsProcessed(ctx, domain.ConsumerMembership, "evt-1")
-		require.Error(t, err)
-	})
-
-	t.Run("Prune_ExecFailure", func(t *testing.T) {
-		_, err := repo.Prune(ctx, 90, 100)
-		require.Error(t, err)
-	})
+	_, err = inbox.IsProcessed(ctx, domain.ConsumerMembership, uuid.NewString())
+	require.Error(t, err)
+	_, err = inbox.ProcessOnce(ctx, domain.ConsumerMembership, uuid.NewString(), "X", func(context.Context) error { return nil })
+	require.Error(t, err)
+	_, err = inbox.Prune(ctx, domain.ConsumerMembership, 24*time.Hour, 100)
+	require.Error(t, err)
 }
 
 // TestIdempotencyRepository_SchemaCorruption exercises two distinct Begin

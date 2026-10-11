@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,20 +40,52 @@ func (noopLogger) Error(string, map[string]any) {}
 
 var _ port.Logger = noopLogger{}
 
-// startKeycloakContainer starts a Keycloak dev-mode container and bootstraps
-// the "iam-realm-provisioner" master-realm service-account client (mirroring
-// scripts/keycloak-bootstrap.sh) via kcadm.sh, returning its base URL.
-// Factored out of setupKeycloak so other test files needing a raw gocloak
-// client (fixture setup the KeycloakAdmin port doesn't expose, e.g. seeding
-// a user with a pre-existing OTP/WebAuthn credential) can share the same
-// bootstrap without duplicating it.
+// The package shares ONE Keycloak container, started on first use and
+// terminated by TestMain. Keycloak 26's start-dev spends ~60s on Quarkus
+// augmentation alone on a CI runner; one container per test (11 of them,
+// two at a time, next to the Postgres suite under -race) pushed individual
+// starts past the wait and the package past go test's timeout. Sharing is
+// safe because every test works in its own uuid-named realm(s) — the one
+// fixed name, the shared "trial" realm CreateTrialUser hardcodes, is used
+// by a single test — and each test builds its own Admin adapter (own token
+// cache). Started lazily so a -run filter selecting only the OpenBao or
+// Glue tests never pays for it.
+var (
+	kcOnce      sync.Once
+	kcContainer testcontainers.Container
+	kcBaseURL   string
+	kcStartErr  error
+)
+
+// keycloakStartupTimeout covers the image's Quarkus augmentation (~60s on a
+// GitHub runner) plus boot, with headroom for a busy Docker host.
+const keycloakStartupTimeout = 300 * time.Second
+
+// startKeycloakContainer returns the base URL of the package's shared
+// Keycloak (dev mode), with the "iam-realm-provisioner" master-realm
+// service-account client bootstrapped (mirroring
+// scripts/keycloak-bootstrap.sh). Tests needing a raw gocloak client
+// (fixture setup the KeycloakAdmin port doesn't expose) use the same URL.
 func startKeycloakContainer(t *testing.T) string {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping keycloak integration test in short mode")
 	}
-	ctx := context.Background()
+	kcOnce.Do(func() {
+		kcContainer, kcBaseURL, kcStartErr = bootKeycloak(context.Background())
+	})
+	require.NoError(t, kcStartErr, "shared keycloak container failed to start")
+	return kcBaseURL
+}
 
+// terminateSharedKeycloak stops the shared container; called from TestMain.
+func terminateSharedKeycloak() {
+	if kcContainer != nil {
+		_ = kcContainer.Terminate(context.Background())
+	}
+}
+
+func bootKeycloak(ctx context.Context) (testcontainers.Container, string, error) {
 	req := testcontainers.ContainerRequest{
 		Image:        "quay.io/keycloak/keycloak:26.0",
 		ExposedPorts: []string{"8080/tcp"},
@@ -61,7 +94,7 @@ func startKeycloakContainer(t *testing.T) string {
 			"KEYCLOAK_ADMIN_PASSWORD": "admin",
 		},
 		Cmd:        []string{"start-dev"},
-		WaitingFor: wait.ForLog("Listening on: http://0.0.0.0:8080").WithStartupTimeout(120 * time.Second),
+		WaitingFor: wait.ForLog("Listening on: http://0.0.0.0:8080").WithStartupTimeout(keycloakStartupTimeout),
 		// host.docker.internal lets the container reach an httptest server
 		// bound to the host (EXT-6's client-jwt/jwks.url test) — Docker
 		// Desktop (Mac/Windows) resolves this automatically; host-gateway
@@ -72,13 +105,18 @@ func startKeycloakContainer(t *testing.T) string {
 		ContainerRequest: req,
 		Started:          true,
 	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = container.Terminate(ctx) })
+	if err != nil {
+		return container, "", fmt.Errorf("start keycloak: %w", err)
+	}
 
 	mappedPort, err := container.MappedPort(ctx, "8080/tcp")
-	require.NoError(t, err)
+	if err != nil {
+		return container, "", err
+	}
 	host, err := container.Host(ctx)
-	require.NoError(t, err)
+	if err != nil {
+		return container, "", err
+	}
 	baseURL := fmt.Sprintf("http://%s:%s", host, mappedPort.Port())
 
 	bootstrapScript := fmt.Sprintf(`
@@ -90,16 +128,19 @@ SA_USER_ID=$(/opt/keycloak/bin/kcadm.sh get clients/$CLIENT_UUID/service-account
 `, kcClientID, kcClientSecret, kcClientID)
 
 	exitCode, reader, err := container.Exec(ctx, []string{"bash", "-c", bootstrapScript})
-	require.NoError(t, err)
+	if err != nil {
+		return container, "", fmt.Errorf("keycloak bootstrap: %w", err)
+	}
 	var buf bytes.Buffer
 	_, _ = buf.ReadFrom(reader)
-	require.Equal(t, 0, exitCode, "keycloak bootstrap failed: %s", buf.String())
-
-	return baseURL
+	if exitCode != 0 {
+		return container, "", fmt.Errorf("keycloak bootstrap failed (exit %d): %s", exitCode, buf.String())
+	}
+	return container, baseURL, nil
 }
 
-// setupKeycloak starts a Keycloak dev-mode container and returns a ready
-// KeycloakAdmin adapter wired to it.
+// setupKeycloak returns a ready KeycloakAdmin adapter wired to the
+// package's shared Keycloak container.
 func setupKeycloak(t *testing.T) *keycloakadapter.Admin {
 	t.Helper()
 	admin, _ := setupKeycloakWithURL(t)

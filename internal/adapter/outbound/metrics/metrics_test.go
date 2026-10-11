@@ -3,7 +3,6 @@ package metrics
 import (
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/obsregistry"
 )
 
 func TestMain(m *testing.M) {
@@ -29,10 +29,12 @@ func TestMain(m *testing.M) {
 	}
 
 	// ObservabilityMiddlewares is gincommon's public metrics-init API.
-	// Call it before Register() so collectors pick up {service, version}
+	// Call it before Register() so collectors pick up {domain, service, environment}
 	// const labels and land on gincommon's registerer — the same order
 	// cmd/server/main.go uses.
 	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{
+		Domain:       "iam",
+		Environment:  "test",
 		ServiceName:  "iam-realm-provisioner",
 		BuildVersion: "test",
 	})
@@ -41,7 +43,7 @@ func TestMain(m *testing.M) {
 
 func ensureRegistered(t testing.TB) {
 	t.Helper()
-	Register("test")
+	Register()
 }
 
 func TestRegister_SucceedsAndPopulatesAllVars(t *testing.T) {
@@ -71,13 +73,11 @@ func TestRegister_SucceedsAndPopulatesAllVars(t *testing.T) {
 	assert.NotNil(t, ConsumedSchemaViolationsTotal)
 	assert.NotNil(t, ProcessedEventsDuplicates)
 	assert.NotNil(t, DependencyRequestDuration)
-	assert.NotNil(t, DuplicateMessagesTotal)
-	assert.NotNil(t, RLSViolationsPlatformTotal)
 }
 
 func TestRegister_IsIdempotent(t *testing.T) {
 	ensureRegistered(t)
-	assert.NotPanics(t, func() { Register("test") })
+	assert.NotPanics(t, func() { Register() })
 }
 
 func TestRegister_LandsOnGincommonRegisterer(t *testing.T) {
@@ -102,8 +102,10 @@ func TestRegister_AppliesGincommonConstLabels(t *testing.T) {
 	got := gincommonLabels()
 	want := gincommon.MetricsConstLabels()
 	assert.Equal(t, want, got)
+	assert.Equal(t, "iam", got["domain"])
 	assert.Equal(t, "iam-realm-provisioner", got["service"])
-	assert.Equal(t, "test", got["version"])
+	assert.Equal(t, "test", got["environment"])
+	assert.NotContains(t, got, "version", "version is only a label on platform_build_info")
 
 	ProvisionTotal.WithLabelValues("trial", "success").Inc()
 	families, err := prometheus.DefaultGatherer.Gather()
@@ -120,8 +122,9 @@ func TestRegister_AppliesGincommonConstLabels(t *testing.T) {
 		for _, lp := range f.GetMetric()[0].GetLabel() {
 			labels[lp.GetName()] = lp.GetValue()
 		}
+		assert.Equal(t, "iam", labels["domain"])
 		assert.Equal(t, "iam-realm-provisioner", labels["service"])
-		assert.Equal(t, "test", labels["version"])
+		assert.Equal(t, "test", labels["environment"])
 	}
 	assert.True(t, found, prefix+"provision_total must be gathered")
 }
@@ -361,60 +364,14 @@ func TestDependencyRequestDuration_ObservesByDependencyOperationOutcome(t *testi
 	DependencyRequestDuration.Reset()
 	DependencyRequestDuration.WithLabelValues("keycloak", "create_realm", "success").Observe(0.25)
 	DependencyRequestDuration.WithLabelValues("keycloak", "create_realm", "success").Observe(0.75)
-	DependencyRequestDuration.WithLabelValues("keycloak", "create_realm", "failure").Observe(1.5)
+	DependencyRequestDuration.WithLabelValues("keycloak", "create_realm", "error").Observe(1.5)
 
 	ok := histogramSample(t, DependencyRequestDuration.WithLabelValues("keycloak", "create_realm", "success"))
 	assert.Equal(t, uint64(2), ok.GetSampleCount())
 	assert.InDelta(t, 1.0, ok.GetSampleSum(), 1e-9)
 
-	failed := histogramSample(t, DependencyRequestDuration.WithLabelValues("keycloak", "create_realm", "failure"))
+	failed := histogramSample(t, DependencyRequestDuration.WithLabelValues("keycloak", "create_realm", "error"))
 	assert.Equal(t, uint64(1), failed.GetSampleCount())
-}
-
-func TestDuplicateMessagesTotal_IncrementsByConsumer(t *testing.T) {
-	ensureRegistered(t)
-	DuplicateMessagesTotal.Reset()
-	DuplicateMessagesTotal.WithLabelValues("tenant").Inc()
-	DuplicateMessagesTotal.WithLabelValues("tenant").Inc()
-	assert.Equal(t, float64(2), counterValue(t, DuplicateMessagesTotal.WithLabelValues("tenant")))
-	assert.Equal(t, float64(0), counterValue(t, DuplicateMessagesTotal.WithLabelValues("billing")))
-}
-
-func TestRLSViolationsPlatformTotal_IncrementsByViolationTypeLabel(t *testing.T) {
-	ensureRegistered(t)
-	RLSViolationsPlatformTotal.Reset()
-	RLSViolationsPlatformTotal.WithLabelValues("cross_tenant_access").Add(2)
-	RLSViolationsPlatformTotal.WithLabelValues("missing_or_invalid_guc").Inc()
-
-	assert.Equal(t, float64(2), counterValue(t, RLSViolationsPlatformTotal.WithLabelValues("cross_tenant_access")))
-	assert.Equal(t, float64(1), counterValue(t, RLSViolationsPlatformTotal.WithLabelValues("missing_or_invalid_guc")))
-}
-
-func TestPreseededRLSPlatformLabelsPresent(t *testing.T) {
-	ensureRegistered(t)
-
-	gathered, err := prometheus.DefaultGatherer.Gather()
-	require.NoError(t, err)
-
-	var mf *dto.MetricFamily
-	for _, f := range gathered {
-		if f.GetName() == "platform_rls_violations_total" {
-			mf = f
-			break
-		}
-	}
-	require.NotNil(t, mf, "platform_rls_violations_total must be gathered")
-
-	seenTypes := map[string]bool{}
-	for _, m := range mf.GetMetric() {
-		for _, lp := range m.GetLabel() {
-			if lp.GetName() == "violation_type" {
-				seenTypes[lp.GetValue()] = true
-			}
-		}
-	}
-	assert.True(t, seenTypes["missing_or_invalid_guc"])
-	assert.True(t, seenTypes["cross_tenant_access"])
 }
 
 func TestPlatformConstLabels_CarryDomainServiceEnvironment(t *testing.T) {
@@ -440,58 +397,24 @@ func TestPlatformConstLabels_CarryDomainServiceEnvironment(t *testing.T) {
 		labels[lp.GetName()] = lp.GetValue()
 	}
 	assert.Equal(t, "iam", labels["domain"])
-	assert.Equal(t, "realm-provisioner", labels["service"])
+	assert.Equal(t, "iam-realm-provisioner", labels["service"])
 	assert.Equal(t, "test", labels["environment"])
 }
 
 // --- Naming-convention CI enforcement (Platform Observability Standard) --
 
-// tierOf classifies a metric name per the standard's decision tree. Tier 2
-// (iam_*, domain-shared) is name-ambiguous with Tier 3 (both start with
-// "iam_"), so it is disambiguated by the frozen service-specific prefix.
-func tierOf(name string) string {
-	switch {
-	case strings.HasPrefix(name, "platform_"):
-		return "platform"
-	case strings.HasPrefix(name, prefix): // iam_realm_provisioner_
-		return "service"
-	case strings.HasPrefix(name, "iam_"):
-		return "domain"
-	default:
-		return "unknown"
-	}
-}
-
-var (
-	counterSuffix   = regexp.MustCompile(`_total$`)
-	histogramSuffix = regexp.MustCompile(`_seconds$`)
-)
-
-// registryByName indexes PlatformRegistry for TestNamingConvention_*'s
-// registry-compliance and label-vocabulary checks (rules 9-12 and Label
-// Governance: shared metric names/labels must come from the approved
-// registry, not be invented ad hoc by instrumentation code).
-func registryByName() map[string]RegistryEntry {
-	m := make(map[string]RegistryEntry, len(PlatformRegistry))
-	for _, e := range PlatformRegistry {
-		m[e.Name] = e
-	}
-	return m
-}
-
 // TestNamingConvention_ConformsToPlatformObservabilityStandard is this
-// repo's CI guardrail for the Enterprise Platform Observability Standard:
-// every counter this service registers must end in _total, every
-// histogram in _seconds, a domain-shared (iam_*, non-service-specific)
-// metric must never encode this service's name, and — per rules 9-12 and
-// Label Governance — every platform_* (Tier 1) metric must (a) carry
-// {domain, service, environment}, (b) have a corresponding PlatformRegistry
-// entry (a platform_* name with no registry entry is exactly the
-// unilateral invention rule 11 forbids), and (c) use only labels that
-// entry's RequiredLabels/ApprovedLabels lists (label vocabulary
-// compliance). It runs against what's actually gathered off gincommon's
-// registerer, not a hand-copied list, so a future metric added to
-// metrics.go without following the standard fails this test.
+// repo's CI guardrail for the Enterprise Platform Observability Standard.
+// It gathers every collector actually registered on gincommon's registerer
+// (gincommon's own platform_http_*/platform_build_info, this package's
+// Tier 3 iam_realm_provisioner_* metrics and the shared
+// platform_dependency_request_seconds) and validates the result against the
+// central Platform Observability Registry (pkg/obsregistry): registry
+// names, label sets and vocabularies, required {domain, service,
+// environment} labels, the iam_realm_provisioner_ prefix, suffixes and
+// prohibited high-cardinality labels. Removed (pre-standard) names are
+// errors. Proposed metrics are warnings, not errors (Options.Strict=false):
+// the registry's successors are all still awaiting ratification.
 func TestNamingConvention_ConformsToPlatformObservabilityStandard(t *testing.T) {
 	ensureRegistered(t)
 
@@ -512,102 +435,51 @@ func TestNamingConvention_ConformsToPlatformObservabilityStandard(t *testing.T) 
 	MfaResetTotal.WithLabelValues("success").Add(0)
 	AuditEntryDeliveryTotal.WithLabelValues("delivered").Add(0)
 	AuditEntryBacklogGauge.WithLabelValues("pending").Add(0)
+	ServiceAccountRegisterTotal.WithLabelValues("success").Add(0)
+	ServiceAccountKeyRefreshTotal.WithLabelValues("success").Add(0)
+	ServiceAccountBackfillTotal.WithLabelValues("success").Add(0)
 	TemplateDrift.WithLabelValues("v1").Add(0)
 	RLSViolationsTotal.WithLabelValues("cross_tenant_access").Add(0)
 	UnknownEventAcknowledged.WithLabelValues("topic", "Type").Add(0)
 	ConsumedSchemaViolationsTotal.WithLabelValues("billing", "TenantReactivated").Add(0)
 	ProcessedEventsDuplicates.WithLabelValues("tenant").Add(0)
 	DependencyRequestDuration.WithLabelValues("keycloak", "create_realm", "success").Observe(0)
-	DuplicateMessagesTotal.WithLabelValues("tenant").Add(0)
-	RLSViolationsPlatformTotal.WithLabelValues("cross_tenant_access").Add(0)
+	DependencyRequestDuration.WithLabelValues("keycloak", "token", "error").Observe(0)
 
-	families, err := prometheus.DefaultGatherer.Gather()
+	rep, err := obsregistry.Validate(gincommon.MetricsGatherer(), obsregistry.Options{})
 	require.NoError(t, err)
+	for _, f := range rep.Errors() {
+		t.Errorf("Platform Observability Standard violation: %v", f)
+	}
+	assert.Equal(t, obsregistry.TierService, rep.Tiers[prefix+"provision_total"], "Tier 3 metrics must use the %s prefix", prefix)
+	assert.Equal(t, obsregistry.TierPlatform, rep.Tiers["platform_dependency_request_seconds"])
 
-	registry := registryByName()
+	// Every Tier 3 metric name must be under this service's registry
+	// prefix (<domain>_<service>_), which the frozen §25 prefix equals.
+	assert.Equal(t, prefix, obsregistry.ServicePrefix("iam", "iam-realm-provisioner"))
+	families, err := gincommon.MetricsGatherer().Gather()
+	require.NoError(t, err)
 	checked := 0
-
 	for _, f := range families {
 		name := f.GetName()
-		tier := tierOf(name)
-		if tier == "unknown" {
-			continue // owned by gincommon/platform-events/pgcommon, not this rename
+		if !strings.HasPrefix(name, "iam_") {
+			continue
 		}
 		checked++
-
-		switch f.GetType() {
-		case dto.MetricType_COUNTER:
-			assert.True(t, counterSuffix.MatchString(name), "%s: counters must end in _total (Rule 4)", name)
-		case dto.MetricType_HISTOGRAM:
-			assert.True(t, histogramSuffix.MatchString(name), "%s: histograms must end in _seconds (Rule 5)", name)
-		default:
-			// Gauges have no mandated suffix rule (Rule 6 is advisory, not
-			// a lintable suffix); this service registers no summary/
-			// untyped/gauge-histogram metrics.
-		}
-
-		if tier == "domain" {
-			assert.False(t, strings.Contains(name, "realm_provisioner") || strings.Contains(name, "realm-provisioner"),
-				"%s: a domain-shared (iam_*) metric must not encode the service name (Rule 2)", name)
-		}
-
-		if tier != "platform" {
-			continue
-		}
-		assert.False(t, strings.Contains(name, "realm_provisioner") || strings.Contains(name, "realm-provisioner"),
-			"%s: a platform_* metric must not encode the service name in its name (Rule 1)", name)
-
-		// Registry compliance (rules 9-12): a platform_* name this service
-		// emits with no PlatformRegistry entry is exactly the unilateral
-		// invention the standard forbids.
-		entry, ok := registry[name]
-		if !assert.True(t, ok, "%s: platform_* metric has no PlatformRegistry entry (registry.go) — rules 9-12 forbid emitting an unregistered platform_* name", name) {
-			continue
-		}
-
-		require.NotEmpty(t, f.GetMetric(), "%s: must have at least one sample to check labels", name)
-		labelNames := map[string]bool{}
-		for _, lp := range f.GetMetric()[0].GetLabel() {
-			labelNames[lp.GetName()] = true
-		}
-		for _, want := range entry.RequiredLabels {
-			assert.True(t, labelNames[want], "%s: platform_* metrics require label %q (Tier 1 required labels)", name, want)
-		}
-
-		// Label vocabulary compliance: every label actually present must
-		// be either a required const label or one this entry's packet
-		// requested approval for — a label outside both is an
-		// unapproved, ad hoc addition to a shared metric's contract.
-		approved := make(map[string]bool, len(entry.RequiredLabels)+len(entry.ApprovedLabels))
-		for _, l := range entry.RequiredLabels {
-			approved[l] = true
-		}
-		for _, l := range entry.ApprovedLabels {
-			approved[l] = true
-		}
-		for label := range labelNames {
-			assert.True(t, approved[label],
-				"%s: label %q is not in this metric's approved vocabulary (RequiredLabels/ApprovedLabels in registry.go) — shared-metric labels must come from the registry, not be invented ad hoc", name, label)
-		}
+		assert.True(t, strings.HasPrefix(name, prefix), "%s: service-specific metrics must be named %s<metric>", name, prefix)
 	}
-
 	assert.Greater(t, checked, 0, "expected at least one of this service's own metrics to be gathered")
 }
 
-// TestPlatformRegistry_EntriesAreWellFormed guards registry.go itself: an
-// entry with no required labels, no semantic definition, or an empty name
-// would make TestNamingConvention_ConformsToPlatformObservabilityStandard's
-// registry-compliance check vacuous.
-func TestPlatformRegistry_EntriesAreWellFormed(t *testing.T) {
-	require.NotEmpty(t, PlatformRegistry)
-	seen := map[string]bool{}
-	for _, e := range PlatformRegistry {
-		assert.NotEmpty(t, e.Name)
-		assert.False(t, seen[e.Name], "%s: duplicate PlatformRegistry entry", e.Name)
-		seen[e.Name] = true
-		assert.True(t, strings.HasPrefix(e.Name, "platform_") || e.Tier == "domain", "%s: Tier %q entries must be named platform_* unless Tier is domain", e.Name, e.Tier)
-		assert.NotEmpty(t, e.SemanticDefinition, "%s: registry entries must carry a semantic definition (Registry Ratification Requirement)", e.Name)
-		assert.NotEmpty(t, e.RequiredLabels, "%s: registry entries must declare required labels", e.Name)
-		assert.Contains(t, []RegistryStatus{StatusCanonical, StatusProposed}, e.Status, "%s: unknown status", e.Name)
-	}
+// A second registration of a registry histogram reuses the collector that
+// is already registered (platform-events registers the same name first).
+func TestSharedHistogram_AlreadyRegistered_ReturnsExistingCollector(t *testing.T) {
+	Register()
+	assert.Same(t, DependencyRequestDuration, sharedHistogram("platform_dependency_request_seconds"))
+}
+
+// A name missing from the Platform Observability Registry is a programming
+// error and fails at startup.
+func TestSharedHistogram_UnregisteredName_Panics(t *testing.T) {
+	assert.Panics(t, func() { sharedHistogram("platform_not_in_the_registry_seconds") })
 }

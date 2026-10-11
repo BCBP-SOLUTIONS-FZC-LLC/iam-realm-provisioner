@@ -3,75 +3,69 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
-	"github.com/prometheus/client_golang/prometheus"
-	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/eventschema"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 )
 
+var (
+	libraryMetricsOnce sync.Once
+	libraryMetricsLog  = &fakeLogger{}
+)
+
+// ensureMetricsRegistered runs the same metrics bootstrap as main():
+// gincommon identity, business metrics, then platform-events/pgcommon on
+// the same registerer and identity.
 func ensureMetricsRegistered(t *testing.T) {
 	t.Helper()
-	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{ServiceName: "iam-realm-provisioner", BuildVersion: "test"})
-	metrics.Register("test")
+	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{Domain: "iam", Environment: "test", ServiceName: "iam-realm-provisioner", BuildVersion: "test"})
+	metrics.Register()
+	libraryMetricsOnce.Do(func() { initLibraryMetrics(libraryMetricsLog) })
 }
 
-func counterValue(t *testing.T, c prometheus.Counter) float64 {
-	t.Helper()
-	var m dto.Metric
-	require.NoError(t, c.Write(&m))
-	return m.GetCounter().GetValue()
-}
-
-// TestInstrumentConsumer_Success_IncrementsReceivedAndProcessed and its
-// sibling below cover instrumentConsumer (wiring.go), the Enterprise
-// Platform Observability Standard's Canonical Tier 1 message-lifecycle
-// counters wrapping all 3 SQS consumer handlers.
-func TestInstrumentConsumer_Success_IncrementsReceivedAndProcessed(t *testing.T) {
+// TestInitLibraryMetrics_SharesIdentityAndDependencyHistogram covers
+// main()'s metrics bootstrap: platform-events and platform-pgcommon
+// register on gincommon's registerer with gincommon's identity without a
+// single RegistrationWarning — in particular platform-events reuses the
+// platform_dependency_request_seconds collector metrics.Register built,
+// instead of disabling its own copy.
+func TestInitLibraryMetrics_SharesIdentityAndDependencyHistogram(t *testing.T) {
 	ensureMetricsRegistered(t)
-	before := counterValue(t, metrics.PlatformMessagesProcessedTotal.WithLabelValues("membership"))
-	beforeRecv := counterValue(t, metrics.PlatformMessagesReceivedTotal.WithLabelValues("membership"))
-	beforeFail := counterValue(t, metrics.PlatformMessagesFailedTotal.WithLabelValues("membership"))
+	assert.Zero(t, atomic.LoadInt32(&libraryMetricsLog.warnCalls), "registration warnings: %v", libraryMetricsLog.lastWarn)
 
-	called := false
-	h := instrumentConsumer("membership", func(context.Context, events.Envelope[json.RawMessage]) error {
-		called = true
-		return nil
-	})
-	err := h(context.Background(), events.Envelope[json.RawMessage]{})
-
-	assert.NoError(t, err)
-	assert.True(t, called, "wrapped handler must actually be invoked")
-	assert.Equal(t, beforeRecv+1, counterValue(t, metrics.PlatformMessagesReceivedTotal.WithLabelValues("membership")))
-	assert.Equal(t, before+1, counterValue(t, metrics.PlatformMessagesProcessedTotal.WithLabelValues("membership")))
-	assert.Equal(t, beforeFail, counterValue(t, metrics.PlatformMessagesFailedTotal.WithLabelValues("membership")), "success must not increment failed")
-}
-
-func TestInstrumentConsumer_Error_IncrementsReceivedAndFailed_PassesErrorThrough(t *testing.T) {
-	ensureMetricsRegistered(t)
-	beforeRecv := counterValue(t, metrics.PlatformMessagesReceivedTotal.WithLabelValues("tenant"))
-	beforeProc := counterValue(t, metrics.PlatformMessagesProcessedTotal.WithLabelValues("tenant"))
-	beforeFail := counterValue(t, metrics.PlatformMessagesFailedTotal.WithLabelValues("tenant"))
-
-	wantErr := errors.New("boom")
-	h := instrumentConsumer("tenant", func(context.Context, events.Envelope[json.RawMessage]) error {
-		return wantErr
-	})
-	err := h(context.Background(), events.Envelope[json.RawMessage]{})
-
-	assert.Same(t, wantErr, err, "the handler's own error must pass through unmodified")
-	assert.Equal(t, beforeRecv+1, counterValue(t, metrics.PlatformMessagesReceivedTotal.WithLabelValues("tenant")))
-	assert.Equal(t, beforeFail+1, counterValue(t, metrics.PlatformMessagesFailedTotal.WithLabelValues("tenant")))
-	assert.Equal(t, beforeProc, counterValue(t, metrics.PlatformMessagesProcessedTotal.WithLabelValues("tenant")), "failure must not increment processed")
+	metrics.DependencyRequestDuration.WithLabelValues("keycloak", "create_realm", "success").Observe(0.01)
+	families, err := gincommon.MetricsGatherer().Gather()
+	require.NoError(t, err)
+	seen := map[string]map[string]string{}
+	for _, f := range families {
+		if len(f.GetMetric()) == 0 {
+			continue
+		}
+		labels := map[string]string{}
+		for _, lp := range f.GetMetric()[0].GetLabel() {
+			labels[lp.GetName()] = lp.GetValue()
+		}
+		seen[f.GetName()] = labels
+	}
+	for _, name := range []string{"platform_dependency_request_seconds", "platform_library_info", "platform_http_requests_total"} {
+		if _, ok := seen[name]; !ok && name == "platform_http_requests_total" {
+			continue // only exported once a request has been served
+		}
+		require.Contains(t, seen, name)
+		assert.Equal(t, "iam", seen[name]["domain"], name)
+		assert.Equal(t, "iam-realm-provisioner", seen[name]["service"], name)
+		assert.Equal(t, "test", seen[name]["environment"], name)
+	}
 }
 
 func TestEventschemaByType(t *testing.T) {
@@ -148,20 +142,4 @@ func TestNoopPublisher_Publish(t *testing.T) {
 func TestNoopPublisher_PublishBatch(t *testing.T) {
 	var p noopPublisher
 	assert.NoError(t, p.PublishBatch(context.Background(), nil))
-}
-
-// TestDlqHandler_AlwaysErrors_NeverDeletesTheMessage guards dlqHandler's
-// safety-critical contract: platform-events deletes an SQS message only if
-// its dead-letter handler returns nil, so a nil return here would silently
-// drop a poison message before it ever reaches the queue's -dlq sibling for
-// operator inspection. This must never happen, so dlqHandler must always
-// return a non-nil error regardless of the envelope it's given.
-func TestDlqHandler_AlwaysErrors_NeverDeletesTheMessage(t *testing.T) {
-	ensureMetricsRegistered(t)
-	before := counterValue(t, metrics.PlatformDLQMessagesTotal.WithLabelValues("billing"))
-
-	err := dlqHandler("billing")(context.Background(), events.Envelope[json.RawMessage]{Type: "AnythingAtAll"})
-
-	require.Error(t, err, "dlqHandler must never return nil — that would delete the message before it reaches -dlq")
-	assert.Equal(t, before+1, counterValue(t, metrics.PlatformDLQMessagesTotal.WithLabelValues("billing")))
 }

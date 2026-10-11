@@ -3,6 +3,7 @@ package port
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/google/uuid"
@@ -77,15 +78,46 @@ type IdempotencyStore interface {
 	Fail(ctx context.Context, key string) error
 }
 
-// ProcessedEventsStore implements the consumer dedup ledger (§4.5, §7).
-// platform-events has no processed-events API of its own — consumers
-// implement Envelope.ID + INSERT ON CONFLICT DO NOTHING against a local
-// table, matching iam-org-membership's IdempotencyStore.
-type ProcessedEventsStore interface {
+// Inbox is the exactly-once consumer port backing the processed_events
+// table (§4.5, §7, IDEMP-1..4), implemented over platform-events'
+// pkg/inbox (one inbox.Store per consumer name) — matching
+// iam-org-membership's port.Inbox.
+//
+// ProcessOnce claims (consumer, eventID) and runs fn in ONE transaction:
+// the claim (INSERT … ON CONFLICT DO NOTHING) is the first statement, so a
+// concurrent delivery of the same event blocks on the claim's row lock and
+// then sees it as a duplicate, instead of both deliveries applying the
+// projection twice. fn's ctx carries that transaction (and the tx-bound
+// event publisher), so every repository call inside fn joins it. If fn
+// returns an error nothing is recorded and the message is retried.
+// duplicate is true when the event was already processed; fn was not run.
+//
+// IsProcessed is the cheap pre-check a consumer runs before an external
+// side effect that must not repeat on a duplicate (a Keycloak call, which
+// by §9.1 never runs inside a database transaction).
+//
+// eventID must be a UUID (every platform-events envelope ID is).
+type Inbox interface {
 	IsProcessed(ctx context.Context, consumer domain.ProcessedEventsConsumer, eventID string) (bool, error)
-	MarkProcessed(ctx context.Context, consumer domain.ProcessedEventsConsumer, eventID string) error
-	// Prune deletes up to limit rows older than ttlDays (PE-1 / IDEMP-4).
-	// Batched so a backlog larger than one tick converges over several
-	// ticks instead of one unbounded DELETE.
-	Prune(ctx context.Context, ttlDays, limit int) (int, error)
+	ProcessOnce(ctx context.Context, consumer domain.ProcessedEventsConsumer, eventID, eventType string, fn func(txCtx context.Context) error) (duplicate bool, err error)
+}
+
+// InboxPruner deletes one consumer's processed_events rows older than
+// retention, in batches of batch rows until none are left (PE-1).
+type InboxPruner interface {
+	Prune(ctx context.Context, consumer domain.ProcessedEventsConsumer, retention time.Duration, batch int) (int64, error)
+}
+
+// RetentionPruner deletes rows past their retention window from the
+// operational/audit tables no other job prunes (ledger-prune). Each method
+// deletes in batches of batch rows until none is left and returns the
+// total. Requires the BYPASSRLS pool (cross-tenant).
+type RetentionPruner interface {
+	// PruneProvisioningOperations deletes idempotency-ledger rows created
+	// before olderThan ago — far past any caller's retry window and the
+	// in_progress lease.
+	PruneProvisioningOperations(ctx context.Context, olderThan time.Duration, batch int) (int64, error)
+	// PruneRLSViolationLog deletes sampled RLS violation records older than
+	// olderThan (they are already counted into rls_violations_total).
+	PruneRLSViolationLog(ctx context.Context, olderThan time.Duration, batch int) (int64, error)
 }

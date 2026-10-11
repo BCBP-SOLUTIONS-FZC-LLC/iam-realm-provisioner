@@ -1,6 +1,6 @@
 # Operator Runbook — iam-realm-provisioner
 
-Full procedures for the headline scenarios listed in LLD §24. This service is the single writer to the Keycloak Admin API and the system of record for tenant identity lifecycle — most incidents here are either "Keycloak is unhappy" or "something didn't land locally after Keycloak succeeded." Grafana dashboard: "IAM — Realm Provisioner". Metric prefixes: `iam_realm_provisioner_*` (Tier 3, service-specific, frozen §25 — **the metric every alert below actually reads**) and `platform_*` (Tier 1, shared across domains, all `Status: Proposed` — shadow-emitted for Platform Observability Registry ratification, not yet wired into any alert; see `.claude/operations.md` §11.1). Alert rules: `deploy/monitoring/app-alerts.yml`.
+Full procedures for the headline scenarios listed in LLD §24. This service is the single writer to the Keycloak Admin API and the system of record for tenant identity lifecycle — most incidents here are either "Keycloak is unhappy" or "something didn't land locally after Keycloak succeeded." Grafana dashboard: "IAM — Realm Provisioner". Metric prefixes: `iam_realm_provisioner_*` (Tier 3, service-specific, frozen §25 — the business alerts read these) and `platform_*` (Tier 1, emitted by platform-gincommon/-events/-pgcommon plus this service's `platform_dependency_request_seconds{dependency="keycloak"}` — the HTTP, outbox and SQS alerts read these; alerts on registry-`proposed` metrics carry `metric_status: proposed`; see `.claude/operations.md` §11.1). Every series carries `{domain="iam", service="iam-realm-provisioner", environment}`. Alert rules: `deploy/monitoring/app-alerts.yml`.
 
 ---
 
@@ -9,7 +9,7 @@ Full procedures for the headline scenarios listed in LLD §24. This service is t
 **Symptom:** `keycloak_call_failures_total` alert firing (rate > 5% for 5m), provisioning endpoints returning `502`/`realm_provisioning_failed`.
 
 **Diagnosis:**
-1. Check `iam_realm_provisioner_keycloak_call_duration_seconds{op}` and `iam_realm_provisioner_keycloak_call_failures_total{op}` broken down by operation — is it one op (e.g. `create_realm`) or everything? (A `platform_dependency_request_seconds{dependency="keycloak",operation,outcome}` Tier 1 candidate shadow-emits the same data, but it is `Status: Proposed` — not yet ratified — so it is not what this alert reads.)
+1. Check `iam_realm_provisioner_keycloak_call_duration_seconds{op}` and `iam_realm_provisioner_keycloak_call_failures_total{op}` broken down by operation — is it one op (e.g. `create_realm`) or everything? (The same calls are in `platform_dependency_request_seconds{dependency="keycloak",operation,outcome}` — `outcome="error"` for failures — for cross-service dependency views.)
 2. Check `iam_realm_provisioner_admin_token_refresh_total{trigger="401"}` — a spike here means the admin credential was rotated (client secret changed in OpenBao/Keycloak) and the cached token is stale everywhere, not that Keycloak itself is down.
 3. Check the client-side rate limiter budget (`KEYCLOAK_RATE_LIMIT_RPS`, default 20) — a burst of retries from callers can self-inflict 429s that look like a Keycloak outage.
 4. Check Keycloak's own health/logs directly if reachable.
@@ -71,24 +71,27 @@ This is intentionally an operator-run manual procedure, not an API endpoint — 
 
 ## 5. Stuck `in_progress` idempotency key
 
-**Symptom:** A caller retries a request and gets `409 operation_in_progress` indefinitely — a prior attempt crashed mid-flow and left a `provisioning_operations` row in `status='in_progress'`.
+**Symptom:** A caller retries a request and keeps getting `409 operation_in_progress`.
 
-**Diagnosis:**
+**This now resolves on its own.** Two causes used to leave a key `in_progress` forever, and both are fixed:
+- `Fail`/`Complete` ran on the request context, so a request cut off by the 30s deadline or a client disconnect could not record its outcome. They now run detached from it (`IdempotencyRepository`).
+- A crash or SIGKILL mid-request left nothing to record the outcome. `Begin` now **reclaims an `in_progress` row older than the lease** (`IDEMPOTENCY_IN_PROGRESS_LEASE`, 15m). The next retry with the same key re-runs the operation, and every step is a Keycloak-effect-first reconcile, so an already-applied step replays as a no-op.
+
+A `409` within the lease is expected: the original execution may still be running. RP-3 conversions in particular continue detached for up to `CONVERT_TIMEOUT` (10m) after the caller's request times out, and the retry replays the result once they finish.
+
+**Diagnosis** (keys stuck past the lease mean something else is wrong — e.g. the clock or the lease setting):
 ```sql
-SELECT idempotency_key, operation, tenant_id, status, created_at, updated_at
+SELECT idempotency_key, operation, tenant_id, status, created_at
 FROM provisioning_operations
-WHERE status = 'in_progress' AND updated_at < now() - interval '1 hour';
+WHERE status = 'in_progress' AND created_at < now() - interval '15 minutes';
 ```
 
-**Recovery:**
-- **Because every flow is Keycloak-effect-first, the default and safe recovery is to do nothing and let the caller retry with the same `Idempotency-Key`.** The retry re-attempts the Keycloak step; if Keycloak already completed it from the crashed attempt, the operation's own idempotent checks (e.g. realm-already-exists, user-already-migrated) should let it proceed to the local commit.
-- **Only force-clear a stuck key after confirming no Keycloak partial state remains** — i.e. you have manually verified in Keycloak that the realm/user/IdP the operation was creating does not exist in a half-configured state. If Keycloak state does exist but the local row doesn't reflect it, prefer fixing the local row to match reality over deleting Keycloak state, since Keycloak is the harder-to-reverse side.
-- Force-clearing (only after the above check):
-  ```sql
-  UPDATE provisioning_operations SET status = 'failed', last_error = 'operator-cleared: stuck in_progress, verified no Keycloak partial state'
-  WHERE idempotency_key = '<key>';
-  ```
-  This allows a subsequent request with a **new** `Idempotency-Key` to proceed cleanly (the old key's row now correctly reflects `failed`, so it won't be replayed as a stale success).
+**Manual recovery** (only if a key must be released before the lease expires): first confirm in Keycloak that the realm/user/IdP the operation was creating is not half-configured — prefer fixing the local row to match Keycloak over deleting Keycloak state. Then:
+```sql
+UPDATE provisioning_operations SET status = 'failed', completed_at = now()
+WHERE idempotency_key = '<key>' AND status = 'in_progress';
+```
+The caller's next retry with the **same** key then re-executes (a `failed` key is always reclaimed).
 
 ---
 
@@ -111,13 +114,13 @@ Note: as of this build, an empty `failing_tenants` array serializes as JSON `nul
 Not a numbered LLD headline item, but a common operational need given the outbox + 3-consumer architecture.
 
 **Outbox relay lag:**
-- Check `outbox_dead_letters_total` (from `platform-events`) — an increase over 30m is a warning alert. Rows land in `outbox_dead_letters` after `OUTBOX_MAX_ATTEMPTS` (default 5) failed publish attempts.
+- Check `platform_dlq_messages_total{operation="outbox_publish",reason="max_attempts"}` (from `platform-events`, by `event_type`) — an increase over 30m is a warning alert (`IAMRealmProvisionerOutboxStuck`); `platform_outbox_pending_events` and `platform_outbox_errors_total{operation}` show backlog and poll/mark-published failures. Rows land in `outbox_dead_letters` after `OUTBOX_MAX_ATTEMPTS` (default 5) failed publish attempts.
 - Check `OUTBOX_POLL_INTERVAL` (default 500ms) and `OUTBOX_BATCH_SIZE` (default 50) — under sustained high write volume, a too-small batch size can cause the relay to fall behind; check whether unpublished `outbox_events` rows are accumulating faster than the relay drains them.
 - A dead-lettered event needs manual inspection of its payload and `last_error`, then either a republish or acceptance that the event is unrecoverable (document why — every produced event has downstream consumers). There is **no endpoint or job for this** — `outbox.Runner` exposes `ListDeadLetters`, `ReprocessDeadLetters`/`ReprocessDeadLettersWith`, and `DiscardDeadLetters`, but this service wires none of them (nor do the sibling services), so today the options are a direct `SELECT` against `outbox_dead_letters` for inspection and a manual re-INSERT into `outbox_events` to republish. If DLQ dwell becomes routine rather than exceptional, wiring `ReprocessDeadLettersWith` behind an operator endpoint is the intended fix.
 
 **Stuck SQS consumer / DLQ buildup:**
 - Each inbound queue (`membership-realm-q`, `tenant-realm-q`, `billing-realm-q`) has its own `-dlq` with `maxReceiveCount=5`. DLQ depth > 0 is a warning alert.
-- A message lands in the DLQ after 5 failed deliveries — the handler sees deliveries 1–4 and `dlqHandler` observes the 5th (`platform_dlq_messages_total{consumer}`) just before SQS's own redrive — inspect the message body and this service's logs (structured, includes `tenant_id`/`operation`/`trace_id`) for the actual error. If `iam_realm_provisioner_consumed_schema_violations_total{consumer,event_type}` rose too (critical alert `IAMRealmProvisionerConsumedSchemaViolation`, log line `consumed event violates its consumed-message schema`), the payload failed the consumer's consumed-message schema (`internal/eventschema`) before reaching the handler: either the producer broke its contract, or our `api/asyncapi.yaml` is stale/stricter than what it sends — fix that side (`make extract-schemas` after an asyncapi edit), then redrive. Other common causes: a malformed payload from the producer, a downstream dependency (e.g. Org & Membership for the I-8 residual-MFA check) being unavailable, or a genuine bug in the consumer handler.
+- A message lands in the DLQ after 4 failed deliveries — the handler sees deliveries 1–4 and platform-events forwards the 5th to `-dlq` itself (`platform_dlq_messages_total`, DLQ message attribute `DLQReason`) just before SQS's own redrive would; a consumed-schema violation (`DLQReason=schema_violation`) is forwarded on its **first** delivery — inspect the message body and this service's logs (structured, includes `tenant_id`/`operation`/`trace_id`) for the actual error. If `iam_realm_provisioner_consumed_schema_violations_total{consumer,event_type}` rose too (critical alert `IAMRealmProvisionerConsumedSchemaViolation`, log line `consumed event violates its consumed-message schema`), the payload failed the consumer's consumed-message schema (`internal/eventschema`) before reaching the handler: either the producer broke its contract, or our `api/asyncapi.yaml` is stale/stricter than what it sends — fix that side (`make extract-schemas` after an asyncapi edit), then redrive. Other common causes: a malformed payload from the producer, a downstream dependency (e.g. Org & Membership for the I-8 residual-MFA check) being unavailable, or a genuine bug in the consumer handler.
 - Once the root cause is fixed, messages can be manually redriven from the DLQ back to the source queue (standard SQS redrive, `aws sqs start-message-move-task` or console redrive) — this service's consumers are safe to reprocess a message because of `processed_events` dedup (see below).
 
 **Manually replaying a `processed_events`-deduped event:**

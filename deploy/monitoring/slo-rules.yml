@@ -15,20 +15,21 @@
 #  SLO-2  Keycloak Admin API call success rate
 #         Target: 99% of Keycloak Admin API calls
 #         (iam_realm_provisioner_keycloak_call_duration_seconds) succeed.
-#         A Tier 1 platform_dependency_request_seconds{dependency="keycloak"}
-#         candidate is shadow-emitted from the same call site (Status:
-#         Proposed in internal/adapter/outbound/metrics/registry.go's
-#         PlatformRegistry — not yet ratified per the Enterprise Platform
-#         Observability Standard's governance rules, so this SLO
-#         intentionally still reads the Tier 3 pair; see
-#         deploy/monitoring/app-alerts.yml's header). This is the
-#         dependency this service is most exposed to — every
+#         Reads the Tier 3 pair; the same calls are also recorded as
+#         platform_dependency_request_seconds{dependency="keycloak"}. This
+#         is the dependency this service is most exposed to — every
 #         provisioning/migration/IdP/MFA operation is a Keycloak call.
 #
 #  SLO-3  Reconciler convergence
 #         Target: durable pending state (realm_config_pending_gauge,
 #         trial_expiry_deferred_total) clears within 2 CronJob cycles
 #         (realmConfigReconcile runs every 10 min; trial-expiry daily).
+#
+# SLO-1 reads platform-gincommon's platform_http_requests_total, which is
+# still status "proposed" in the Platform Observability Registry (awaiting
+# governance ratification; its unprefixed predecessor was removed).
+# Its alerts carry `metric_status: proposed` until the registry marks it
+# approved. The SLI is kept per {domain, service, environment}.
 #
 # Recording rules pre-compute the SLI numerator/denominator so alert rules
 # can key off a scalar. Alerts follow the multi-window multi-burn-rate
@@ -43,15 +44,16 @@ groups:
       # Write-path error rate (5xx only — 4xx are intentional, e.g. 409
       # operation_in_progress on a replayed Idempotency-Key, 422
       # idp_warnings_unacknowledged).
+      # metric_status: proposed (platform_http_requests_total).
       - record: iam:realm_provisioner_write_error_rate:ratio_rate_5m
         expr: |
-          sum(rate(http_requests_total{
+          sum by (domain, service, environment) (rate(platform_http_requests_total{
             service="iam-realm-provisioner",
             method=~"POST|PUT|PATCH|DELETE",
-            status=~"5.."
+            status_class="5xx"
           }[5m]))
           /
-          clamp_min(sum(rate(http_requests_total{
+          clamp_min(sum by (domain, service, environment) (rate(platform_http_requests_total{
             service="iam-realm-provisioner",
             method=~"POST|PUT|PATCH|DELETE"
           }[5m])), 0.001)
@@ -75,12 +77,13 @@ groups:
 
       # Reconciler convergence — durable pending-state gauge/counter sum.
       # realm_config_pending_gauge is a live gauge (§9.2 local-intent-first);
-      # trial_expiry_deferred_total is a monotonic counter, so its 1h
-      # increase (not its raw value) is the meaningful "still stuck" signal.
+      # trial_expiry_deferred_total arrives through the Pushgateway as the
+      # last trial-expiry run's count, so its raw value is the "still stuck"
+      # signal. One __name__ selector sums both, so a missing pushed series
+      # never empties the result (A + B with different label sets did).
       - record: iam:realm_provisioner_reconciler_markers:sum
         expr: |
-          iam_realm_provisioner_realm_config_pending_gauge
-          + increase(iam_realm_provisioner_trial_expiry_deferred_total[1h])
+          sum by (domain, service, environment) ({__name__=~"iam_realm_provisioner_realm_config_pending_gauge|iam_realm_provisioner_trial_expiry_deferred_total", service="iam-realm-provisioner"})
 
   # ── SLO burn-rate alerts (multi-window) ───────────────────────────────────
   - name: iam-realm-provisioner.slo.burn
@@ -95,7 +98,9 @@ groups:
           severity: page
           slo: SLO-1
           service: iam-realm-provisioner
+          metric_status: proposed
         annotations:
+          runbook: "docs/observability/runbooks.md#iamslo1_realmprovisionerwriteerrorfastburn"
           summary: "SLO-1 fast-burn: iam-realm-provisioner write-path 5xx rate above target"
           description: |
             {{ $value | humanizePercentage }} of mutating requests
@@ -112,7 +117,9 @@ groups:
           severity: ticket
           slo: SLO-1
           service: iam-realm-provisioner
+          metric_status: proposed
         annotations:
+          runbook: "docs/observability/runbooks.md#iamslo1_realmprovisionerwriteerrorslowburn"
           summary: "SLO-1 slow-burn: iam-realm-provisioner write-path error rate elevated for 15m+"
 
       # SLO-2: Keycloak call failures — fast burn.
@@ -127,6 +134,7 @@ groups:
           slo: SLO-2
           service: iam-realm-provisioner
         annotations:
+          runbook: "docs/observability/runbooks.md#iamslo2_realmprovisionerkeycloakfastburn"
           summary: "SLO-2 fast-burn: Keycloak Admin API success ratio degraded"
           description: |
             Keycloak Admin API call success ratio is
@@ -146,6 +154,7 @@ groups:
           slo: SLO-2
           service: iam-realm-provisioner
         annotations:
+          runbook: "docs/observability/runbooks.md#iamslo2_realmprovisionerkeycloakslowburn"
           summary: "SLO-2 slow-burn: Keycloak Admin API success ratio below target for 15m+"
 
       # SLO-3: reconciler markers accumulating.
@@ -157,6 +166,7 @@ groups:
           slo: SLO-3
           service: iam-realm-provisioner
         annotations:
+          runbook: "docs/observability/runbooks.md#iamslo3_realmprovisionerreconcilermarkerselevated"
           summary: "SLO-3: iam-realm-provisioner durable markers accumulating (reconciler convergence)"
           description: |
             Combined durable-marker value = {{ $value }} for 20m+. Check

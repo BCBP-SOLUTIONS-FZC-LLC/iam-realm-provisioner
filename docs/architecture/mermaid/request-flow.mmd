@@ -18,7 +18,7 @@ sequenceDiagram
     SG ->>+ GW: POST /api/v1/internal/tenants/provision-trial<br/>Idempotency-Key: <key>, x-user-id, x-tenant-id, x-tenant-roles
     GW ->>+ CAP: forward (mTLS + NetworkPolicy is the primary boundary)
     CAP ->>+ OBS: MaxBytesReader(1<<20) wraps request body
-    Note over OBS: gincommon.TimeoutMiddleware(30s) then<br/>PanicRecovery → RequestID → Tracing →<br/>CorrelationHeaders → Metrics → Logging
+    Note over OBS: PanicRecovery → RequestID → Tracing →<br/>CorrelationHeaders → Metrics → Logging →<br/>TimeoutMiddleware(30s) innermost (Config.RequestTimeout)
 
     OBS ->>+ PROT: c.Next()
     Note over PROT: gincommon.ProtectedMiddlewares —<br/>RequireAuth (401 missing_identity_headers if absent)<br/>ContextMiddleware (build gincommon RequestContext)

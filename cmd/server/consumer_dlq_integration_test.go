@@ -19,22 +19,29 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/inbound/sqspipeline"
+	eventcfg "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/config"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
 )
 
-// TestConsumerOptions_DLQHandlerObservesLastDeliveryBeforeRedrive runs this
-// service's real consumer pipeline (consumerOptions + inboundHandler) against
-// a floci SQS queue whose RedrivePolicy matches production
-// (maxReceiveCount=5). A handler that always fails must see deliveries 1-4;
-// dlqHandler must take the 5th (platform_dlq_messages_total +1, message left
-// visible); SQS itself then redrives the message to -dlq.
+// TestInboundPipeline_DLQForwardingAgainstFloci runs this service's real
+// inbound pipeline (sqspipeline.NewConsumer + Handler, platform-events' SQS
+// DLQ publisher, cmd/server's consumedValidator) against floci queues whose
+// RedrivePolicy matches production (maxReceiveCount=5):
+//
+//  1. RequireDLQ resolves the DLQ from the queue's RedrivePolicy, and fails
+//     startup for a queue that has none.
+//  2. A schema-violating message goes straight to -dlq on its FIRST
+//     delivery (reason schema_violation) and never reaches the handler.
+//  3. A message whose handler keeps failing is forwarded to -dlq by the
+//     library itself on the 5th delivery (receive count > 4), before SQS's
+//     own redrive — the handler sees deliveries 1-4 only.
 //
 // Queues are driven over floci's SQS JSON protocol with plain HTTP because
-// arch-lint's events invariant forbids importing the raw SQS SDK outside
-// cmd/server/main.go (test files included); the consumer builds its own
-// client via events.NewSQSConsumer.
-func TestConsumerOptions_DLQHandlerObservesLastDeliveryBeforeRedrive(t *testing.T) {
+// arch-lint's events invariant forbids the raw SQS SDK outside
+// cmd/server/main.go in non-test code; the consumer and DLQ publisher build
+// their own clients from events.SQSConfig / events.DLQConfig.
+func TestInboundPipeline_DLQForwardingAgainstFloci(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping floci integration test in short mode")
 	}
@@ -60,55 +67,83 @@ func TestConsumerOptions_DLQHandlerObservesLastDeliveryBeforeRedrive(t *testing.
 
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-
-	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")[:8]
-	dlqURL := sqsCall(t, endpoint, "CreateQueue", map[string]any{"QueueName": "tenant-realm-q-dlq-" + suffix})["QueueUrl"].(string)
-	dlqArn := sqsCall(t, endpoint, "GetQueueAttributes", map[string]any{"QueueUrl": dlqURL, "AttributeNames": []string{"QueueArn"}})["Attributes"].(map[string]any)["QueueArn"].(string)
-	queueURL := sqsCall(t, endpoint, "CreateQueue", map[string]any{
-		"QueueName":  "tenant-realm-q-" + suffix,
-		"Attributes": map[string]string{"RedrivePolicy": `{"deadLetterTargetArn":"` + dlqArn + `","maxReceiveCount":"5"}`},
-	})["QueueUrl"].(string)
-
-	body, err := json.Marshal(map[string]any{
-		"id": uuid.NewString(), "type": "TrialStarted", "source": "iam-org-membership", "specversion": "1",
-		"tenant_id": uuid.NewString(), "time": time.Now().UTC(),
-		"data": map[string]any{"tenant_id": uuid.NewString(), "plan": "pro", "trial_ends_at": "2026-10-07T00:00:00Z"},
-	})
-	require.NoError(t, err)
-	sqsCall(t, endpoint, "SendMessage", map[string]any{"QueueUrl": queueURL, "MessageBody": string(body)})
-
 	ensureMetricsRegistered(t)
-	dlqBefore := counterValue(t, metrics.PlatformDLQMessagesTotal.WithLabelValues("tenant"))
-	var handlerCalls int32
-	failing := func(context.Context, events.Envelope[json.RawMessage]) error {
-		atomic.AddInt32(&handlerCalls, 1)
-		return fmt.Errorf("transient failure")
+
+	dlq, err := events.NewSQSDLQPublisher(events.DLQConfig{Region: "ap-south-1", EndpointURL: endpoint, ConsumerName: "iam-realm-provisioner", Logger: &fakeLogger{}})
+	require.NoError(t, err)
+
+	newQueuePair := func(name string) (queueURL, dlqURL string) {
+		suffix := strings.ReplaceAll(uuid.NewString(), "-", "")[:8]
+		dlqURL = sqsCall(t, endpoint, "CreateQueue", map[string]any{"QueueName": name + "-dlq-" + suffix})["QueueUrl"].(string)
+		dlqArn := sqsCall(t, endpoint, "GetQueueAttributes", map[string]any{"QueueUrl": dlqURL, "AttributeNames": []string{"QueueArn"}})["Attributes"].(map[string]any)["QueueArn"].(string)
+		queueURL = sqsCall(t, endpoint, "CreateQueue", map[string]any{
+			"QueueName":  name + "-" + suffix,
+			"Attributes": map[string]string{"RedrivePolicy": `{"deadLetterTargetArn":"` + dlqArn + `","maxReceiveCount":"5"}`},
+		})["QueueUrl"].(string)
+		return queueURL, dlqURL
 	}
-	validator, err := consumedValidator("tenant")
-	require.NoError(t, err)
-
-	cons, err := events.NewSQSConsumer(
-		events.SQSConfig{QueueURL: queueURL, Region: "ap-south-1", EndpointURL: endpoint, MaxMessages: 1, WaitSeconds: 1},
-		inboundHandler("tenant", failing, validator, &fakeLogger{}),
-		append(consumerOptions("tenant", 1), events.WithVisibilityTimeout(time.Second))...,
-	)
-	require.NoError(t, err)
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go func() { _ = cons.Start(runCtx) }()
-	defer func() { _ = cons.Stop() }()
-
-	require.Eventually(t, func() bool {
-		return counterValue(t, metrics.PlatformDLQMessagesTotal.WithLabelValues("tenant")) == dlqBefore+1
-	}, 60*time.Second, 200*time.Millisecond, "dlqHandler never observed the message")
-	assert.EqualValues(t, dlqObserveReceiveCount, atomic.LoadInt32(&handlerCalls),
-		"the handler sees deliveries 1-4; dlqHandler takes the 5th")
-
-	require.Eventually(t, func() bool {
+	newBareQueue := func(name string) string {
+		return sqsCall(t, endpoint, "CreateQueue", map[string]any{"QueueName": name + "-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:8]})["QueueUrl"].(string)
+	}
+	dlqDepth := func(dlqURL string) string {
 		attrs := sqsCall(t, endpoint, "GetQueueAttributes", map[string]any{"QueueUrl": dlqURL, "AttributeNames": []string{"ApproximateNumberOfMessages"}})["Attributes"].(map[string]any)
-		return attrs["ApproximateNumberOfMessages"] == "1"
-	}, 60*time.Second, 500*time.Millisecond, "SQS never redrove the message to -dlq")
-	assert.EqualValues(t, dlqObserveReceiveCount, atomic.LoadInt32(&handlerCalls), "no handler call after the observer")
+		return attrs["ApproximateNumberOfMessages"].(string)
+	}
+	send := func(queueURL, eventType string, data map[string]any) {
+		body, err := json.Marshal(map[string]any{
+			"id": uuid.NewString(), "type": eventType, "source": "iam-org-membership", "specversion": "1",
+			"tenant_id": uuid.NewString(), "time": time.Now().UTC(), "data": data,
+		})
+		require.NoError(t, err)
+		sqsCall(t, endpoint, "SendMessage", map[string]any{"QueueUrl": queueURL, "MessageBody": string(body)})
+	}
+	run := func(queueURL, consumer string, h events.Handler) {
+		validator, err := consumedValidator(consumer)
+		require.NoError(t, err)
+		env := sqspipeline.EnvForQueue(eventcfg.SQSConfigEnv{
+			Region: "ap-south-1", EndpointURL: endpoint, MaxMessages: 1, WaitSeconds: 1, VisibilityTimeout: time.Second,
+		}, queueURL, 1)
+		cons, err := sqspipeline.NewConsumer(env, nil, sqspipeline.Handler(consumer, consumer+"-realm-q", h, validator, dlq, &fakeLogger{}), dlq, &fakeLogger{})
+		require.NoError(t, err)
+		runCtx, cancel := context.WithCancel(ctx)
+		t.Cleanup(cancel)
+		go func() { _ = cons.Start(runCtx) }()
+		t.Cleanup(func() { _ = cons.Stop() })
+	}
+
+	t.Run("RequireDLQ", func(t *testing.T) {
+		queueURL, _ := newQueuePair("tenant-realm-q")
+		require.NoError(t, sqspipeline.RequireDLQ(ctx, dlq, queueURL, &fakeLogger{}))
+
+		bare := newBareQueue("no-redrive")
+		assert.ErrorIs(t, sqspipeline.RequireDLQ(ctx, dlq, bare, &fakeLogger{}), events.ErrDLQNotConfigured)
+	})
+
+	t.Run("SchemaViolationStraightToDLQ", func(t *testing.T) {
+		queueURL, dlqURL := newQueuePair("billing-realm-q")
+		var calls int32
+		send(queueURL, "TenantReactivated", map[string]any{"source": "billing"}) // tenant_id missing
+		run(queueURL, "billing", func(context.Context, events.Envelope[json.RawMessage]) error {
+			atomic.AddInt32(&calls, 1)
+			return nil
+		})
+		require.Eventually(t, func() bool { return dlqDepth(dlqURL) == "1" }, 30*time.Second, 200*time.Millisecond,
+			"a schema violation must reach -dlq on its first delivery")
+		assert.Zero(t, atomic.LoadInt32(&calls))
+	})
+
+	t.Run("PersistentFailureForwardedBeforeRedrive", func(t *testing.T) {
+		queueURL, dlqURL := newQueuePair("tenant-realm-q")
+		var calls int32
+		send(queueURL, "TrialStarted", map[string]any{"tenant_id": uuid.NewString(), "plan": "pro", "trial_ends_at": "2026-10-07T00:00:00Z"})
+		run(queueURL, "tenant", func(context.Context, events.Envelope[json.RawMessage]) error {
+			atomic.AddInt32(&calls, 1)
+			return fmt.Errorf("transient failure")
+		})
+		require.Eventually(t, func() bool { return dlqDepth(dlqURL) == "1" }, 60*time.Second, 300*time.Millisecond,
+			"the library never forwarded the message")
+		assert.EqualValues(t, 4, atomic.LoadInt32(&calls), "the handler sees deliveries 1-4; the 5th is forwarded")
+	})
 }
 
 // sqsCall invokes one floci SQS JSON-protocol action and returns the decoded

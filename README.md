@@ -1,10 +1,10 @@
 # iam-realm-provisioner
 
-The Realm Provisioner Service — the **single writer to the Keycloak Admin API** (RP-INV-1) and the system of record for tenant identity lifecycle in the IAM subsystem. It provisions and tears down Keycloak realms and users, migrates trial tenants into dedicated realms, configures per-tenant SAML/OIDC identity providers (secrets held only in OpenBao, never Postgres), and drives the tenant lifecycle state machine (trial → active → suspended → offboarded) via six scheduled reconciler jobs.
+The Realm Provisioner Service — the **single writer to the Keycloak Admin API** (RP-INV-1) and the system of record for tenant identity lifecycle in the IAM subsystem. It provisions and tears down Keycloak realms and users, migrates trial tenants into dedicated realms, configures per-tenant SAML/OIDC identity providers (secrets held only in OpenBao, never Postgres), and drives the tenant lifecycle state machine (trial → active → suspended → offboarded) via seven scheduled reconciler jobs.
 
 **Repository:** `github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`
-**Module:** Go 1.26.6 · private module · deployed as two binaries from one image (`cmd/server`, `cmd/reconciler`)
-**Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.14 Approved** — names frozen at v1.0 sign-off (`docs/lld/iam-lld-realm-provisioner-service.md`)
+**Module:** Go 1.26.6 · private module · deployed as three binaries from one image (`cmd/server`, `cmd/reconciler`, `cmd/migrate`)
+**Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.21 Approved** — names frozen at v1.0 sign-off (`docs/lld/iam-lld-realm-provisioner-service.md`)
 
 ---
 
@@ -44,9 +44,9 @@ This is enforced structurally, not just by convention: `internal/adapter/outboun
 
 All 17 endpoints (RP-1..RP-17) live under one mesh-internal prefix, `/api/v1/internal/*` — this service has almost no public surface. `/healthz`/`/readyz` and the `/asyncapi`/`/asyncapi.yaml` docs surface sit outside that group, unauthenticated. `/metrics` is served on its **own** port (`METRICS_PORT=9090`), never on the main router. Source of truth: `internal/adapter/inbound/http/router.go`.
 
-**Middleware chain** (`registerInternalRoutes`): 1 MB body-size cap → `gincommon.TimeoutMiddleware(30s)` → `gincommon.ObservabilityMiddlewares` → `gincommon.ProtectedMiddlewares` (`RequireAuth` + `ContextMiddleware`) → `GUCBridgeMiddleware` (binds `app.tenant_id` transaction-locally, RLS-6) → `RequireJSONContentType` → `RequireSystemRole` (defense-in-depth — mesh mTLS + NetworkPolicy is primary) → per-route `RequireIdempotencyKey` / `RequireOperatorRole`.
+**Middleware chain** (`registerInternalRoutes`): 1 MB body-size cap → `gincommon.ObservabilityMiddlewares` (with `TimeoutMiddleware(30s)` innermost, via `Config.RequestTimeout`) → `gincommon.ProtectedMiddlewares` (`RequireAuth` + `ContextMiddleware`) → `GUCBridgeMiddleware` (binds `app.tenant_id` transaction-locally, RLS-6) → `RequireJSONContentType` → `RequireSystemRole` (defense-in-depth — mesh mTLS + NetworkPolicy is primary) → per-route `RequireIdempotencyKey` / `RequireOperatorRole`.
 
-Every mutating endpoint below marked "required" enforces `RequireIdempotencyKey`: a missing header is `400 missing_idempotency_key`; a reused key against an in-flight/failed operation is `409 operation_in_progress`; a reused key against a `succeeded` operation replays the stored JSON result rather than re-executing.
+Every mutating endpoint below marked "required" enforces `RequireIdempotencyKey`: a missing header is `400 missing_idempotency_key`; a reused key against an in-flight operation is `409 operation_in_progress`; a reused key against a `failed` operation, or an `in_progress` one older than `IDEMPOTENCY_IN_PROGRESS_LEASE` (15m — its pod died), is reclaimed and re-executed (every step is a Keycloak-effect-first reconcile, so it converges); a reused key against a `succeeded` operation replays the stored JSON result rather than re-executing.
 
 ### Internal routes (system-authenticated, 15)
 
@@ -126,21 +126,24 @@ Clean Architecture — dependencies point inward; outer layers never import inne
 ```
 iam-realm-provisioner/
 ├── cmd/
-│   ├── server/                        # HTTP composition root: pool+GUC wiring, migrations, outbox runner, 3 SQS consumers
-│   └── reconciler/                    # Single binary, --job=<name>; jobs/ holds the 6 CronJob entry points
+│   ├── server/                        # HTTP composition root: pool+GUC wiring, migrations (unless RUN_MIGRATIONS=false), outbox runner, 3 SQS consumers, AL-5 audit drainer
+│   ├── reconciler/                    # Single binary, --job=<name>; jobs/ holds the 7 CronJob entry points; metrics pushed to the Pushgateway
+│   └── migrate/                       # Helm pre-install/pre-upgrade migrate Job (postgres.MigrateSchema)
 ├── internal/
 │   ├── core/
 │   │   ├── domain/                    # Entities, value objects, ErrorCode taxonomy (§17), event payload structs — no deps beyond google/uuid
-│   │   ├── port/                      # KeycloakAdmin (RP-INV-1's sole seam, incl. §2.5 service-account methods), repositories, IdempotencyStore, ProcessedEventsStore, OpenBaoClient, OrgMembershipClient, ObjectStore, SubscriptionLapseReader, TokenServiceClient
-│   │   └── service/                   # ProvisioningService, LifecycleService, IdpService, RealmConfigService, MfaService
+│   │   ├── port/                      # KeycloakAdmin (RP-INV-1's sole seam, incl. §2.5 service-account methods), repositories, IdempotencyStore, Inbox/InboxPruner (platform-events inbox), OpenBaoClient, OrgMembershipClient, ObjectStore, SubscriptionLapseReader, TokenServiceClient
+│   │   └── service/                   # ProvisioningService, LifecycleService, IdpService, RealmConfigService, MfaService, AuditDeliveryService
 │   ├── eventschema/                   # Embedded JSON Schema draft-07: 9 produced + 6 consumed, + asyncapi_drift_test.go
 │   └── adapter/
 │       ├── inbound/
 │       │   ├── http/                  # Gin handlers (RP-1..RP-17), DTOs, middleware, router.go, /asyncapi
-│       │   └── consumer/              # 3 SQS consumers: membership-realm-q, tenant-realm-q, billing-realm-q
+│       │   ├── consumer/              # 3 SQS consumers: membership-realm-q, tenant-realm-q, billing-realm-q
+│       │   └── sqspipeline/           # Builds the consumers from platform-events: per-queue config, DLQ forwarding, RequireDLQ, consumed-schema validation
 │       └── outbound/
 │           ├── keycloak/              # gocloak-backed KeycloakAdmin — RP-INV-1's ONLY implementation
-│           ├── postgres/              # Repository impls + single consolidated 000000_initial_schema migration
+│           ├── postgres/              # Repository impls (incl. inbox, retention, pending audit entries) + single consolidated 000000_initial_schema migration
+│           ├── auditlog/              # HTTP client for Audit Log's AL-5 direct-write ingest (TenantIdpConfigChanged)
 │           ├── eventbus/              # Outbox publisher (single topic iam-tenant-events) + Glue (version by definition)/GlueDecode/Noop/Validating codecs
 │           ├── openbao/               # KV v2 client, Kubernetes-auth (pod ServiceAccount → OpenBao role → policy)
 │           ├── orgmembership/         # HTTP client for O&M's I-8 residual-MFA check + I-16 subscription-lapse poll (RP-C3)
@@ -153,7 +156,9 @@ iam-realm-provisioner/
 │   ├── asyncapi.yaml                  # AsyncAPI 3.0 — iam-tenant-events (9 published) + 3 inbound SQS channels
 │   └── embed.go                       # //go:embed asyncapi.yaml — served from the compiled binary, no source tree in the image
 ├── deploy/                            # Helm chart, AWS IAM policy, OpenBao policy, Prometheus alerts, Keycloak realm template
-├── docs/lld/                          # Frozen LLD v1.8
+├── docs/lld/                          # LLD v1.21 (names frozen at v1.0)
+├── docs/observability/                # Observability Standard implementation, generated metric registry, metric migration history, per-alert runbooks
+├── docs/runbook.md                    # Operator procedures for the headline incident scenarios (§24)
 ├── docs/runbook-schema-registry.md    # Schema-governance operator runbook (shared iam-tenant-events registry)
 ├── .githooks/pre-commit               # tidy + fmt-check + vet + lint; installed via `make setup`/`make install-hooks`
 ├── VERSIONING.md                      # SemVer policy + maintainer release process
@@ -183,7 +188,7 @@ RLS-6 (no non-`SET LOCAL` write to `app.tenant_id`) is checked separately, inlin
 |---|---|---|
 | **Primary store** | PostgreSQL, database `provisioner` on shared RDS (Multi-AZ, PgBouncer transaction pooling in prod) | `FORCE ROW LEVEL SECURITY` on the 6 tenant-scoped tables; GUC `app.tenant_id` bound transaction-locally |
 | **Events** | AWS SNS + transactional outbox (`platform-events`) | One topic, `iam-tenant-events` — **not** a `RoutingPublisher`; this service is a co-producer with Org & Membership, disjoint event names |
-| **Inbound queues** | AWS SQS, 3 queues | `membership-realm-q`, `tenant-realm-q`, `billing-realm-q`, each with its own `-dlq` (`maxReceiveCount=5`), dedup via `processed_events`. Every message: Glue header stripped (`GlueDecodeCodec`) → counted → payload validated against the consumer's own consumed-message schema → handler; `dlqHandler` observes the 5th delivery before SQS redrives to `-dlq` |
+| **Inbound queues** | AWS SQS, 3 queues | `membership-realm-q`, `tenant-realm-q`, `billing-realm-q`, each with its own `-dlq` (`maxReceiveCount=5`), dedup via platform-events' `pkg/inbox` over `processed_events`. Built by `internal/adapter/inbound/sqspipeline` from the library's env contract (`eventcfg.LoadSQS`); `RequireDLQ` fails startup for a queue with no RedrivePolicy. Every message: Glue header stripped (library `GlueDecodeCodec`) → counted → payload validated against the consumer's own consumed-message schema (a violation goes straight to `-dlq` on its first delivery) → handler; a persistently failing message is forwarded to `-dlq` by platform-events on its 5th delivery |
 | **Secrets** | OpenBao KV v2 | Per-tenant IdP secrets at `secret/data/iam/realm-provisioner/idp/<tenant_id>/<idp_alias>`; Kubernetes auth (pod ServiceAccount token → role → policy) |
 | **Realm exports** | AWS S3 (KMS-encrypted) | Offboarding — export-before-delete invariant (RP-EVT-4) |
 | **Admin-token cache** | In-process, single-flight | LLD §6.2 specifies a shared Valkey tier (`rp:kcadmin:token`); not implemented in this repo — correctness unaffected, only the token-endpoint call rate rises per replica (RP-D4) |
@@ -192,9 +197,9 @@ RLS-6 (no non-`SET LOCAL` write to `app.tenant_id`) is checked separately, inlin
 
 | Library | Version | Purpose |
 |---|---|---|
-| `platform-gincommon` | v1.3.0 | HTTP middleware, Zap logging, OTel tracing, Prometheus metrics |
-| `platform-events` | v1.4.0 | Transactional outbox, SNS publisher, SQS consumer |
-| `platform-pgcommon` | v1.3.0 | pgx/v5 pool, RLS GUC injection, migrations, error helpers (`IsConnectionException`/`IsInsufficientResources`/`IsPgError`) |
+| `platform-gincommon` | v1.6.0 | HTTP middleware (incl. `RequestTimeout`), Zap logging, OTel tracing (`InitTracingWithConfig`, `NewSpanTracer`), Prometheus metrics (`MetricsHandler`, Observability Standard identity) |
+| `platform-events/v2` | v2.0.0 | Transactional outbox (`eventcfg.LoadOutbox`), SNS publisher, SQS consumers (`eventcfg.LoadSQS`, DLQ forwarding), `pkg/inbox` dedup |
+| `platform-pgcommon/v2` | v2.0.0 | pgx/v5 pool, RLS GUC injection, per-tx statement timeout, migrations, error classifiers (`IsConnectionException`/`IsInsufficientResources`/`IsOperatorIntervention`/`IsSystemError`/`IsPoolClosed`) |
 | `Nerzal/gocloak/v13` | v13.9.0 | Keycloak Admin API client — used **only** inside `internal/adapter/outbound/keycloak/` (RP-INV-1) |
 
 ---
@@ -318,6 +323,8 @@ _ = json.NewDecoder(resp.Body).Decode(&errResp)
 | `service_account_rotation_in_flight` | 409 | Additive — Token Service TS-1 rejected a concurrent issue/rotate for the same `platform-automation` principal (§2.5) |
 | `service_account_not_provisioned` | 422 | Additive — RP-17 called before the tenant's `platform-automation` principal was ever minted |
 | `keycloak_unavailable` / `conversion_failed` | 502 | Keycloak transport failure or partial-migration failure — retryable, no local commit |
+| `tenant_mismatch` | 403 | The request's tenant (`/tenants/:id` or the provision body's `tenant_id`) is not the caller's `x-tenant-id` — rejected before any Keycloak call |
+| `request_timeout` | 503 | Postgres statement or lock timeout — retry with the same `Idempotency-Key` |
 | `org_membership_unavailable` / `object_store_unavailable` / `db_unavailable` / `token_service_unavailable` | 503 | O&M I-8 check, S3 export, Postgres, or Token Service (§2.5) unreachable |
 
 ### 9. Optimistic locking
@@ -332,7 +339,7 @@ The only rate limiter in this codebase is **outbound**, client-side, against Key
 
 ### 11. Background reconcilers you may observe
 
-Six CronJobs, one Helm manifest (`deploy/helm/templates/cronjobs.yaml`), each `cmd/reconciler --job=<name>` against the same image:
+Seven CronJobs, one Helm manifest (`deploy/helm/templates/cronjobs.yaml`), each `cmd/reconciler --job=<name>` against the same image:
 
 | CronJob (`--job=`) | Schedule | Purpose |
 |---|---|---|
@@ -342,6 +349,7 @@ Six CronJobs, one Helm manifest (`deploy/helm/templates/cronjobs.yaml`), each `c
 | `realm-config-reconcile` | `*/10 * * * *` | RP-C4: retries every `realm_config_reconciliations` row in `status='pending'`; a row past `RECONCILER_MAX_ATTEMPTS` (default 20) moves to a terminal `failed` status instead of retrying forever (poison-pill cap). |
 | `outbox-prune` | `0 4 * * *` | Prunes published `outbox_events` past `OUTBOX_RETENTION_DAYS`. |
 | `processed-events-prune` | `30 4 * * *` | Prunes `processed_events` rows past `PROCESSED_EVENTS_TTL_DAYS`. |
+| `ledger-prune` | `0 5 * * *` | Prunes `provisioning_operations` past `PROVISIONING_OPERATIONS_TTL_DAYS` (30) and `rls_violation_log` past `RLS_VIOLATION_LOG_TTL_DAYS` (90), in batched deletes. |
 
 Every job is idempotent per tenant (safe to re-run) and batched (`RECONCILER_BATCH_LIMIT`, default 100).
 
@@ -378,12 +386,14 @@ make run         # start the server on :8080 (metrics on :9090)
 | `make arch-lint` | `go-arch-lint` dependency-rule enforcement + RP-INV-1/RLS-6 greps + observability/database/events architectural-invariant greps (gincommon/pgcommon/platform-events-only) |
 | `make metrics-registry-lint` | Enterprise Platform Observability Standard: no unratified `platform_*` metric sources a live alert/recording-rule/SLO |
 | `make metric-naming-lint` | Enterprise Platform Observability Standard: naming/suffix/label/registry-compliance rules against every registered metric |
+| `make metrics-lint` | platform-gincommon `metricslint`: a real `/metrics` scrape, metric references in alerts/dashboards/runbooks, and `docs/observability/metric-registry.md` drift |
+| `make metrics-inventory` | Regenerate `docs/observability/metric-registry.md` (commit the result) |
 | `make mod-verify` | `go mod verify` |
-| `make vuln-check` | `govulncheck ./internal/... ./pkg/...` |
+| `make vuln-check` | `govulncheck ./...` |
 | `make test` | Unit + postgres + integration in parallel (Docker required) |
 | `make test-ci` | Same, with `-race` + merged coverage (used in CI) |
 | `make test-unit` | Unit tests only, no Docker |
-| `make test-postgres` | Postgres + RLS integration (testcontainers-go) |
+| `make test-postgres` | Postgres + RLS integration (testcontainers-go), plus the `cmd/server`, `cmd/reconciler` and `cmd/migrate` composition roots against real Postgres |
 | `make test-integration` | Cross-layer (SNS/SQS/Keycloak/OpenBao via testcontainers) |
 | `make test-e2e` | End-to-end tests |
 | `make test-load` | RP-3 migration load test (fake Keycloak, no Docker); `LOAD_TEST_FULL=1` for N=500 |
@@ -393,11 +403,11 @@ make run         # start the server on :8080 (metrics on :9090)
 | `make mock` | Start both Python mock servers from the sibling `../mock-servers` repo — Keycloak Admin mock (`:8091`) + Org & Membership mock (`:8082`); `OM_MODE=<mode>` forwards to the O&M mock |
 | `make mock-keycloak` / `make mock-org` | Start just one of the two mocks above |
 | `make help` | Print the same command list this table documents, from the Makefile itself |
-| `make build` | Compile both binaries to `bin/` |
+| `make build` | Compile the server, reconciler and migrate binaries to `bin/` |
 | `make cover` / `make cover-func` | Coverage HTML report / per-function summary |
-| `make ci` | `tidy` + `fmt-check` + `vet` + `lint` + `arch-lint` + `metrics-registry-lint` + `metric-naming-lint` + `test-ci` + `build` |
+| `make ci` | `tidy` + `fmt-check` + `vet` + `lint` + `arch-lint` + `metrics-registry-lint` + `metric-naming-lint` + `metrics-lint` + `test-ci` + `build` |
 | `make docker-up` / `make docker-down` | Start/stop Postgres + Floci + Floci UI + Keycloak + OpenBao |
-| `make migrate-up` / `make migrate-down` / `make migrate-create NAME=<x>` | Migration helpers (standalone `golang-migrate` CLI; the server self-migrates at startup) |
+| `make migrate-up` / `make migrate-down` / `make migrate-create NAME=<x>` | Domain-migration helpers against `MIGRATION_DATABASE_URL` (standalone `golang-migrate` CLI). They do not apply the outbox schema the domain migration depends on; for a fresh database run `go run ./cmd/migrate` (what the Helm hook Job runs), or let the server self-migrate at startup (`RUN_MIGRATIONS`, default true) |
 | `make clean` | Remove `bin/` and coverage artefacts |
 | `make schema-pull` | Pull the `platform-schemagov` Docker image (`0.4`) |
 | `make extract-schemas` | Derive `internal/eventschema/*.json` from `api/asyncapi.yaml` |
@@ -596,7 +606,7 @@ docker compose exec postgres psql -U postgres -d provisioner -c \
 
 ### Coverage
 
-`.github/scripts/coverage-gate.sh` reads `go tool cover -func=coverage.out`'s total and fails if it's below `${COVERAGE_THRESHOLD:-95}` — its own default and stated ratchet target is **95%**. `validate-test.yml` pins `COVERAGE_THRESHOLD: '95'` to match. Measured coverage (rev 1.17 of the LLD): core service `internal/core/service/...`, HTTP handlers `internal/adapter/inbound/http/...`, and `internal/adapter/outbound/tokenservice/...` all at **100%**, the Keycloak adapter at **~99.6%**, `internal/adapter/outbound/postgres/...` at **~98.5%**, merged total coverage **97.8%** (up from 92.2% before rev 1.17). A rev-1.16 pass judged the remaining gap — composition-root bodies (`main()` in both binaries, `cmd/reconciler/main.go`'s `run()`, `cmd/server/exporters.go`'s `runBusinessExporters`) that build real DB pools/HTTP servers/background goroutines against live infra inline — unreachable without a live Postgres/Keycloak/AWS connection and set a ~92.6% practical ceiling; rev 1.17's new `cmd/server/main_integration_test.go`/`cmd/reconciler/main_integration_test.go`/`cmd/server/exporters_integration_test.go` (`//go:build integration`, real Postgres testcontainers) proved otherwise, exploiting `signal.Notify`'s pre-empt-default-terminate behavior to safely signal-test `main()` in process. The residual ~2% is a `rows.Err()` mid-iteration-error path repeated across a few `postgres` `List*`/`groupedCounts`-backed methods, a couple of defensive branches verified dead against the vendored `gocloak`/`resty` source, and the thin slice of `main()`/`run()` genuinely reachable only via a live Keycloak/Token Service/AWS connection (`test/e2e`, out of scope for this measurement).
+`.github/scripts/coverage-gate.sh` reads `go tool cover -func=coverage.out`'s total and fails if it's below `${COVERAGE_THRESHOLD:-95}` — its own default and stated ratchet target is **95%**. `validate-test.yml` pins `COVERAGE_THRESHOLD: '95'` to match. Measured coverage (LLD rev 1.21, every suite passing): merged total **97.2%**. `internal/core/service`, `internal/core/domain`, the HTTP handlers, the consumers, and the `auditlog`/`httpx`/`metrics`/`openbao`/`orgmembership`/`s3`/`tokenservice` adapters are at **100%**. The Keycloak adapter and `cmd/reconciler/jobs` are at **99.6%**, `eventbus` **99.2%**, `sqspipeline` **98.7%**, and `postgres` **94.7%**. The composition roots are lowest: `cmd/migrate` **87.5%**, `cmd/server` **83.1%**, `cmd/reconciler` **82.4%**. It was 97.8% at rev 1.17, before the rev 1.20–1.21 library, audit-delivery and production-readiness code landed. What remains uncovered is deliberate: `main()`'s startup `panic()` branches for each failed dependency, a `rows.Scan`/`rows.Err()` path repeated across the `postgres` list queries that a live transaction never reaches, and a few defensive branches verified dead against the vendored `gocloak`/`resty` source. Since rev 1.17, `cmd/server/main_integration_test.go`, `cmd/reconciler/main_integration_test.go`, `cmd/server/exporters_integration_test.go` and (rev 1.21) `cmd/migrate/main_integration_test.go` run the composition roots in process against real Postgres testcontainers (`//go:build integration`, run by `make test-postgres`). They rely on `signal.Notify` pre-empting the default terminate action, so `main()` can be signal-tested safely in process.
 
 **A package instrumented for coverage is not necessarily exercised** — a lesson from rev 1.15. The Makefile has two independent package lists: `TEST_INTERNAL_PKGS` (what `make test-ci` actually runs) and `COVER_PKG_LIST` (derived via `go list ./cmd/... ./internal/... ./pkg/...`, what `-coverpkg` instruments). Adding a new `internal/adapter/outbound/<name>` package updates the latter automatically but not the former — its own `_test.go` file keeps passing when run directly, but silently stops contributing to `make test-ci`'s merged number, showing 0% instead. This is exactly what happened to `internal/adapter/outbound/tokenservice/` for a time; check `TEST_INTERNAL_PKGS` whenever a new adapter package is added.
 
@@ -642,7 +652,9 @@ Coverage is measured over `./cmd/...`, `./internal/...`, `./pkg/...` (`COVER_PKG
 | `TRIAL_GRACE_DAYS` / `CANCELLED_GRACE_DAYS` / `RETENTION_DAYS` | `30` / `30` / `90` | same | Lifecycle timers |
 | `RECONCILER_BATCH_LIMIT` / `RECONCILER_TIMEOUT` / `RECONCILER_MAX_ATTEMPTS` | `100` / `5m` / `20` | same | Reconciler-job tunables — `RECONCILER_MAX_ATTEMPTS` is RP-C4's poison-pill cap |
 | `DOCS_ENABLED` / `DOCS_AUTH_TOKEN` | `true` / — | `true` / — | AsyncAPI viewer gating — always mounted outside production; opt-in via `DOCS_ENABLED` in prod, optionally bearer-gated |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | (unset) | OTLP/gRPC collector — provider is always installed; export is a no-op until this is set |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `none` | (unset → `localhost:4317`) | OTLP/gRPC collector for platform-gincommon's `InitTracingWithConfig`. The provider is always installed; **unset is not off** — it falls back to `localhost:4317` and logs failed exports, so local runs without a collector use `none` |
+| `OTEL_EXPORTER_OTLP_INSECURE` / `OTEL_TRACES_SAMPLER_RATIO` / `OTEL_PROPAGATOR_BAGGAGE` / `OTEL_TRACES_IGNORE_REMOTE_PARENT_SAMPLED` | `true` / `1.0` / `false` / `false` | dev: `true`, else `false` / `0.1` / `false` / `false` | Collector TLS, head sampling ratio, W3C baggage, re-sample a sampled remote parent. `OTEL_SERVICE_NAME` is not read (the service name is `APP_NAME`) |
+| `SQS_MAX_RECEIVE_COUNT` / `SQS_VISIBILITY_TIMEOUT` / `SQS_HANDLER_TIMEOUT` / `SQS_DRAIN_TIMEOUT` / `SQS_QUEUE_DEPTH_INTERVAL` | `4` / `30s` / `20s` / `15s` / `60s` | same | Shared tuning for the 3 consumers (platform-events `eventcfg.LoadSQS`); max-receive must stay below the queues' RedrivePolicy `maxReceiveCount=5` |
 
 **Fail-fast:** `cmd/server/main.go`'s `validateRequiredEnv` panics at startup, listing **every** missing/misconfigured required var at once, if `KEYCLOAK_BASE_URL`, `KEYCLOAK_ADMIN_CLIENT_SECRET`, `ORG_MEMBERSHIP_BASE_URL`, `TOKEN_SERVICE_BASE_URL`, `SNS_TOPIC_TENANT_ARN`, or `GLUE_REGISTRY_TENANT_NAME` is empty outside `APP_ENV ∈ {dev, development, local, test}` — plus a Postgres DSN check (`DATABASE_URL` or `PG_HOST`+`PG_USER`+`PG_PASSWORD`) and a `MIGRATION_DATABASE_URL` check when `PG_BOUNCER_MODE=true`.
 
@@ -666,6 +678,8 @@ Coverage is measured over `./cmd/...`, `./internal/...`, `./pkg/...` (`COVER_PKG
 
 ## Observability
 
+**Observability Standard docs** ([`docs/observability/`](docs/observability/README.md)): how this service implements the Enterprise Platform Observability Standard (identity, tiers, who counts what, CI checks), the generated metric inventory ([`metric-registry.md`](docs/observability/metric-registry.md), `make metrics-inventory`), renamed/removed names ([`migration.md`](docs/observability/migration.md)), and a runbook entry per alert ([`runbooks.md`](docs/observability/runbooks.md) — every alert's `runbook` annotation points there).
+
 **SLOs.** This service has no user-facing request hot path — SLOs target operation success and freshness, not p99 latency. Availability target **99.9%** for the `/internal` provisioning API.
 
 | Operation | Target |
@@ -680,37 +694,42 @@ Coverage is measured over `./cmd/...`, `./internal/...`, `./pkg/...` (`COVER_PKG
 
 ### Metrics
 
-Follows the Enterprise Platform Observability Standard's three-tier hierarchy (`internal/adapter/outbound/metrics/metrics.go`'s package doc has the full per-metric rationale; `internal/adapter/outbound/metrics/registry.go`'s `PlatformRegistry` carries the full ratification packets — semantic definition, labels and their allowed values, cardinality, aggregation expectations):
+Follows the Enterprise Platform Observability Standard's three-tier hierarchy (`internal/adapter/outbound/metrics/metrics.go`'s package doc has the full per-metric rationale). The central Platform Observability Registry (platform-gincommon's `pkg/obsregistry`) is the source of truth for every shared name and label. Every series carries `{domain="iam", service="iam-realm-provisioner", environment=<APP_ENV>}` — set by `gincommon.Config.Domain`/`Environment` (else `OBSERVABILITY_DOMAIN`/`APP_ENV`); `APP_ENV` must be `local|dev|test|staging|prod`.
 
-- **Tier 1 `platform_*`, all `Status: Proposed`** (shared across every domain, `{domain="iam", service="realm-provisioner", environment}` labels; submitted to the Platform Observability Registry, **not yet ratified** — shadow-emitted only, per the standard's governance rules 11/12 not wired into any alert/dashboard/SLO/HPA): `platform_dependency_request_seconds{dependency,operation,outcome}`, `platform_duplicate_messages_total{consumer}`, `platform_rls_violations_total{violation_type}`, `platform_messages_received_total{consumer}`, `platform_messages_processed_total{consumer}`, `platform_messages_failed_total{consumer}`, `platform_dlq_messages_total{consumer}`.
-- **Tier 3 `iam_realm_provisioner_`-prefixed** (§25 frozen names — this repo's sole authoritative alerting/SLO source; RP-INV-1 — sole Keycloak Admin API caller — means no Tier 2 domain-shared metric currently applies): `provision_total{kind,result}`, `users_migrated_total`, `realm_active_gauge{strategy}`, `keycloak_call_duration_seconds{op}`, `keycloak_call_failures_total{op}`, `admin_token_refresh_total{trigger}` (`proactive`\|`401`), `idp_validation_total{outcome}`, `mfa_role_sync_total{action}`, `realm_config_pending_gauge`, `trial_expiry_processed_total`, `trial_expiry_deferred_total`, `lapse_processed_total{transition}`, `realm_export_total{result}`, `user_delete_total{result}`, `session_revoke_total{result}`, `mfa_reset_total{result}`, `template_drift{realm_version}`, `rls_violations_total{violation_type}`, `unknown_event_acknowledged_total{topic,event_type}` (`topic` = source topic), `consumed_schema_violations_total{consumer,event_type}` (consumed payload failed its schema — critical alert), `processed_events_duplicates_total{consumer}`.
+- **Tier 1 `platform_*`** — emitted by the platform libraries: `platform_http_*` and `platform_build_info{version}` (platform-gincommon), `platform_messages_*{queue,event_type,…}`, `platform_dlq_messages_total`, `platform_outbox_*` and `platform_dependency_request_seconds{dependency="sns"|"sqs"|"codec"}` (platform-events), `platform_db_*` (platform-pgcommon). This service itself records `platform_dependency_request_seconds{dependency="keycloak",operation,outcome="success"|"error"}` on the same collector. Several are still registry status `proposed`; alerts on them carry `metric_status: proposed`.
+- **Tier 3 `iam_realm_provisioner_`-prefixed** (§25 frozen names — this repo's sole authoritative alerting/SLO source; RP-INV-1 — sole Keycloak Admin API caller — means no Tier 2 domain-shared metric currently applies): `provision_total{kind,result}`, `users_migrated_total`, `realm_active_gauge{strategy}`, `keycloak_call_duration_seconds{op}`, `keycloak_call_failures_total{op}`, `admin_token_refresh_total{trigger}` (`proactive`\|`401`), `idp_validation_total{result}`, `mfa_role_sync_total{action}`, `realm_config_pending_gauge`, `trial_expiry_processed_total`, `trial_expiry_deferred_total`, `lapse_processed_total{transition}`, `realm_export_total{result}`, `user_delete_total{result}`, `session_revoke_total{result}`, `mfa_reset_total{result}`, `template_drift{realm_version}`, `rls_violations_total{violation_type}`, `unknown_event_acknowledged_total{topic,event_type}` (`topic` = source topic), `consumed_schema_violations_total{consumer,event_type}` (consumed payload failed its schema — critical alert), `processed_events_duplicates_total{consumer}`.
 
-The three Tier 1 candidates keep emitting in parallel with their Tier 3 counterpart indefinitely, pending governance ratification (no removal date on the Tier 3 side — it stays authoritative until/unless a candidate is ratified). CI-enforced Go tests (`TestNamingConvention_ConformsToPlatformObservabilityStandard`, `TestPlatformRegistry_EntriesAreWellFormed`) check naming/registry/label-vocabulary compliance on every build; `.github/scripts/metrics-registry-lint.sh` fails the build if a `Proposed` metric is used as a live alert/recording-rule/SLO source. Plus passthrough `http_*` (`platform-gincommon`), `events_*`/`outbox_*`/`sqs_*` (`platform-events`, incl. `outbox_dead_letters_total`), and `pgcommon_*` pool/query instruments.
+The pre-standard library metrics (unprefixed HTTP, events/outbox/SQS and pgcommon names) were removed from the libraries and are no longer emitted. `TestNamingConvention_ConformsToPlatformObservabilityStandard` validates every gathered collector against the registry (`obsregistry.Validate`) on every build; `.github/scripts/metrics-registry-lint.sh` fails the build if a rule/HPA/adapter file names a removed metric, or if an alert reading a `proposed` metric lacks `metric_status: proposed`.
 
 Three DB-state gauges (`realm_active_gauge`, `realm_config_pending_gauge`, `template_drift`) are refreshed every 5 minutes by exporter goroutines against the BYPASSRLS sys pool — a flat gauge plus a `gauge exporter query failed` log line means the exporter is broken, not that the count is stable. `trial_expiry_*`, `lapse_processed_total`, and `realm_export_total` are incremented correctly but only inside the one-shot reconciler CronJob process, which exits before a scrape lands — treat silence on those series as "no signal", not "no problem".
 
 ### Tracing and logs
 
-`gincommon.InitTracingFromEnv()` in both binaries (always — in-process spans get valid trace IDs even without a collector; OTLP export is a no-op until `OTEL_EXPORTER_OTLP_ENDPOINT` is set), plus a `db.query` span per query. W3C `traceparent` is injected on every outbound HTTP call (O&M, OpenBao, Keycloak); SNS instead carries `trace_id` explicitly on the outbox envelope, so provision → event → downstream-projection stays one trace. Keycloak spans are named `keycloak.<op>`; a reconciler run is rooted at `reconciler.<job>`.
+`gincommon.InitTracingWithConfig()` in both binaries, with the same identity as the metrics (always — in-process spans get valid trace IDs even without a collector; `OTEL_EXPORTER_OTLP_ENDPOINT=none` disables export), plus a `db.query` span per query (`gincommon.NewSpanTracer`). W3C `traceparent` is injected on every outbound HTTP call (O&M, OpenBao, Keycloak); SNS instead carries `trace_id` explicitly on the outbox envelope, so provision → event → downstream-projection stays one trace. Keycloak spans are named `keycloak.<op>`; a reconciler run is rooted at `reconciler.<job>`.
 
 Structured log fields: `tenant_id`, `operation`, `idempotency_key`, `keycloak_realm`, `actor` — **never** the admin token, a password seed, or an IdP secret. Slow queries (> 200ms) log at WARN with `tenant_id` redacted; RLS violations log at ERROR, 1% sampled.
 
 ---
 
+## Production go-live checklist
+
+Before the first production deploy, work through the eleven one-time platform/ops steps in [`.claude/operations.md`](.claude/operations.md#production-go-live-checklist): Terraform grants for the migrator role, the `existingSecret` keys, IRSA, queue RedrivePolicies, Glue schema registration, the OpenBao role, the Pushgateway (`honor_labels: true`), NetworkPolicy database ports, `AUDIT_LOG_BASE_URL`, trial size vs `CONVERT_TIMEOUT`, and the release deploy gate.
+
 ## Deployment
 
-### Container image — two binaries
+### Container image — three binaries
 
 | Binary | Path in image | Purpose |
 |---|---|---|
 | `iam-realm-provisioner-server` | `/iam-realm-provisioner-server` | HTTP server (`cmd/server`) — the image's `ENTRYPOINT`. Serves `/api/v1/internal/*`, runs the outbox runner + 3 SQS consumers. |
-| `iam-realm-provisioner-reconciler` | `/iam-realm-provisioner-reconciler` | One-shot reconciler (`cmd/reconciler`), dispatched via `--job=<name>` by the 6 K8s CronJobs. |
+| `iam-realm-provisioner-reconciler` | `/iam-realm-provisioner-reconciler` | One-shot reconciler (`cmd/reconciler`), dispatched via `--job=<name>` by the 7 K8s CronJobs. |
+| `migrate` | `/migrate` | Schema migration (`cmd/migrate`) — run by the Helm pre-install/pre-upgrade hook Job before replicas roll, so they start with `RUN_MIGRATIONS=false`. |
 
-Two-stage `Dockerfile`: `golang:1.26.6-bookworm` builder, runtime is `gcr.io/distroless/static-debian12:nonroot` (no shell, non-root) — only the two compiled binaries and `deploy/keycloak/realm-template.json` are copied in, never the source tree (`api/asyncapi.yaml` is compiled in via `//go:embed`). `EXPOSE 8080 9090`.
+Two-stage `Dockerfile`: `golang:1.26.6-bookworm` builder, runtime is `gcr.io/distroless/static-debian12:nonroot` (no shell, non-root) — only the three compiled binaries and `deploy/keycloak/realm-template.json` are copied in, never the source tree (`api/asyncapi.yaml` is compiled in via `//go:embed`). `EXPOSE 8080 9090`.
 
 ### Helm chart
 
-`deploy/helm/` renders one `Deployment` (server) plus the 6 `CronJob`s above, all from the same image reference. HPA: `minReplicas: 2` / `maxReplicas: 4`, CPU 70% / memory 80%. PDB `minAvailable: 1`. Resources: CPU `250m`/`1`, Memory `256Mi`/`512Mi`. Pod AWS access (SNS/SQS/Glue/S3/KMS) is IRSA; secret access is OpenBao Kubernetes auth on the same ServiceAccount token.
+`deploy/helm/` renders one `Deployment` (server), the migrate hook `Job` (preceded by a hook-scoped NetworkPolicy for DNS + Postgres egress; it runs as the namespace `default` ServiceAccount, since the chart's own does not exist yet on a first install) plus the 7 `CronJob`s above, all from the same image reference. HPA: `minReplicas: 2` / `maxReplicas: 4`, CPU 70% / memory 80%. PDB `minAvailable: 1`. Resources: CPU `250m`/`1`, Memory `256Mi`/`512Mi`. Pod AWS access (SNS/SQS/Glue/S3/KMS) is IRSA; secret access is OpenBao Kubernetes auth on the same ServiceAccount token.
 
 ### Migration safety
 
@@ -723,8 +742,8 @@ Rolling deploy, 2 replicas. Since nothing was deployed before LLD sign-off, the 
 Nine workflow files, including a tag-triggered `release.yml` (`VERSIONING.md` § Maintainer release process) and a schema-freeze watchdog:
 
 - **`ci.yml`** — orchestrator, matching `iam-org-membership`'s job graph. `validate-test.yml`, `validate-quality.yml`, and `build-image` (Hadolint → `.dockerignore` check → Buildx build, cache-only — no local load, no push) all run in parallel with no dependency on each other. `build-image`'s cache then feeds two jobs that run in parallel with each other, gated on `[validate-test, build-image]`: `trivy` (loads the cached image, CVE scan CRITICAL/HIGH/UNKNOWN `ignore-unfixed`, SARIF upload to the Security tab, CycloneDX SBOM artifact) and `smoke` (loads the cached image, runs `smoke-tests.sh` twice — once per binary/entrypoint). On `push` to `main`/`master`, `push` (needs `[validate-test, trivy, smoke, validate-quality]`) builds+pushes a `linux/amd64` image to GHCR with provenance+SBOM, signs it with Cosign keyless (Sigstore OIDC), and self-verifies the signature — its own success is the gate, no separate `push-gate` job. `pr-summary` (needs all five) posts/updates one PR comment via `.github/scripts/pr-summary.js`.
-- **`release.yml`** — tag-triggered (`vMAJOR.MINOR.PATCH[-pre]`) release pipeline, modeled on sibling `iam-authz-enrichment`'s release workflow: `validate-test`/`validate-quality` re-run at the tagged commit → `build` (verifies the tag matches HEAD and the CHANGELOG has an entry, cross-compiles **both** binaries for 5 platforms) → `docker` (build/push the semver-tagged image, Trivy CVE scan, CycloneDX SBOM, SLSA provenance, Cosign sign+verify, then smoke tests against **both** binaries via the same `smoke-tests.sh` `ci.yml` uses) → `deploy-gate` (skipped unless `vars.DEPLOY_GATE_ENABLED == 'true'` — live Helm deploy, digest verification, `http_requests_total{status_class="5xx"}` health check, automatic rollback) → `publish` (GitHub Release with the CHANGELOG section as notes, binaries/checksums/SBOM/provenance attached).
-- **`validate-test.yml`** (reusable) — `make test-ci` (unit + postgres/RLS + integration, `-race`, merged coverage) → `coverage-gate.sh` (`COVERAGE_THRESHOLD: '90'` pinned in this workflow) → uploads `coverage.out` as an artifact → `arch-lint.sh` (layering + RP-INV-1; RLS-6 is inline in `validate-quality.yml` instead) → `metrics-registry-lint.sh` (Enterprise Platform Observability Standard — no unratified `platform_*` metric may source a live alert/recording-rule/SLO) → `make test-e2e`.
+- **`release.yml`** — tag-triggered (`vMAJOR.MINOR.PATCH[-pre]`) release pipeline, modeled on sibling `iam-authz-enrichment`'s release workflow: `validate-test`/`validate-quality` re-run at the tagged commit → `build` (verifies the tag matches HEAD and the CHANGELOG has an entry, cross-compiles **both** binaries for 5 platforms) → `docker` (build/push the semver-tagged image, Trivy CVE scan, CycloneDX SBOM, SLSA provenance, Cosign sign+verify, then smoke tests against **both** binaries via the same `smoke-tests.sh` `ci.yml` uses) → `deploy-gate` (skipped unless `vars.DEPLOY_GATE_ENABLED == 'true'` — live Helm deploy, digest verification, `platform_http_requests_total{status_class="5xx"}` health check, automatic rollback) → `publish` (GitHub Release with the CHANGELOG section as notes, binaries/checksums/SBOM/provenance attached).
+- **`validate-test.yml`** (reusable) — `make test-ci` (unit + postgres/RLS + integration, `-race`, merged coverage) → `coverage-gate.sh` (`COVERAGE_THRESHOLD: '95'` pinned in this workflow) → uploads `coverage.out` as an artifact → `arch-lint.sh` (layering + RP-INV-1; RLS-6 is inline in `validate-quality.yml` instead) → `metrics-registry-lint.sh` (Enterprise Platform Observability Standard — no removed metric name in rules/HPA/adapter; alerts on `proposed` metrics labelled `metric_status: proposed`). A separate `e2e` job in the same workflow runs `make test-e2e` in parallel with `test`, matching `iam-authz-enrichment`. It drives the production router over real HTTP against its own Postgres and Keycloak 26 testcontainers. `ci.yml` and `release.yml` gate on both jobs.
 - **`validate-quality.yml`** (reusable) — `go mod verify` → a grep rejecting HTML-escaped operators (`&gt;`/`&lt;`/`&amp;`) in workflow/script files → an inline RLS-6 gate (reject non-transaction-local `SET app.tenant_id`, matching the sibling IAM services' convention of inlining this check directly in the workflow rather than a standalone script) → `check-metric-naming.sh` (Enterprise Platform Observability Standard naming/suffix/label/registry-compliance rules, mirroring the sibling IAM services' identically-named step) → `gofmt` check → `go mod tidy` drift check → `go vet` → `golangci-lint` → `govulncheck` → a Dockerfile digest-pin check (rejects a floating `FROM` tag without `@sha256:...`). The AsyncAPI-vs-Glue drift gate (`platform-schemagov validate`) runs separately, in `schema-registry.yml`'s `pr-check` job (see below).
 - **`changelog-check.yml`** — fails a PR that touches `internal/`, `api/`, `deploy/`, `cmd/`, or `pkg/` without also updating `CHANGELOG.md`.
 - **`schema-registry.yml`** — registers this service's 9 event schemas to the shared `iam-tenant-events` Glue registry: PR read-only validate+diff, push-to-`main`/release full validate→diff→register→changelog pipeline against staging/production. See `docs/runbook-schema-registry.md`.
@@ -740,9 +759,9 @@ Nine workflow files, including a tag-triggered `release.yml` (`VERSIONING.md` §
 
 ## Docker
 
-### The published image ships two binaries
+### The published image ships three binaries
 
-See the [Deployment](#deployment) section above — `/iam-realm-provisioner-server` (default entrypoint) and `/iam-realm-provisioner-reconciler` (invoked with `--job=<name>`).
+See the [Deployment](#deployment) section above — `/iam-realm-provisioner-server` (default entrypoint), `/iam-realm-provisioner-reconciler` (invoked with `--job=<name>`) and `/migrate` (the migrate hook Job).
 
 ### What the bundled `docker-compose.yml` starts
 
@@ -910,6 +929,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, extending the serv
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Detailed architecture narrative with Mermaid diagrams — layer model, write flow, RLS/GUC flow, threat model |
 | [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD, v1.14 Approved — §2.5 platform-automation principal, §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
 | [`docs/runbook.md`](docs/runbook.md) | Full operator procedures for the headline incident scenarios |
+| [`docs/observability/`](docs/observability/README.md) | Observability Standard implementation, generated metric inventory, metric migration history, per-alert runbooks |
 
 ---
 

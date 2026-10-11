@@ -12,9 +12,13 @@ import (
 
 func TestMain(m *testing.M) {
 	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{
+		Domain:       "iam",
+		Environment:  "test",
 		ServiceName:  "iam-realm-provisioner",
 		BuildVersion: "test",
 	})
-	metrics.Register("test")
-	os.Exit(m.Run())
+	metrics.Register()
+	code := m.Run()
+	terminateSharedKeycloak()
+	os.Exit(code)
 }

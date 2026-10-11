@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
@@ -273,5 +274,75 @@ func TestIdempotencyRepository(t *testing.T) {
 			Scan(&status, &ownerTenantID))
 		assert.Equal(t, "in_progress", status, "tenant A's original row must be completely untouched by tenant B's collision")
 		assert.Equal(t, tenantA.String(), ownerTenantID)
+	})
+}
+
+// TestIdempotencyRepository_CancelledContextAndStaleLease covers the two
+// ways a key could previously stay `in_progress` forever (409 on every
+// retry): a Fail/Complete issued on an already-cancelled request context
+// (30s deadline, client disconnect), and an execution that died before
+// recording any outcome (crash, SIGKILL).
+func TestIdempotencyRepository_CancelledContextAndStaleLease(t *testing.T) {
+	t.Parallel()
+	appPool, rawPool := setupTestDB(t)
+	ctx := context.Background()
+
+	t.Run("FailOnCancelledContext_StillPersists", func(t *testing.T) {
+		repo := pgadapter.NewIdempotencyRepository(appPool)
+		tenantID := uuid.New()
+		tctx := withTenant(ctx, tenantID)
+		key := "cancelled-" + uuid.NewString()
+		_, found, err := repo.Begin(tctx, key, tenantID, "provision_trial")
+		require.NoError(t, err)
+		require.False(t, found)
+
+		cancelled, cancel := context.WithCancel(tctx)
+		cancel()
+		require.NoError(t, repo.Fail(cancelled, key), "Fail must not depend on the request context")
+
+		_, found, err = repo.Begin(tctx, key, tenantID, "provision_trial")
+		require.NoError(t, err)
+		assert.False(t, found, "a failed key is reclaimed, so the retry proceeds")
+	})
+
+	t.Run("CompleteOnCancelledContext_StillPersists", func(t *testing.T) {
+		repo := pgadapter.NewIdempotencyRepository(appPool)
+		tenantID := uuid.New()
+		tctx := withTenant(ctx, tenantID)
+		key := "cancelled-ok-" + uuid.NewString()
+		_, _, err := repo.Begin(tctx, key, tenantID, "provision_trial")
+		require.NoError(t, err)
+
+		cancelled, cancel := context.WithCancel(tctx)
+		cancel()
+		require.NoError(t, repo.Complete(cancelled, key, []byte(`{"ok":true}`)))
+
+		existing, found, err := repo.Begin(tctx, key, tenantID, "provision_trial")
+		require.NoError(t, err)
+		require.True(t, found)
+		assert.Equal(t, domain.OpStatusSucceeded, existing.Status)
+	})
+
+	t.Run("StaleInProgress_ReclaimedAfterLease_FreshOneIsNot", func(t *testing.T) {
+		repo := pgadapter.NewIdempotencyRepository(appPool).WithInProgressLease(time.Minute)
+		tenantID := uuid.New()
+		tctx := withTenant(ctx, tenantID)
+
+		fresh := "fresh-" + uuid.NewString()
+		_, _, err := repo.Begin(tctx, fresh, tenantID, "convert")
+		require.NoError(t, err)
+		existing, found, err := repo.Begin(tctx, fresh, tenantID, "convert")
+		require.NoError(t, err)
+		require.True(t, found, "within the lease the original execution owns the key")
+		assert.Equal(t, domain.OpStatusInProgress, existing.Status)
+
+		stale := "stale-" + uuid.NewString()
+		_, _, err = repo.Begin(tctx, stale, tenantID, "convert")
+		require.NoError(t, err)
+		_, err = rawPool.Exec(ctx, `UPDATE provisioning_operations SET created_at = now() - interval '2 minutes' WHERE idempotency_key = $1`, stale)
+		require.NoError(t, err)
+		_, found, err = repo.Begin(tctx, stale, tenantID, "convert")
+		require.NoError(t, err)
+		assert.False(t, found, "an in_progress row older than the lease is reclaimed")
 	})
 }

@@ -6,7 +6,7 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/pkg/requestctx"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -123,6 +123,43 @@ func RequireSystemRole() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// RequireTenantMatch rejects a /tenants/:id request whose path tenant is not
+// the caller's x-tenant-id. GUCBridgeMiddleware binds the RLS GUC from the
+// header while handlers act on the path tenant: with the two disagreeing,
+// RLS still blocks the database writes, but the Keycloak-effect-first flows
+// call Keycloak BEFORE their first write — a mismatched caller could
+// create or change a realm whose local commit is then rejected, leaving
+// Keycloak and the local mirror diverged. Callers (O&M, Billing, the
+// Signup BFF) always send the target tenant (RLS-5), so this only ever
+// rejects a misbehaving or forged request. A malformed :id passes through
+// to the handler's own 400.
+func RequireTenantMatch() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		pathTenant, err := uuid.Parse(c.Param("id"))
+		if err != nil {
+			c.Next()
+			return
+		}
+		if !tenantMatchesCaller(c, pathTenant) {
+			return
+		}
+		c.Next()
+	}
+}
+
+// tenantMatchesCaller reports whether tenantID is the caller's x-tenant-id,
+// aborting with 403 tenant_mismatch when it is not.
+func tenantMatchesCaller(c *gin.Context, tenantID uuid.UUID) bool {
+	rc, ok := requestctx.FromContext(c.Request.Context())
+	if ok && rc.TenantID == tenantID {
+		return true
+	}
+	er := newErrorResponse(c, "tenant_mismatch", map[string]any{"reason": "the request's tenant must match x-tenant-id (RLS-5)"})
+	er.Status = http.StatusForbidden
+	c.AbortWithStatusJSON(http.StatusForbidden, er)
+	return false
 }
 
 // RequireOperatorRole gates RP-13/RP-14 to the platform-operator role

@@ -10,13 +10,19 @@ Refines LLD §3, §6, §6.2. Clean Architecture / Ports-and-Adapters — depende
 iam-realm-provisioner/
 ├── cmd/
 │   ├── server/
-│   │   ├── main.go                     # HTTP composition root: pool+GUC wiring, migrations, outbox runner, SQS consumer loop, graceful shutdown
-│   │   ├── wiring.go                   # DI helpers factored out of main.go
-│   │   └── exporters.go                # runBusinessExporters — 4 goroutines refreshing the §11.2 DB-state gauges + rls_violations_total
+│   │   ├── main.go                     # HTTP composition root: pool+GUC wiring, MigrateSchema unless RUN_MIGRATIONS=false, outbox runner (eventcfg), SQS consumers (sqspipeline + DLQ publisher), graceful shutdown
+│   │   ├── identity.go                 # resolveAppEnv / isDevEnv / loggerEnv — one environment for metrics, traces and logs
+│   │   ├── wiring.go                   # DI helpers factored out of main.go (Glue codec, SNS publisher, runMigrationsAtStartup)
+│   │   ├── inbound_schema.go           # consumedValidator — eventschema.ConsumedByConsumer → sqspipeline.Validator
+│   │   ├── audit_delivery.go           # AL-5 pending_audit_entries drainer goroutine
+│   │   └── exporters.go                # runBusinessExporters — goroutines refreshing the §11.2 DB-state gauges + rls_violations_total
+│   ├── migrate/
+│   │   └── main.go                     # migrate hook Job (Helm pre-install/pre-upgrade): postgres.MigrateSchema over MIGRATION_DATABASE_URL
 │   └── reconciler/
-│       ├── main.go                     # CronJob dispatcher, --job=<name>, shared jctx.Context construction
+│       ├── main.go                     # CronJob dispatcher, --job=<name>, shared jctx.Context construction, Pushgateway push
+│       ├── identity.go                 # resolveAppEnv / isDevEnv / loggerEnv (same as cmd/server)
 │       ├── noop_publisher.go           # no-op EventPublisher for a dry-run/local invocation
-│       └── jobs/                       # RP-C1..RP-C4 + 2 operational prune jobs (6 total)
+│       └── jobs/                       # RP-C1..RP-C4 + 3 operational prune jobs (7 total)
 │           ├── context.go              # jobs.Context dependency bag, jobs.Result, jobs.Func signature
 │           ├── trial_expiry.go         # RP-C1
 │           ├── trial_hard_delete.go    # RP-C2
@@ -24,6 +30,7 @@ iam-realm-provisioner/
 │           ├── realm_config_reconcile.go # RP-C4
 │           ├── outbox_prune.go         # operational — outbox_events retention
 │           ├── processed_events_prune.go # operational — processed_events retention
+│           ├── ledger_prune.go         # operational — provisioning_operations + rls_violation_log retention
 │           └── tx_helper.go            # runInTxWithSysPool for BYPASSRLS raw-SQL sweeps
 ├── internal/
 │   ├── core/
@@ -33,6 +40,7 @@ iam-realm-provisioner/
 │   │   │   ├── idp_config.go           # IdpConfig, IdpConfigValidation
 │   │   │   ├── idp_validation.go       # §11.6 CheckOutcome/check-ID constants
 │   │   │   ├── provisioning_op.go      # ProvisioningOperation (idempotency ledger row), RealmConfigReconciliation
+│   │   │   ├── audit_entry.go          # AuditEntry / PendingAuditEntry — the AL-5 TenantIdpConfigChanged direct-write entry
 │   │   │   ├── errors.go               # ErrorCode taxonomy (§17) + Error{Code,Message,Details}, Status() -> HTTP code
 │   │   │   └── event.go                # Source="iam-realm-provisioner", SystemActorID, the 9 produced + 6 consumed event-type constants, Event{} struct, every payload struct (§25)
 │   │   ├── port/                       # interfaces required by the core
@@ -40,7 +48,9 @@ iam-realm-provisioner/
 │   │   │   │                          #   client mint (CreateServiceAccountClient -> sub, created bool, err —
 │   │   │   │                          #   created reports fresh-mint vs resumed, §2.5), ClearServiceAccountKeysCache,
 │   │   │   │                          #   DeleteServiceAccountClientIfExists (idempotent, mirrors DeleteRealmIfExists)
-│   │   │   ├── repositories.go         # TenantRealmRepository, IdpConfigRepository, IdpValidationRepository, ReconciliationRepository, IdempotencyStore, ProcessedEventsStore
+│   │   │   ├── repositories.go         # TenantRealmRepository, IdpConfigRepository, IdpValidationRepository, ReconciliationRepository, IdempotencyStore, Inbox, InboxPruner, PendingAuditEntryRepository, RetentionPruner
+│   │   │   ├── audit_log_client.go     # AuditLogClient — AL-5 direct-write ingest
+│   │   │   ├── token_service_client.go # TokenServiceClient — TS-1/TS-3/TS-4 (§2.5)
 │   │   │   ├── subscription_status_reader.go # SubscriptionLapseReader — RP-C3 suspend-phase trigger, backed by O&M's I-16
 │   │   │   ├── openbao_client.go       # OpenBaoClient — IdP secret KV read/write/delete
 │   │   │   ├── org_membership_client.go # OrgMembershipClient — I-8 residual-MFA-requirement read
@@ -50,6 +60,7 @@ iam-realm-provisioner/
 │   │   │   └── logger.go               # Logger, SlogStyleLogger, NewSlogStyleLogger
 │   │   └── service/                    # use cases — domain+port+requestctx+observability only
 │   │       ├── provisioning_service.go # RP-1/2/3/4/17 (ProvisionTrial, ProvisionDirect, Convert, CreateInvitedUser,
+│   │       │                          #   RP-3 runs detached from the request (CONVERT_TIMEOUT), Drain waits for it at shutdown;
 │   │       │                          #   RevertConversion, RefreshServiceAccountKeys); mintPlatformAutomation is the
 │   │       │                          #   shared RP-1/2/3/4 mint helper (§2.5) — Convert also retires the tenant's old
 │   │       │                          #   shared-realm client on success; RevertConversion re-mints one back into the
@@ -58,23 +69,27 @@ iam-realm-provisioner/
 │   │       ├── idp_service.go          # RP-6/7/13 (ConfigureIdp, RemoveIdp, PortabilityAudit)
 │   │       ├── idp_validator.go        # §11.6 Region-Agnostic IdP Configuration Checklist (ValidateIdpConfig)
 │   │       ├── realm_config_service.go # RP-8 (ApplyRealmConfig, RP-INV-6 local-intent-first)
-│   │       └── mfa_service.go          # RP-9 (ResetMFA) + membership-realm-q's SyncRequiresMfa
+│   │       ├── mfa_service.go          # RP-9 (ResetMFA) + membership-realm-q's SyncRequiresMfa
+│   │       ├── audit_delivery_service.go # AL-5 drain: claim due pending_audit_entries, deliver, delete / back off / park failed
+│   │       └── compensation.go         # compensationContext — detached 30s context for compensating teardown
 │   └── adapter/
 │       ├── inbound/
 │       │   ├── http/                   # Gin handlers — router.go is the single source of truth for the route table
 │       │   │   ├── router.go           # NewRouter: infra routes, docs routes, /api/v1/internal/* (RP-1..RP-17)
 │       │   │   ├── handlers.go / lifecycle_handler.go / idp_handler.go / internal_handler.go
-│       │   │   ├── middleware.go       # GUCBridgeMiddleware, RequireIdempotencyKey, RequireSystemRole, RequireOperatorRole, RequireJSONContentType
+│       │   │   ├── middleware.go       # GUCBridgeMiddleware, RequireIdempotencyKey, RequireSystemRole, RequireOperatorRole, RequireTenantMatch, RequireJSONContentType
 │       │   │   ├── errors.go           # domain.Error -> gincommon.ErrorResponse mapping
 │       │   │   ├── asyncapi.go         # interactive dashboard + raw-YAML serving for the embedded api/asyncapi.yaml, at /asyncapi, /asyncapi.yaml
 │       │   │   └── swagger_theme.go / swagger_initializer.go  # custom-themed assets for GET /swagger/*any (swag-generated OpenAPI 2.0 UI, all 17 RP-1..RP-17 handlers)
-│       │   └── consumer/               # 3 SQS handlers: membership-realm-q, tenant-realm-q, billing-realm-q
+│       │   ├── consumer/               # 3 SQS handlers: membership-realm-q, tenant-realm-q, billing-realm-q (dedup via port.Inbox)
+│       │   └── sqspipeline/            # builds the consumers from platform-events: EnvForQueue (eventcfg.LoadSQS), NewConsumer (GlueDecodeCodec + WithDLQForwarding), RequireDLQ, Handler (DLQ route → span → schema validation)
 │       └── outbound/
-│           ├── postgres/               # repository impls + migrations/000000_initial_schema.{up,down}.sql + gauge_repository.go (§11.2 exporters) + otel_tracer.go (pgcommon.Config.Tracer)
+│           ├── postgres/               # repository impls + migrations/000000_initial_schema.{up,down}.sql + gauge_repository.go (§11.2 exporters) + inbox_repository.go (platform-events inbox.Store) + migrate.go (MigrateSchema) + idempotency_repository.go (lease reclaim, detached Complete/Fail) + retention_repository.go (ledger-prune) + pending_audit_entry_repository.go (AL-5 queue)
 │           ├── keycloak/               # gocloak-backed KeycloakAdmin impl — RP-INV-1's ONLY implementation + instrumentation.go (OTel spans on gocloak's resty transport)
 │           ├── eventbus/               # outbox publisher, Glue/Noop/Validating codecs
 │           ├── openbao/                # OpenBao KV v2 + Kubernetes-auth client
 │           ├── orgmembership/          # HTTP client for O&M's I-8 residual-MFA check + I-16 subscription-lapse poll (RP-C3, port.SubscriptionLapseReader)
+│           ├── auditlog/               # HTTP client for Audit Log's AL-5 direct-write ingest (port.AuditLogClient)
 │           ├── tokenservice/           # HTTP client for Token Service's TS-1/TS-3/TS-4 credential-lifecycle API (§2.5, port.TokenServiceClient)
 │           ├── s3/                     # realm-export object store
 │           ├── httpx/                  # cross-cutting leaf: the one HTTP transport every outbound adapter builds on, injecting W3C traceparent (§11.3)
@@ -87,18 +102,21 @@ iam-realm-provisioner/
 ├── docs/swagger/                        # generated by `make swag` (docs.go, swagger.json, swagger.yaml) — checked in, blank-imported by cmd/server/main.go to self-register at init
 ├── pkg/requestctx/                     # typed RequestContext helpers
 ├── deploy/
-│   ├── helm/iam-realm-provisioner/     # Helm chart — Deployment (server) + 6 CronJob templates (reconciler --job=<name>)
+│   ├── helm/                           # Helm chart — Deployment (server), migrate hook Job (+ hook NetworkPolicy), 7 CronJobs (reconciler --job=<name>)
 │   ├── keycloak/realm-template.json    # versioned dedicated-realm template (RP-3/RP-2 CreateRealmFromTemplate)
 │   ├── iam/                            # AWS IAM policy (SNS/SQS/Glue/S3 — NOT secrets)
 │   ├── openbao/                        # OpenBao ACL policy + Kubernetes-auth role, scoped to the IdP secret path
-│   └── monitoring/                     # PrometheusRule alerts (app-alerts.yml, schema-registry-alerts.yml), SLO burn-rate rules
+│   └── monitoring/                     # PrometheusRule alerts (app-alerts.yml, schema-registry-alerts.yml), SLO burn-rate rules, prometheus-adapter rule
 ├── .github/
 │   ├── workflows/                      # ci.yml, validate-test.yml, validate-quality.yml, changelog-check.yml,
 │   │                                    # release.yml, freeze-watchdog.yml, schema-registry.yml, schema-prune.yml, schema-health-quarterly.yml (9 total)
-│   └── scripts/                        # arch-lint.sh, coverage-gate.sh, release/schema-gov helper scripts
+│   └── scripts/                        # arch-lint.sh, coverage-gate.sh, check-metric-naming.sh, metricslint.sh, metrics-inventory.py,
+│                                        # metrics-registry-lint.sh, smoke-tests.sh, release/schema-gov helper scripts
 ├── .githooks/pre-commit                # tidy + fmt-check + vet + lint; installed via `make setup`/`make install-hooks`
-├── test/{unit,postgres,integration,e2e,load}/
-├── docs/lld/                           # frozen LLD
+├── test/{unit,postgres,integration,e2e,load,dbseed}/
+├── docs/lld/                           # LLD v1.21 (names frozen at v1.0)
+├── docs/observability/                 # Observability Standard README, generated metric-registry.md, migration.md, runbooks.md (one entry per alert)
+├── docs/runbook.md                     # operator procedures for the headline incident scenarios (§24)
 ├── docs/runbook-schema-registry.md     # schema-governance operator runbook (shared iam-tenant-events registry)
 ├── VERSIONING.md                       # SemVer policy + maintainer release process (release.yml)
 ├── Dockerfile  docker-compose.yml  Makefile  go.mod  .golangci.yml  .go-arch-lint.yml
@@ -111,15 +129,15 @@ iam-realm-provisioner/
 
 **DB-state exporters** (`cmd/server/exporters.go`, `runBusinessExporters`) poll `pgadapter.GaugeRepository` on the BYPASSRLS `sysPool` every 5 minutes: three gauges (`realm_active_gauge`, `realm_config_pending_gauge`, `template_drift`) plus one monotonic counter (`rls_violations_total`, `Add`ed not `Set`) scraped from `rls_violation_log` — backing the two RLS-6 alerts (`IAMRealmProvisionerRLSCrossTenantAccess` critical, `RLSMissingGUC` warning). The counter's exporter needs a Terraform-side `GRANT SELECT ON rls_violation_log TO realm_provisioner_migrator` this repo cannot itself provide — see `.claude/operations.md` §20.
 
-**Tracing.** `internal/adapter/outbound/httpx` is the one HTTP transport every outbound adapter builds on (O&M, OpenBao, and — via `RestyClient().SetTransport` — every Keycloak Admin API call through `internal/adapter/outbound/keycloak/instrumentation.go`), injecting W3C `traceparent` from the caller's context so a provision → event → O&M projection stays one trace. `internal/adapter/outbound/postgres/otel_tracer.go` (`NewOTelTracer`) implements `pgcommon.Config.Tracer` the same way. Both composition roots bootstrap the tracer provider via `gincommon.InitTracingFromEnv()` unconditionally, so in-process spans get valid trace IDs even when `OTEL_EXPORTER_OTLP_ENDPOINT` is unset.
+**Tracing.** `internal/adapter/outbound/httpx` is the one HTTP transport every outbound adapter builds on (O&M, OpenBao, and — via `RestyClient().SetTransport` — every Keycloak Admin API call through `internal/adapter/outbound/keycloak/instrumentation.go`), injecting W3C `traceparent` from the caller's context so a provision → event → O&M projection stays one trace. `pgcommon.Config.Tracer` is `gincommon.NewSpanTracer(serviceName)` (a `db.query` span per query). Both composition roots bootstrap the tracer provider via `gincommon.InitTracingWithConfig()` with the same identity as the metrics, unconditionally, so in-process spans get valid trace IDs even without a collector.
 
 ## Shared Library Dependencies
 
 ```go
 require (
-    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon  v1.3.0
-    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events     v1.4.0
-    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon   v1.3.0
+    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon  v1.6.0
+    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2     v2.0.0
+    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2   v2.0.0
     github.com/Nerzal/gocloak/v13                         v13.9.0
 )
 ```
@@ -130,7 +148,7 @@ Module: `github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.6.
 
 ### `platform-gincommon` integration
 
-`gincommon.ProtectedMiddlewares` + `ObservabilityMiddlewares` + `TimeoutMiddleware(30s)`. `ServiceName = "iam-realm-provisioner"`. No gRPC — Gin HTTP only, mesh-internal (`/api/v1/internal/*`, no public route). `gincommon.HealthHandler`-style `/healthz` (pure liveness) + hand-rolled `/readyz` (checks Postgres, sys-Postgres, outbox, Keycloak `Ready()`). `/metrics` served on its own dedicated port (`METRICS_PORT=9090`) — never shares a listener with the mesh-internal provisioning API.
+`gincommon.ProtectedMiddlewares` + `ObservabilityMiddlewares` with `Config.RequestTimeout = 30s` (gincommon appends `TimeoutMiddleware` innermost, so metrics/logs/spans record the client's 503). `/metrics` is `gincommon.MetricsHandler()`. `ServiceName = "iam-realm-provisioner"`. No gRPC — Gin HTTP only, mesh-internal (`/api/v1/internal/*`, no public route). `gincommon.HealthHandler`-style `/healthz` (pure liveness) + hand-rolled `/readyz` (checks Postgres, sys-Postgres, outbox, Keycloak `Ready()`). `/metrics` served on its own dedicated port (`METRICS_PORT=9090`) — never shares a listener with the mesh-internal provisioning API.
 
 ### `platform-pgcommon` integration
 

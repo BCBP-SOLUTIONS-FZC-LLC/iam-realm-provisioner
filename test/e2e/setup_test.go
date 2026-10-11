@@ -52,10 +52,10 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/test/dbseed"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/outbox"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/outbox"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
-	pgmigrate "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/migrate"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
+	pgmigrate "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/migrate"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 )
 
 // ── package-level test environment, built once by TestMain ─────────────────
@@ -251,8 +251,8 @@ func runE2ESuite(m *testing.M) (int, error) {
 	// ordering (ObservabilityMiddlewares then metrics.Register, both before
 	// any Keycloak call), so those counters are non-nil at first use rather
 	// than only once NewRouter primes them further down.
-	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{ServiceName: "iam-realm-provisioner-e2e", Logger: noopLogger{}})
-	metrics.Register("test")
+	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{Domain: "iam", Environment: "test", ServiceName: "iam-realm-provisioner-e2e", Logger: noopLogger{}})
+	metrics.Register()
 
 	if err := kcAdmin.Ready(ctx); err != nil {
 		return 0, fmt.Errorf("keycloak admin not ready: %w", err)
@@ -290,7 +290,7 @@ func runE2ESuite(m *testing.M) (int, error) {
 	internalH := httpadapter.NewInternalHandler(provisioningSvc, lifecycleSvc, mfaSvc, idpSvc, realmConfigSvc)
 
 	router := httpadapter.NewRouter(httpadapter.RouterConfig{
-		GinConfig: gincommon.Config{ServiceName: "iam-realm-provisioner-e2e", Logger: noopLogger{}},
+		GinConfig: gincommon.Config{Domain: "iam", Environment: "test", ServiceName: "iam-realm-provisioner-e2e", Logger: noopLogger{}},
 		Docs:      httpadapter.DocsConfig{Environment: "test"},
 		Handlers:  internalH,
 		Postgres: pingerFunc(func(ctx context.Context) error {
@@ -357,7 +357,7 @@ func startKeycloakContainer(ctx context.Context) (testcontainers.Container, erro
 			"KEYCLOAK_ADMIN_PASSWORD": "admin",
 		},
 		Cmd:        []string{"start-dev"},
-		WaitingFor: wait.ForLog("Listening on: http://0.0.0.0:8080").WithStartupTimeout(120 * time.Second),
+		WaitingFor: wait.ForLog("Listening on: http://0.0.0.0:8080").WithStartupTimeout(300 * time.Second), // ~60s of Quarkus augmentation on a CI runner, plus boot
 	}
 	return testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,

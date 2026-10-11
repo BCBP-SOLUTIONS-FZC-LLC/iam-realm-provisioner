@@ -90,12 +90,18 @@ func (d *serviceDeps) putRealm(r *domain.TenantRealm) uuid.UUID {
 	return r.TenantID
 }
 
+// targetTenant is the x-tenant-id placeholder sysHeaders sends: doRequest
+// replaces it with the request's own target tenant (the /tenants/:id path
+// segment, else the body's tenant_id), exactly as real callers do (RLS-5,
+// RequireTenantMatch). Set an explicit UUID to test a mismatch.
+const targetTenant = "<target-tenant>"
+
 // sysHeaders is a valid iam-system-principal caller — the identity every
 // internal route (RequireSystemRole) requires.
 func sysHeaders() map[string]string {
 	return map[string]string{
 		"x-user-id":      domain.SystemActorID,
-		"x-tenant-id":    uuid.New().String(),
+		"x-tenant-id":    targetTenant,
 		"x-tenant-roles": "iam-system",
 		"Content-Type":   "application/json",
 	}
