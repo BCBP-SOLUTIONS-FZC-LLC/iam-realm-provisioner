@@ -108,6 +108,8 @@ Note `selectShard` reads `CountsByShard` from the **local mirror** of `tenant_re
 
 ## RP-3: Trial → Dedicated Conversion (with user migration)
 
+**Detached execution (rev 1.21).** Conversion is O(users) Keycloak calls (LLD §11.1: p95 ≤ 8s + ~0.3s/user), so it can outrun the 30s request deadline. After `Begin` claims the key, `Convert` runs the body (`convertClaimed`) on a context detached from the request, bounded by `CONVERT_TIMEOUT` (10m). If the request is done first, the caller gets `409 operation_in_progress` and retries with the same key; the conversion keeps going and the retry replays its stored result. In-flight conversions are tracked (`ProvisioningService.Drain`) and drained at shutdown in parallel with HTTP. Cancelling half-way through the user migration would leave a partially-migrated realm. Compensating teardown everywhere (`bestEffortDeleteRealm`, client and secret deletes) runs on `compensationContext` (detached, 30s), and the ledger's `Fail`/`Complete` run detached too. A crashed execution's key is reclaimed after `IDEMPOTENCY_IN_PROGRESS_LEASE` (15m > `CONVERT_TIMEOUT`).
+
 ```
 POST /tenants/:id/convert {plan, billing_subscription_id, payment_method_id (accepted, never stored/used — PCI/Billing domain)}
   current := tenant_realms.FindByTenantID(tenant_id)
@@ -334,7 +336,7 @@ See RP-8 above — `*/10 * * * *`, retries every `realm_config_reconciliations` 
 
 ## Consumer Dedup Mechanics (`processed_events`)
 
-Each of the three SQS consumers is a `platform-events` `Handler`, wrapped by `inboundHandler` (`instrumentConsumer` → `validateConsumed` against `eventschema.ConsumedByConsumer` → `Handle`), so a payload failing its consumed-message schema never reaches the dedup/effect path below — it is counted and returned as an error until SQS redrives it (`dlqHandler` observes the 5th delivery). Unknown types (no consumed schema) are silently ack'd, counted (`unknown_event_acknowledged_total{topic=<source topic>}`), and recorded in `processed_events` inside `RunInTx` (forward-compat). Known types check `ProcessedEventsStore.IsProcessed(consumer, eventID)` first (a hit increments `processed_events_duplicates_total`) and call `MarkProcessed` inside `TxRunner.RunInTx` after the effect — `consumer` is one of `membership`/`tenant`/`billing`. A redelivered SQS message (at-least-once delivery) is a guaranteed no-op on the second and subsequent deliveries.
+Each of the three SQS consumers is a `platform-events` `Handler`, built and wrapped by `internal/adapter/inbound/sqspipeline` (`Handler`: straight-to-DLQ route → consumer span → `validateConsumed` against `eventschema.ConsumedByConsumer` → `Handle`; platform-events counts `platform_messages_*` by queue around it), so a payload failing its consumed-message schema never reaches the dedup/effect path below — it is counted and sent straight to `-dlq` on its first delivery. A persistently failing message is forwarded to `-dlq` by platform-events on its 5th delivery (`WithDLQForwarding`). Dedup is platform-events' `pkg/inbox` (`port.Inbox` → `postgres.InboxRepository` → one `inbox.Store` per consumer). Unknown types (no consumed schema) are silently ack'd, counted (`unknown_event_acknowledged_total{topic=<source topic>}`), and claimed in `processed_events` via `ProcessOnce` (forward-compat). `tenant-realm-q` claims and writes in one `ProcessOnce` transaction (the claim is its dedup); `membership-realm-q` and `billing-realm-q` first run the `IsProcessed` pre-check (a hit increments `processed_events_duplicates_total`), apply the Keycloak effect outside any transaction, then `ProcessOnce` (billing with its `tenant_realms` write) — `consumer` is one of `membership`/`tenant`/`billing`. A redelivered SQS message (at-least-once delivery) is a guaranteed no-op on the second and subsequent deliveries.
 
 ## GDPR & Data Lifecycle
 
@@ -369,6 +371,9 @@ Single-region (`ap-south-1`) — RDS, S3, and the Keycloak cluster all live ther
 | `keycloak_idp_config_validations` | Append-only, never pruned | — |
 | `processed_events` | 8 days (`PROCESSED_EVENTS_TTL_DAYS`, deliberately > the 7-day SQS message lifetime) | `processed-events-prune` CronJob |
 | `outbox_events` (published) | Operational retention window | `outbox-prune` CronJob |
+| `provisioning_operations` | 30 days (`PROVISIONING_OPERATIONS_TTL_DAYS`) — far beyond any client retry window | `ledger-prune` CronJob (batched deletes) |
+| `rls_violation_log` | 90 days (`RLS_VIOLATION_LOG_TTL_DAYS`) | `ledger-prune` CronJob (batched deletes) |
+| `pending_audit_entries` | Deleted on delivery; `failed` rows kept until an operator resolves them (alerted) | AL-5 drainer — never pruned automatically |
 | S3 realm exports | Compliance retention schedule (SSE-KMS) | Bucket lifecycle policy, not application code |
 
 ### PII Boundary

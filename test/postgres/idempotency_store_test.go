@@ -277,93 +277,72 @@ func TestIdempotencyRepository(t *testing.T) {
 	})
 }
 
-// TestIdempotencyRepository_ExpireStaleInProgress covers the idempotency-cleanup
-// job path (§9.2): rows that remain in_progress longer than a TTL threshold
-// are transitioned to failed, unblocking callers whose key was stuck after a
-// 503 mid-operation (the transaction rolled back before Fail could run).
-//
-// provisioning_operations is RLS-scoped, so:
-//   - Begin/Complete/Fail use the app pool (tenant GUC injected via tctx).
-//   - ExpireStaleInProgress is a cross-tenant sweep and uses sysPool (BYPASSRLS),
-//     matching how cmd/reconciler wires it: pgadapter.NewIdempotencyRepository(sysPool).
-func TestIdempotencyRepository_ExpireStaleInProgress(t *testing.T) {
+// TestIdempotencyRepository_CancelledContextAndStaleLease covers the two
+// ways a key could previously stay `in_progress` forever (409 on every
+// retry): a Fail/Complete issued on an already-cancelled request context
+// (30s deadline, client disconnect), and an execution that died before
+// recording any outcome (crash, SIGKILL).
+func TestIdempotencyRepository_CancelledContextAndStaleLease(t *testing.T) {
 	t.Parallel()
 	appPool, rawPool := setupTestDB(t)
-	sysPool := setupSysPool(t, rawPool)
 	ctx := context.Background()
-	// App-pool repo for tenant-scoped operations (Begin/Complete/Fail).
-	repo := pgadapter.NewIdempotencyRepository(appPool)
-	// Sys-pool repo for the cross-tenant expire sweep — matches reconciler wiring.
-	sysRepo := pgadapter.NewIdempotencyRepository(sysPool)
-	tenantID := uuid.New()
-	tctx := withTenant(ctx, tenantID)
 
-	t.Run("ExpiresRowsOlderThanTTL", func(t *testing.T) {
-		key := "expire-old-" + uuid.NewString()
-		_, _, err := repo.Begin(tctx, key, tenantID, domain.OpProvisionTrial)
+	t.Run("FailOnCancelledContext_StillPersists", func(t *testing.T) {
+		repo := pgadapter.NewIdempotencyRepository(appPool)
+		tenantID := uuid.New()
+		tctx := withTenant(ctx, tenantID)
+		key := "cancelled-" + uuid.NewString()
+		_, found, err := repo.Begin(tctx, key, tenantID, "provision_trial")
 		require.NoError(t, err)
-		// Backdate the row so it appears stale.
-		_, err = rawPool.Exec(ctx,
-			`UPDATE provisioning_operations SET created_at = now() - interval '2 hours' WHERE idempotency_key = $1`, key)
-		require.NoError(t, err)
+		require.False(t, found)
 
-		n, err := sysRepo.ExpireStaleInProgress(ctx, time.Hour, 100)
-		require.NoError(t, err)
-		assert.GreaterOrEqual(t, n, 1, "at least the backdated row must be expired")
+		cancelled, cancel := context.WithCancel(tctx)
+		cancel()
+		require.NoError(t, repo.Fail(cancelled, key), "Fail must not depend on the request context")
 
-		var status string
-		require.NoError(t, rawPool.QueryRow(ctx,
-			`SELECT status FROM provisioning_operations WHERE idempotency_key = $1`, key).Scan(&status))
-		assert.Equal(t, "failed", status, "expired row must be transitioned to failed so the next Begin reclaims it")
+		_, found, err = repo.Begin(tctx, key, tenantID, "provision_trial")
+		require.NoError(t, err)
+		assert.False(t, found, "a failed key is reclaimed, so the retry proceeds")
 	})
 
-	t.Run("DoesNotExpireRecentRows", func(t *testing.T) {
-		key := "expire-recent-" + uuid.NewString()
-		_, _, err := repo.Begin(tctx, key, tenantID, domain.OpProvisionTrial)
+	t.Run("CompleteOnCancelledContext_StillPersists", func(t *testing.T) {
+		repo := pgadapter.NewIdempotencyRepository(appPool)
+		tenantID := uuid.New()
+		tctx := withTenant(ctx, tenantID)
+		key := "cancelled-ok-" + uuid.NewString()
+		_, _, err := repo.Begin(tctx, key, tenantID, "provision_trial")
 		require.NoError(t, err)
 
-		n, err := sysRepo.ExpireStaleInProgress(ctx, time.Hour, 100)
+		cancelled, cancel := context.WithCancel(tctx)
+		cancel()
+		require.NoError(t, repo.Complete(cancelled, key, []byte(`{"ok":true}`)))
+
+		existing, found, err := repo.Begin(tctx, key, tenantID, "provision_trial")
 		require.NoError(t, err)
-		// Only rows older than 1 hour should be expired; this row was just inserted.
-		var status string
-		require.NoError(t, rawPool.QueryRow(ctx,
-			`SELECT status FROM provisioning_operations WHERE idempotency_key = $1`, key).Scan(&status))
-		assert.Equal(t, "in_progress", status, "a recently inserted row must not be expired")
-		_ = n
+		require.True(t, found)
+		assert.Equal(t, domain.OpStatusSucceeded, existing.Status)
 	})
 
-	t.Run("DoesNotExpireSucceededRows", func(t *testing.T) {
-		key := "expire-succeeded-" + uuid.NewString()
-		_, _, err := repo.Begin(tctx, key, tenantID, domain.OpProvisionTrial)
-		require.NoError(t, err)
-		require.NoError(t, repo.Complete(tctx, key, nil))
-		// Backdate to ensure it would be expired if it were in_progress.
-		_, err = rawPool.Exec(ctx,
-			`UPDATE provisioning_operations SET created_at = now() - interval '2 hours' WHERE idempotency_key = $1`, key)
-		require.NoError(t, err)
+	t.Run("StaleInProgress_ReclaimedAfterLease_FreshOneIsNot", func(t *testing.T) {
+		repo := pgadapter.NewIdempotencyRepository(appPool).WithInProgressLease(time.Minute)
+		tenantID := uuid.New()
+		tctx := withTenant(ctx, tenantID)
 
-		_, err = sysRepo.ExpireStaleInProgress(ctx, time.Hour, 100)
+		fresh := "fresh-" + uuid.NewString()
+		_, _, err := repo.Begin(tctx, fresh, tenantID, "convert")
 		require.NoError(t, err)
-
-		var status string
-		require.NoError(t, rawPool.QueryRow(ctx,
-			`SELECT status FROM provisioning_operations WHERE idempotency_key = $1`, key).Scan(&status))
-		assert.Equal(t, "succeeded", status, "a succeeded row must never be expired regardless of age")
-	})
-
-	t.Run("RespectsLimit", func(t *testing.T) {
-		// Insert 3 stale rows; expire with limit=2.
-		for i := 0; i < 3; i++ {
-			key := "expire-limit-" + uuid.NewString()
-			_, _, err := repo.Begin(tctx, key, tenantID, domain.OpProvisionTrial)
-			require.NoError(t, err)
-			_, err = rawPool.Exec(ctx,
-				`UPDATE provisioning_operations SET created_at = now() - interval '2 hours' WHERE idempotency_key = $1`, key)
-			require.NoError(t, err)
-		}
-
-		n, err := sysRepo.ExpireStaleInProgress(ctx, time.Hour, 2)
+		existing, found, err := repo.Begin(tctx, fresh, tenantID, "convert")
 		require.NoError(t, err)
-		assert.Equal(t, 2, n, "must expire at most limit rows per call")
+		require.True(t, found, "within the lease the original execution owns the key")
+		assert.Equal(t, domain.OpStatusInProgress, existing.Status)
+
+		stale := "stale-" + uuid.NewString()
+		_, _, err = repo.Begin(tctx, stale, tenantID, "convert")
+		require.NoError(t, err)
+		_, err = rawPool.Exec(ctx, `UPDATE provisioning_operations SET created_at = now() - interval '2 minutes' WHERE idempotency_key = $1`, stale)
+		require.NoError(t, err)
+		_, found, err = repo.Begin(tctx, stale, tenantID, "convert")
+		require.NoError(t, err)
+		assert.False(t, found, "an in_progress row older than the lease is reclaimed")
 	})
 }

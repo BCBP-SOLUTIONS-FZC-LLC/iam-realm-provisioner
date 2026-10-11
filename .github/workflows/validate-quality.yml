@@ -99,6 +99,13 @@ jobs:
       - name: Metric naming convention check
         run: bash .github/scripts/check-metric-naming.sh
 
+      # platform-gincommon's own metricslint: registry compliance and label
+      # vocabulary on a real scrape, legacy/unregistered names in alert
+      # rules, dashboards and runbooks, and docs/observability/
+      # metric-registry.md in sync with the code (matches iam-org-membership).
+      - name: Observability standard lint (metricslint)
+        run: bash .github/scripts/metricslint.sh
+
       # Regenerates docs/swagger/{docs.go,swagger.json,swagger.yaml} from
       # the current @Summary/@Router handler annotations and fails if that
       # produces a diff — the same drift this caught locally once already
@@ -140,13 +147,13 @@ jobs:
           fi
 
       # Enforce digest-pinned FROM lines in the Dockerfile. Floating tags
-      # (e.g. golang:1.26.6-bookworm without @sha256:...) can be silently
+      # (e.g. golang:1.26.9-bookworm without @sha256:...) can be silently
       # overwritten by upstream maintainers, breaking supply-chain
       # guarantees.
       - name: Dockerfile base image digest check
         run: |
           if grep -E '^FROM [^ @]+:[^ @]+( AS .+)?$' Dockerfile; then
-            echo "::error file=Dockerfile,title=Unpinned base image::Dockerfile FROM lines must use digest-pinned references (e.g. golang:1.26.6-bookworm@sha256:...)."
+            echo "::error file=Dockerfile,title=Unpinned base image::Dockerfile FROM lines must use digest-pinned references (e.g. golang:1.26.9-bookworm@sha256:...)."
             exit 1
           fi
           echo "Dockerfile base images are digest-pinned."

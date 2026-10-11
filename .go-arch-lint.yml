@@ -67,6 +67,7 @@ components:
     in:
       - internal/adapter/inbound/http
       - internal/adapter/inbound/consumer
+      - internal/adapter/inbound/sqspipeline
 
   # keycloak is its own component (not folded into adapters_outbound) so the
   # RP-INV-1 single-writer invariant — no other package may import gocloak
@@ -101,6 +102,7 @@ components:
     in:
       - cmd/server
       - cmd/reconciler
+      - cmd/migrate
 
 deps:
   # domain: no internal (project) imports — pure value types + invariants

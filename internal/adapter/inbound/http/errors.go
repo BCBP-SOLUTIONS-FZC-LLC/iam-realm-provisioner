@@ -57,11 +57,16 @@ func HandleError(c *gin.Context, err error) {
 	// Raw pgconn.PgError that was not caught and translated by the service
 	// layer. wrapConnErr maps classes 08/53/57/58 to ErrDBUnavailable, so
 	// the DomainError branch above is the production path. This fallback
-	// still classifies a leaked PgError (tests, future missed wrap) into
-	// 503 db_unavailable per §17 via pgcommon helpers — no pgconn import needed.
-	if pgcommon.IsConnectionException(err) || pgcommon.IsInsufficientResources(err) ||
-		pgcommon.IsOperatorIntervention(err) || pgcommon.IsSystemError(err) ||
-		pgcommon.IsQueryCanceled(err) {
+	// still classifies a leaked PgError (tests, future missed wrap) or a
+	// closed pool into 503 db_unavailable per §17 via pgcommon's
+	// classifiers, without importing pgconn.
+	if pgcommon.IsQueryCanceled(err) || pgcommon.IsLockNotAvailable(err) {
+		er := newErrorResponse(c, string(domain.ErrRequestTimeout), nil)
+		er.Status = http.StatusServiceUnavailable
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, er)
+		return
+	}
+	if isDBUnavailable(err) {
 		er := newErrorResponse(c, string(domain.ErrDBUnavailable), nil)
 		er.Status = http.StatusServiceUnavailable
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, er)
@@ -73,4 +78,12 @@ func HandleError(c *gin.Context, err error) {
 	er := newErrorResponse(c, "internal_error", nil)
 	er.Status = http.StatusInternalServerError
 	c.AbortWithStatusJSON(http.StatusInternalServerError, er)
+}
+
+// isDBUnavailable mirrors postgres.IsDBUnavailable (this package may not
+// import the postgres adapter): SQLSTATE class 08, 53, 57 (except 57014) or
+// 58, or a closed pool.
+func isDBUnavailable(err error) bool {
+	return pgcommon.IsConnectionException(err) || pgcommon.IsInsufficientResources(err) ||
+		pgcommon.IsOperatorIntervention(err) || pgcommon.IsSystemError(err) || pgcommon.IsPoolClosed(err)
 }

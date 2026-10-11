@@ -41,6 +41,12 @@ const (
 	// malformed-JSON/failed-binding-validation 400, distinct from the
 	// named business-validation codes above.
 	ErrInvalidRequest ErrorCode = "invalid_request" // 400
+	// ErrRequestTimeout is additive to the frozen §17 taxonomy (matching
+	// iam-org-membership's request_timeout): a Postgres statement_timeout
+	// (SQLSTATE 57014, PG_STATEMENT_TIMEOUT) or lock_timeout (55P03,
+	// PG_LOCK_TIMEOUT) fired. A slow-query/contention signal, not an outage —
+	// retryable with the same Idempotency-Key.
+	ErrRequestTimeout ErrorCode = "request_timeout" // 503
 )
 
 // ErrKeycloakUserNotFound and ErrUserEmailConflict are additive to the
@@ -81,6 +87,7 @@ var httpStatus = map[ErrorCode]int{
 	ErrObjectStoreUnavailable:         503,
 	ErrDBUnavailable:                  503,
 	ErrTokenServiceUnavailable:        503,
+	ErrRequestTimeout:                 503,
 }
 
 // Error is this service's domain error type: a stable code, an HTTP status

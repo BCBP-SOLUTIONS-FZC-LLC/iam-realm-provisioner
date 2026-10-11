@@ -16,11 +16,11 @@ import (
 // dedup/ack logic proceed either way.
 func TestMain(m *testing.M) {
 	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{
-		ServiceName:  "iam-realm-provisioner",
 		Domain:       "iam",
 		Environment:  "test",
+		ServiceName:  "iam-realm-provisioner",
 		BuildVersion: "test",
 	})
-	metrics.Register("test")
+	metrics.Register()
 	os.Exit(m.Run())
 }

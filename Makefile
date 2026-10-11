@@ -25,7 +25,7 @@ TEST_UNIT_PKGS     := ./test/unit/...
 # to end against a real testcontainers Postgres — no Keycloak needed, so
 # they belong in the lighter "postgres" tier, not test-integration's
 # heavier Postgres+Keycloak suite.
-TEST_POSTGRES_PKGS := ./test/postgres/... ./cmd/server/... ./cmd/reconciler/...
+TEST_POSTGRES_PKGS := ./test/postgres/... ./cmd/server/... ./cmd/reconciler/... ./cmd/migrate/...
 TEST_INT_PKGS      := ./test/integration/...
 TEST_E2E_PKGS      := ./test/e2e/...
 TEST_LOAD_PKGS     := ./test/load/...
@@ -49,6 +49,7 @@ TEST_INTEGRATION_PARALLEL ?= 2
 TEST_INTERNAL_PKGS := ./cmd/... \
                       ./internal/adapter/inbound/http/... \
                       ./internal/adapter/inbound/consumer/... \
+                      ./internal/adapter/inbound/sqspipeline/... \
                       ./internal/adapter/outbound/eventbus/... \
                       ./internal/adapter/outbound/postgres/... \
                       ./internal/adapter/outbound/keycloak/... \
@@ -99,12 +100,14 @@ help:
 	@echo "  make vet              - go vet (default build + every test build tag)"
 	@echo "  make lint             - run golangci-lint (default build + every test build tag)"
 	@echo "  make arch-lint        - run go-arch-lint (dependency-rule enforcement, §3.4)"
-	@echo "  make metrics-registry-lint - enforce no unratified platform_* metric sources an alert/SLO"
+	@echo "  make metrics-registry-lint - no removed metric names in rules/HPA; proposed-metric alerts labelled metric_status: proposed"
 	@echo "  make metric-naming-lint - enforce Platform Observability Standard naming/suffix/label/registry rules"
+	@echo "  make metrics-lint     - platform-gincommon metricslint (real scrape + refs + inventory drift)"
+	@echo "  make metrics-inventory - regenerate docs/observability/metric-registry.md"
 	@echo "  make test             - unit + postgres + integration tests (requires Docker)"
 	@echo "  make test-ci          - test with race detector + coverage (used in CI)"
 	@echo "  make test-unit        - unit tests only (no Docker required)"
-	@echo "  make test-postgres    - Postgres + RLS integration tests (requires Docker)"
+	@echo "  make test-postgres    - Postgres + RLS tests + cmd/ composition roots against real Postgres (requires Docker)"
 	@echo "  make test-integration - cross-layer integration tests (SNS/SQS/Keycloak via testcontainers)"
 	@echo "  make test-e2e         - end-to-end tests (requires Docker)"
 	@echo "  make test-load        - RP-3 migration load test (fake Keycloak, no Docker); LOAD_TEST_FULL=1 for N=500"
@@ -115,17 +118,17 @@ help:
 	@echo "  make mock OM_MODE=lapses - start both mocks with O&M in lapses mode"
 	@echo "  make mock-keycloak    - start Keycloak mock only (:8091)"
 	@echo "  make mock-org         - start O&M mock only (:8082)"
-	@echo "  make build            - compile both binaries to bin/"
+	@echo "  make build            - compile server, reconciler and migrate to bin/"
 	@echo "  make cover            - coverage HTML report"
 	@echo "  make cover-func       - coverage summary by function"
-	@echo "  make ci               - tidy + fmt-check + vet + lint + arch-lint + metrics-registry-lint + metric-naming-lint + test-ci + build"
+	@echo "  make ci               - tidy + fmt-check + vet + lint + arch-lint + metrics-registry-lint + metric-naming-lint + metrics-lint + test-ci + build"
 	@echo "  make docker-up        - start Postgres + Floci + Floci UI + Keycloak + OpenBao"
 	@echo "  make docker-down      - stop local containers"
-	@echo "  make migrate-up       - apply pending domain migrations against DATABASE_MIGRATION_URL"
+	@echo "  make migrate-up       - apply pending domain migrations against MIGRATION_DATABASE_URL"
 	@echo "  make migrate-down     - roll back one domain migration"
 	@echo "  make migrate-create   - scaffold a new migration pair: make migrate-create NAME=add_x"
 	@echo "  make mod-verify       - go mod verify"
-	@echo "  make vuln-check       - govulncheck on internal + pkg"
+	@echo "  make vuln-check       - govulncheck ./..."
 	@echo "  make clean            - remove build artefacts"
 	@echo ""
 	@echo "Schema governance (platform-schemagov 0.4, shared iam-tenant-events registry):"
@@ -174,7 +177,7 @@ mod-verify:
 
 .PHONY: vuln-check
 vuln-check:
-	$(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./internal/... ./pkg/...
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 # -----------------------------
 # LINT
@@ -193,6 +196,18 @@ arch-lint:
 .PHONY: metrics-registry-lint
 metrics-registry-lint:
 	bash .github/scripts/metrics-registry-lint.sh
+
+# metrics-lint: platform-gincommon's metricslint over a real /metrics scrape
+# and the alert/dashboard/runbook references (same script CI runs).
+.PHONY: metrics-lint
+metrics-lint:
+	bash .github/scripts/metricslint.sh
+
+# metrics-inventory: regenerate docs/observability/metric-registry.md from the
+# pinned registry and a real scrape (metrics-lint fails when it is stale).
+.PHONY: metrics-inventory
+metrics-inventory:
+	METRICS_INVENTORY_WRITE=1 bash .github/scripts/metricslint.sh
 
 .PHONY: metric-naming-lint
 metric-naming-lint:
@@ -318,6 +333,7 @@ build:
 	@mkdir -p bin
 	$(GO) build -trimpath -ldflags "-s -w -X main.buildVersion=$(BUILD_VERSION)" -o bin/$(APP_NAME)-server ./cmd/server
 	$(GO) build -trimpath -ldflags "-s -w -X main.buildVersion=$(BUILD_VERSION)" -o bin/$(APP_NAME)-reconciler ./cmd/reconciler
+	$(GO) build -trimpath -ldflags "-s -w -X main.buildVersion=$(BUILD_VERSION)" -o bin/migrate ./cmd/migrate
 	@echo "Verifying library packages compile..."
 	$(GO) build ./internal/... ./pkg/...
 
@@ -330,16 +346,20 @@ build:
 MIGRATIONS_DIR := internal/adapter/outbound/postgres/migrations
 
 .PHONY: migrate-up
+# MIGRATION_DATABASE_URL is the name .env, Helm and cmd/migrate use;
+# DATABASE_MIGRATION_URL is still accepted for existing shells.
+MIGRATION_DSN = $(or $(MIGRATION_DATABASE_URL),$(DATABASE_MIGRATION_URL))
+
 migrate-up:
-	@test -n "$(DATABASE_MIGRATION_URL)" || { echo "DATABASE_MIGRATION_URL not set"; exit 1; }
+	@test -n "$(MIGRATION_DSN)" || { echo "MIGRATION_DATABASE_URL not set"; exit 1; }
 	docker run --rm -v $(CURDIR)/$(MIGRATIONS_DIR):/migrations --network host \
-	  migrate/migrate -path=/migrations -database "$(DATABASE_MIGRATION_URL)" up
+	  migrate/migrate -path=/migrations -database "$(MIGRATION_DSN)" up
 
 .PHONY: migrate-down
 migrate-down:
-	@test -n "$(DATABASE_MIGRATION_URL)" || { echo "DATABASE_MIGRATION_URL not set"; exit 1; }
+	@test -n "$(MIGRATION_DSN)" || { echo "MIGRATION_DATABASE_URL not set"; exit 1; }
 	docker run --rm -v $(CURDIR)/$(MIGRATIONS_DIR):/migrations --network host \
-	  migrate/migrate -path=/migrations -database "$(DATABASE_MIGRATION_URL)" down 1
+	  migrate/migrate -path=/migrations -database "$(MIGRATION_DSN)" down 1
 
 .PHONY: migrate-create
 migrate-create:
@@ -528,7 +548,7 @@ schema-prune:
 # -----------------------------
 
 .PHONY: ci
-ci: tidy fmt-check vet lint arch-lint metrics-registry-lint metric-naming-lint test-ci build
+ci: tidy fmt-check vet lint arch-lint metrics-registry-lint metric-naming-lint metrics-lint test-ci build
 
 # -----------------------------
 # COVERAGE

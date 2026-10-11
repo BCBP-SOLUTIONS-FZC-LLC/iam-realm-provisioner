@@ -19,6 +19,33 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// DSNFromEnv builds a PostgreSQL connection URL for the application pool by
+// delegating host/port/user/password/dbname/sslmode parsing and DSN
+// assembly to pgcommon.ConfigFromEnv() — the same env vars
+// (DATABASE_URL/PG_HOST/PG_PORT/PG_USER/PG_PASSWORD/PG_DBNAME/PG_SSLMODE)
+// platform-pgcommon itself reads to build the pool Config used by main.go,
+// so there is exactly one DSN-assembly implementation instead of two drifting
+// in parallel. Warnings from ConfigFromEnv (invalid/insecure settings
+// replaced by defaults) are surfaced at the call site that owns a logger
+// (see cmd/server/main.go); this helper only returns the DSN string.
+//
+// URL format is required because the migration runner (pgmigrate.Runner)
+// calls url.Parse on the DSN after prepending "pgx5://"; a keyword/value DSN
+// would produce invalid URL escapes (%20 for spaces) and fail at startup.
+// pgcommon builds the DSN via net/url, which already produces this format.
+//
+// PG_STATEMENT_TIMEOUT is not part of the DSN: ConfigFromEnv reads it into
+// Config.StatementTimeout and pgcommon applies it per transaction
+// (SET LOCAL), which is safe behind PgBouncer transaction pooling.
+func DSNFromEnv() string {
+	cfg, _ := pgcommon.ConfigFromEnv()
+	return cfg.DSN
+}
+
+// SystemPoolName is the pool metric label of the BYPASSRLS system pool, so
+// its platform_db_* series stay separate from the app pool's.
+const SystemPoolName = "system"
+
 // SystemPoolConfig returns pgcommon.Config for the BYPASSRLS system pool
 // (§10.1), matching iam-org-membership. The system pool deliberately has
 // no GUCProvider — cross-tenant reconciler / exporter queries run under a
@@ -29,17 +56,25 @@ import (
 // transaction-pooling deployments even when the app pool correctly reads
 // PG_BOUNCER_MODE.
 //
-// Pool sizing, lifetimes, SlowQueryThreshold, StatementTimeout, and
-// LockTimeout are copied from ConfigFromEnv so sysPool and the app pool
-// share one env-driven source of truth — pgcommon v2 applies
-// PG_STATEMENT_TIMEOUT / PG_LOCK_TIMEOUT as SET LOCAL per transaction, not
-// as a DSN parameter. Tracer is left unset — call sites wire NewOTelTracer
-// so db.query spans export through gincommon's TracerProvider.
+// Pool sizing, lifetimes, SlowQueryThreshold and StatementTimeout are
+// copied from ConfigFromEnv so sysPool and the app pool share one
+// env-driven source of truth. PoolName is always SystemPoolName. Tracer is
+// left unset — call sites wire gincommon.NewSpanTracer so db.query spans
+// export through gincommon's TracerProvider.
 func SystemPoolConfig(dsn string, log port.Logger) pgcommon.Config {
 	cfg, _ := pgcommon.ConfigFromEnv()
 	cfg.DSN = dsn
+	cfg.PoolName = SystemPoolName
 	cfg.GUCProvider = nil
 	cfg.PGBouncerMode = true
+	// ConfigFromEnv chose its MinConns default for the PG_BOUNCER_MODE it
+	// read, before PgBouncer mode was forced on here. Unless PG_MIN_CONNS was
+	// set deliberately (an empty value counts as unset, as ConfigFromEnv
+	// treats it), zero it so NewPool applies the PgBouncer default (0 — let
+	// PgBouncer manage backends).
+	if strings.TrimSpace(os.Getenv("PG_MIN_CONNS")) == "" {
+		cfg.MinConns = 0
+	}
 	cfg.Tracer = nil
 	if log != nil {
 		cfg.Logger = NewLoggerAdapter(log)
@@ -51,15 +86,25 @@ func SystemPoolConfig(dsn string, log port.Logger) pgcommon.Config {
 
 // SystemDSNFromEnv returns the DSN for the privileged cross-tenant pool used
 // by the reconciler binary (RP-C1..C4). In production it MUST point to
-// realm_provisioner_migrator (BYPASSRLS). Falls back to the application DSN
-// from pgcommon.ConfigFromEnv for local dev — cross-tenant queries will then
-// be RLS-filtered to zero rows (safe no-op).
+// realm_provisioner_migrator (BYPASSRLS). Falls back to DSNFromEnv() for
+// local dev — cross-tenant queries will then be RLS-filtered to zero rows
+// (safe no-op).
 func SystemDSNFromEnv() string {
 	if dsn := os.Getenv("SYSTEM_DATABASE_URL"); dsn != "" {
 		return dsn
 	}
-	cfg, _ := pgcommon.ConfigFromEnv()
-	return cfg.DSN
+	return DSNFromEnv()
+}
+
+// MigrationDSNFromEnv returns the DSN for schema migrations:
+// MIGRATION_DATABASE_URL when set, else the app DSN (pgcommon's own
+// MigrationDSNFromEnv). Migrations MUST bypass PgBouncer because the
+// migration runner uses pg_advisory_lock, which is session-scoped and
+// breaks under transaction pooling, so MIGRATION_DATABASE_URL must be set
+// whenever PG_BOUNCER_MODE is on. No statement timeout is applied: long DDL
+// and the advisory-lock wait must not be cut short.
+func MigrationDSNFromEnv() string {
+	return pgcommon.MigrationDSNFromEnv()
 }
 
 // TxRunner wraps pgcommon.Pool to implement port.TxRunner. When a
@@ -138,13 +183,13 @@ func withPool(ctx context.Context, pool *pgcommon.Pool, fn func(pgx.Tx) error) e
 // distinguish an integrity violation from a network outage.
 //
 // SQLSTATE class 08 (connection exception), 53 (insufficient resources),
-// 57 (operator intervention, excluding 57014 query_canceled which is a
-// slow-query signal, not an outage), and 58 (system error) are remapped to
-// domain.ErrDBUnavailable here so HTTP HandleError never needs to inspect
-// a raw *pgconn.PgError — those classes are availability failures (503).
-// pgcommon.IsPoolClosed covers both pgcommon's own closed-pool sentinel and
-// puddle.ErrClosedPool: a closed pool is never a SQL-protocol response but
-// is unambiguously "the database is unavailable", not a caller's business error.
+// 57 (operator intervention, except 57014) and 58 (system error) are
+// remapped to domain.ErrDBUnavailable here (IsDBUnavailable, pgcommon's
+// classifiers) so HTTP HandleError never needs to inspect a raw
+// *pgconn.PgError — those classes are availability failures (503). A closed
+// pool (pgcommon.IsPoolClosed) is the other positively-identifiable
+// connectivity failure: never a SQL-protocol response, but unambiguously
+// "the database is unavailable", not a caller's business error.
 //
 // Everything else — including a plain Go error a caller's own RunInTx/
 // withPool callback returns for its own business reasons — passes through
@@ -169,12 +214,10 @@ func wrapConnErr(err error) error {
 	if errors.As(err, &de) {
 		return err
 	}
-	// IsQueryCanceled (57014) is included: statement_timeout expiry is transient.
-	// Returning 503 preserves caller retry logic and avoids leaving idempotency
-	// ledger rows stranded in 'in_progress' with no recoverable path.
-	if pgcommon.IsConnectionException(err) || pgcommon.IsInsufficientResources(err) ||
-		pgcommon.IsOperatorIntervention(err) || pgcommon.IsSystemError(err) ||
-		pgcommon.IsPoolClosed(err) || pgcommon.IsQueryCanceled(err) {
+	if pgcommon.IsQueryCanceled(err) || pgcommon.IsLockNotAvailable(err) {
+		return domain.NewError(domain.ErrRequestTimeout, "database statement or lock timeout")
+	}
+	if IsDBUnavailable(err) {
 		return domain.NewError(domain.ErrDBUnavailable, "database unavailable")
 	}
 	// pgx returns Go-level network errors when the connection is dropped
@@ -215,4 +258,13 @@ func isNetworkError(err error) bool {
 		strings.Contains(msg, "connection reset") ||
 		strings.Contains(msg, "broken pipe") ||
 		strings.Contains(msg, "EOF")
+}
+
+// IsDBUnavailable reports whether err is a database availability failure
+// pgcommon can classify: SQLSTATE class 08, 53, 57 (except 57014
+// query_canceled) or 58, or a closed pool (pgcommon's own sentinel after
+// Close/DrainAndClose, or pgxpool's).
+func IsDBUnavailable(err error) bool {
+	return pgcommon.IsConnectionException(err) || pgcommon.IsInsufficientResources(err) ||
+		pgcommon.IsOperatorIntervention(err) || pgcommon.IsSystemError(err) || pgcommon.IsPoolClosed(err)
 }

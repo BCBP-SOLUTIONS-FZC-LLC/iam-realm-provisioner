@@ -9,6 +9,7 @@ services:
       - "9090:9090"
     environment:
       APP_ENV: dev
+      OBSERVABILITY_DOMAIN: iam
     env_file:
       - .env
     depends_on:

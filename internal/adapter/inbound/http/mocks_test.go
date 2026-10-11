@@ -231,10 +231,6 @@ func (m *fakeIdempotencyStore) Fail(ctx context.Context, key string) error {
 	return nil
 }
 
-func (m *fakeIdempotencyStore) ExpireStaleInProgress(_ context.Context, _ time.Duration, _ int) (int, error) {
-	return 0, nil
-}
-
 // ── fakeTxRunner — runs fn directly, injecting a fakeEventPublisher that
 // captures every enqueued event for assertions. ─────────────────────────────
 

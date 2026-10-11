@@ -18,6 +18,8 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
+
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/test/dbseed"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
@@ -82,4 +84,52 @@ func TestRunBusinessExporters_RealSchema_PopulatesGaugesAndReturnsOnCancel(t *te
 	// doesn't hang or panic; tick's own unit tests already cover the
 	// ctx.Done() return path precisely.
 	time.Sleep(50 * time.Millisecond)
+}
+
+// A violation logged since the exporter's watermark is added to
+// rls_violations_total (the source of the two RLS-6 alerts) on the first
+// tick.
+func TestRunBusinessExporters_RLSViolation_IncrementsCounter(t *testing.T) {
+	ctx := context.Background()
+	pgContainer, err := tcpostgres.Run(ctx,
+		"postgres:16-alpine",
+		tcpostgres.WithDatabase("provisioner"),
+		tcpostgres.WithUsername("postgres"),
+		tcpostgres.WithPassword("testpassword"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(60*time.Second),
+		),
+	)
+	require.NoError(t, err, "start postgres container")
+	t.Cleanup(func() { _ = pgContainer.Terminate(ctx) })
+	dsn, err := pgContainer.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err)
+	require.NoError(t, outbox.ApplySchema(ctx, &pgmigrate.Runner{DSN: dsn}))
+	require.NoError(t, pgadapter.RunMigrations(ctx, dsn))
+	pool, err := pgcommon.NewPool(ctx, pgcommon.Config{DSN: dsn, PGBouncerMode: false})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	const violationType = "exporter_test_violation"
+	conn, err := dbseed.New(ctx, dsn)
+	require.NoError(t, err)
+	defer conn.Close()
+	_, err = conn.Exec(ctx, `INSERT INTO rls_violation_log (table_name, violation_type, occurred_at)
+		VALUES ('tenant_realms', $1, now() - interval '1 second'), ('tenant_realms', $1, now() - interval '1 second')`, violationType)
+	require.NoError(t, err)
+
+	ensureMetricsRegistered(t)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	runBusinessExporters(runCtx, pgadapter.NewGaugeRepository(pool), &fakeLogger{})
+
+	require.Eventually(t, func() bool {
+		var m dto.Metric
+		if err := metrics.RLSViolationsTotal.WithLabelValues(violationType).Write(&m); err != nil {
+			return false
+		}
+		return m.GetCounter().GetValue() == 2
+	}, 5*time.Second, 10*time.Millisecond, "both logged violations are counted once")
 }

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -16,19 +18,54 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 )
 
+var (
+	libraryMetricsOnce sync.Once
+	libraryMetricsLog  = &fakeLogger{}
+)
+
+// ensureMetricsRegistered runs the same metrics bootstrap as main():
+// gincommon identity, business metrics, then platform-events/pgcommon on
+// the same registerer and identity.
 func ensureMetricsRegistered(t *testing.T) {
 	t.Helper()
-	// Use envOr("BUILD_VERSION", buildVersion) — exactly what main() does —
-	// so both this helper and main_integration_test.go's main() call agree on
-	// the identity. The Makefile exports BUILD_VERSION (e.g. "8167120-dirty");
-	// gincommon's sync.Once panics if called twice with different versions.
-	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{
-		ServiceName:  "iam-realm-provisioner",
-		BuildVersion: envOr("BUILD_VERSION", buildVersion),
-		Domain:       "iam",
-		Environment:  "test",
-	})
-	metrics.Register("test")
+	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{Domain: "iam", Environment: "test", ServiceName: "iam-realm-provisioner", BuildVersion: "test"})
+	metrics.Register()
+	libraryMetricsOnce.Do(func() { initLibraryMetrics(libraryMetricsLog) })
+}
+
+// TestInitLibraryMetrics_SharesIdentityAndDependencyHistogram covers
+// main()'s metrics bootstrap: platform-events and platform-pgcommon
+// register on gincommon's registerer with gincommon's identity without a
+// single RegistrationWarning — in particular platform-events reuses the
+// platform_dependency_request_seconds collector metrics.Register built,
+// instead of disabling its own copy.
+func TestInitLibraryMetrics_SharesIdentityAndDependencyHistogram(t *testing.T) {
+	ensureMetricsRegistered(t)
+	assert.Zero(t, atomic.LoadInt32(&libraryMetricsLog.warnCalls), "registration warnings: %v", libraryMetricsLog.lastWarn)
+
+	metrics.DependencyRequestDuration.WithLabelValues("keycloak", "create_realm", "success").Observe(0.01)
+	families, err := gincommon.MetricsGatherer().Gather()
+	require.NoError(t, err)
+	seen := map[string]map[string]string{}
+	for _, f := range families {
+		if len(f.GetMetric()) == 0 {
+			continue
+		}
+		labels := map[string]string{}
+		for _, lp := range f.GetMetric()[0].GetLabel() {
+			labels[lp.GetName()] = lp.GetValue()
+		}
+		seen[f.GetName()] = labels
+	}
+	for _, name := range []string{"platform_dependency_request_seconds", "platform_library_info", "platform_http_requests_total"} {
+		if _, ok := seen[name]; !ok && name == "platform_http_requests_total" {
+			continue // only exported once a request has been served
+		}
+		require.Contains(t, seen, name)
+		assert.Equal(t, "iam", seen[name]["domain"], name)
+		assert.Equal(t, "iam-realm-provisioner", seen[name]["service"], name)
+		assert.Equal(t, "test", seen[name]["environment"], name)
+	}
 }
 
 func TestEventschemaByType(t *testing.T) {
@@ -105,43 +142,4 @@ func TestNoopPublisher_Publish(t *testing.T) {
 func TestNoopPublisher_PublishBatch(t *testing.T) {
 	var p noopPublisher
 	assert.NoError(t, p.PublishBatch(context.Background(), nil))
-}
-
-// TestDlqHandler_AlwaysErrors_NeverDeletesTheMessage guards dlqHandler's
-// safety-critical contract: platform-events deletes an SQS message only if
-// its dead-letter handler returns nil, so a nil return here would silently
-// drop a poison message before it ever reaches the queue's -dlq sibling for
-// operator inspection. This must never happen regardless of which envelope
-// is given.
-func TestDlqHandler_AlwaysErrors_NeverDeletesTheMessage(t *testing.T) {
-	err := dlqHandler("billing")(context.Background(), events.Envelope[json.RawMessage]{Type: "AnythingAtAll"})
-	require.Error(t, err, "dlqHandler must never return nil — that would delete the message before it reaches -dlq")
-}
-
-// TestConsumerOptions_UsesGlueDecodeCodec guards the codec wired into every
-// inbound SQS consumer. Upstream producers (O&M, Billing) encode event
-// payloads with the AWS Glue Schema Registry wire format; the consumer must
-// use events.GlueDecodeCodec to strip the header. A wrong codec (e.g.
-// NoopCodec) would surface as malformed-JSON decode errors at the consumer,
-// routing every upstream event to DLQ.
-func TestConsumerOptions_UsesGlueDecodeCodec(t *testing.T) {
-	ensureMetricsRegistered(t)
-	opts := consumerOptions("membership", 4)
-	// events.WithConsumerCodec is a functional option; its concrete type is
-	// not exported, so we verify the option set is non-empty and exercisable
-	// by constructing a no-op consumer with a fake SQS client. The assertion
-	// that matters is that the option list contains a codec option that does
-	// NOT reject a well-formed Glue-framed payload.
-	require.NotEmpty(t, opts, "consumerOptions must return a non-empty option list")
-	// Directly verify the codec strips a valid Glue header by encoding a
-	// payload with prependGlueHeader (the same helper GlueCodec.Encode uses)
-	// and decoding it via the option's codec — all exercised via GlueDecodeCodec.
-	payload := []byte(`{"tenant_id":"00000000-0000-0000-0000-000000000001"}`)
-	encoded := make([]byte, 18+len(payload))
-	encoded[0] = 0x03 // Glue header version byte
-	encoded[1] = 0x00 // no compression
-	copy(encoded[18:], payload)
-	decoded, err := events.GlueDecodeCodec{}.Decode(context.Background(), "TenantRealmReady", encoded)
-	require.NoError(t, err, "events.GlueDecodeCodec must decode a valid Glue-framed payload — if this fails the wrong codec was wired")
-	assert.Equal(t, json.RawMessage(payload), decoded)
 }

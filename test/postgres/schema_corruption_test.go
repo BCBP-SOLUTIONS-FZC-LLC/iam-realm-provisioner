@@ -19,10 +19,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/inbox"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -117,37 +117,25 @@ func TestReconciliationRepository_SchemaCorruption(t *testing.T) {
 	require.Error(t, err, "ListPending's SELECT explicitly names the now-missing column")
 }
 
-// TestInboxStoreAdapter_IsProcessedAndPrune_SchemaCorruption drops
-// processed_events.consumer — referenced by IsProcessed's WHERE clause and
-// by Prune's subquery/DELETE — forcing a genuine Query/Exec failure in both.
-func TestInboxStoreAdapter_IsProcessedAndPrune_SchemaCorruption(t *testing.T) {
+// TestInboxRepository_SchemaCorruption drops processed_events.consumer —
+// referenced by inbox.Store's IsProcessed, claim and Prune statements —
+// forcing a genuine Query/Exec failure in each, which must surface as an
+// error (never a silent "not processed" / "nothing pruned").
+func TestInboxRepository_SchemaCorruption(t *testing.T) {
 	t.Parallel()
 	appPool, rawPool := setupTestDB(t)
 	ctx := context.Background()
-
-	mustStore := func(consumer string) *inbox.Store {
-		s, err := inbox.NewStore(appPool, consumer)
-		require.NoError(t, err)
-		return s
-	}
-	repo := pgadapter.NewInboxStoreAdapter(
-		mustStore(string(domain.ConsumerMembership)),
-		mustStore(string(domain.ConsumerTenant)),
-		mustStore(string(domain.ConsumerBilling)),
-	)
+	inbox := pgadapter.NewInboxRepository(appPool, nil)
 
 	_, err := rawPool.Exec(ctx, `ALTER TABLE processed_events DROP COLUMN consumer CASCADE`)
 	require.NoError(t, err)
 
-	t.Run("IsProcessed_QueryFailure", func(t *testing.T) {
-		_, err := repo.IsProcessed(ctx, domain.ConsumerMembership, uuid.NewString())
-		require.Error(t, err)
-	})
-
-	t.Run("Prune_ExecFailure", func(t *testing.T) {
-		_, err := repo.Prune(ctx, 90, 100)
-		require.Error(t, err)
-	})
+	_, err = inbox.IsProcessed(ctx, domain.ConsumerMembership, uuid.NewString())
+	require.Error(t, err)
+	_, err = inbox.ProcessOnce(ctx, domain.ConsumerMembership, uuid.NewString(), "X", func(context.Context) error { return nil })
+	require.Error(t, err)
+	_, err = inbox.Prune(ctx, domain.ConsumerMembership, 24*time.Hour, 100)
+	require.Error(t, err)
 }
 
 // TestIdempotencyRepository_SchemaCorruption exercises two distinct Begin

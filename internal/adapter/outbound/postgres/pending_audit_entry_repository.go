@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
@@ -132,9 +134,17 @@ func (r *PendingAuditEntryRepository) MarkFailed(ctx context.Context, id uuid.UU
 	})
 }
 
+// truncate caps s at n bytes as valid UTF-8: an upstream error body may
+// carry invalid bytes, and a cut mid-rune would create some — either makes
+// Postgres reject the whole write ("invalid byte sequence for encoding
+// UTF8"), losing the failed status with it.
 func truncate(s string, n int) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
 	if len(s) <= n {
 		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n]
 }

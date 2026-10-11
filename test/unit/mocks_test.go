@@ -263,10 +263,6 @@ func (m *mockIdempotencyStore) Fail(ctx context.Context, key string) error {
 	return nil
 }
 
-func (m *mockIdempotencyStore) ExpireStaleInProgress(_ context.Context, _ time.Duration, _ int) (int, error) {
-	return 0, nil
-}
-
 // ── mockTxRunner — runs fn directly against context.Background()'s child,
 // no real transaction, and injects a mockEventPublisher capturing every
 // enqueued event for assertions. ──────────────────────────────────────────

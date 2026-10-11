@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/glue"
 
@@ -55,33 +55,11 @@ func (noopPublisher) PublishBatch(context.Context, []events.Envelope[json.RawMes
 	return nil
 }
 
-// dlqObserveReceiveCount is the ApproximateReceiveCount above which
-// platform-events routes a delivery to dlqHandler instead of the consumer
-// handler — one short of the inbound queues' own RedrivePolicy
-// maxReceiveCount=5 (§7.1, scripts/init-floci.sh), so the observer fires on
-// the 5th and last delivery before SQS redrives the message to -dlq.
-const dlqObserveReceiveCount = 4
-
-// consumerOptions is the option set every inbound SQS consumer is built
-// with: the decode-only Glue codec (upstream producers' Glue-framed
-// payloads), the queue's concurrency, and the dead-letter observer
-// (dlqHandler at dlqObserveReceiveCount).
-func consumerOptions(consumer string, concurrency int) []events.ConsumerOption {
-	return []events.ConsumerOption{
-		events.WithConsumerCodec(events.GlueDecodeCodec{}),
-		events.WithConcurrency(concurrency),
-		events.WithMaxReceiveCount(dlqObserveReceiveCount),
-		events.WithDeadLetterHandler(dlqHandler(consumer)),
-	}
-}
-
-// dlqHandler backs events.WithDeadLetterHandler. It always returns a non-nil
-// error so platform-events does NOT delete the message, leaving it visible for
-// SQS's own RedrivePolicy (maxReceiveCount=5) to move it to the queue's -dlq
-// sibling on the next attempt. platform-events v2 records
-// platform_dlq_messages_total automatically when routing to this handler.
-func dlqHandler(_ string) events.Handler {
-	return func(context.Context, events.Envelope[json.RawMessage]) error {
-		return errors.New("dead-letter threshold reached — left visible for SQS's own redrive to -dlq")
-	}
+// runMigrationsAtStartup reports whether this process migrates the schema
+// itself. RUN_MIGRATIONS=false is set on every Kubernetes replica, where the
+// migrate Job (cmd/migrate, a Helm pre-install/pre-upgrade hook) migrates
+// once per release instead; unset or any other value keeps startup
+// migration on (local dev, docker-compose, tests).
+func runMigrationsAtStartup() bool {
+	return !strings.EqualFold(strings.TrimSpace(os.Getenv("RUN_MIGRATIONS")), "false")
 }

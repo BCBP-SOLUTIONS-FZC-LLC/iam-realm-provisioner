@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -141,10 +140,6 @@ func (m *loadIdempotencyStore) Fail(_ context.Context, key string) error {
 		row.Status = domain.OpStatusFailed
 	}
 	return nil
-}
-
-func (m *loadIdempotencyStore) ExpireStaleInProgress(_ context.Context, _ time.Duration, _ int) (int, error) {
-	return 0, nil
 }
 
 // loadEventPublisher discards every enqueued event — this suite measures

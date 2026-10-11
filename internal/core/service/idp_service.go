@@ -202,7 +202,10 @@ func (s *IdpService) ConfigureIdp(ctx context.Context, idempotencyKey string, te
 			// so the secret just written was never applied to any live
 			// Keycloak IdP — best-effort delete it rather than leave an
 			// orphaned secret in OpenBao with nothing referencing it.
-			if delErr := s.openbao.DeleteIdpSecret(ctx, tenantID, req.IdpAlias); delErr != nil {
+			cctx, cancel := compensationContext(ctx)
+			delErr := s.openbao.DeleteIdpSecret(cctx, tenantID, req.IdpAlias)
+			cancel()
+			if delErr != nil {
 				s.log.WarnContext(ctx, "configure_idp: compensating openbao secret delete failed", "tenant_id", tenantID, "idp_alias", req.IdpAlias, "error", delErr.Error())
 			}
 		}

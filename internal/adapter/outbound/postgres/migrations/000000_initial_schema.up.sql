@@ -67,6 +67,9 @@ CREATE TABLE public.rls_violation_log (
     query_text       text,
     occurred_at      timestamptz NOT NULL DEFAULT now()
 );
+-- The rls_violations_total exporter reads past its watermark and
+-- ledger-prune deletes past the retention window, both by occurred_at.
+CREATE INDEX idx_rls_violation_log_occurred_at ON public.rls_violation_log (occurred_at);
 
 CREATE OR REPLACE FUNCTION public.log_rls_violation(
     p_table_name     text,
@@ -263,6 +266,8 @@ CREATE TABLE public.provisioning_operations (
   completed_at    timestamptz
 );
 CREATE INDEX idx_provops_tenant ON public.provisioning_operations (tenant_id, created_at DESC);
+-- ledger-prune's retention sweep (RetentionRepository.PruneProvisioningOperations).
+CREATE INDEX idx_provops_created_at ON public.provisioning_operations (created_at);
 
 -- provisioning_operations is RLS-scoped like the other four tenant-scoped
 -- tables even though it is an idempotency ledger, because its `result`
@@ -306,14 +311,18 @@ CREATE POLICY tenant_isolation ON public.pending_audit_entries
     WITH CHECK (rls_check_tenant(tenant_id, 'pending_audit_entries'));
 
 -- ═════════════════════════════════════════════════════════════════════════
--- processed_events — service-owned DDL, the consumer dedup ledger (§4.5,
--- §7). Operational and RLS-exempt (not a tenant-query surface).
+-- processed_events — the consumer dedup ledger (§4.5, §7), read and written
+-- only through platform-events' pkg/inbox (inbox.Store). Defined here in
+-- exactly inbox's own shape (event_id uuid, constraint
+-- processed_events_pkey) — matching iam-org-membership — so this service's
+-- grants can be attached in the same migration. Operational and RLS-exempt
+-- (not a tenant-query surface).
 -- ═════════════════════════════════════════════════════════════════════════
 CREATE TABLE public.processed_events (
-  event_id     text NOT NULL,
+  event_id     uuid NOT NULL,
   consumer     text NOT NULL,       -- 'membership' | 'tenant' | 'billing'
   processed_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (event_id, consumer)
+  CONSTRAINT processed_events_pkey PRIMARY KEY (event_id, consumer)
 );
 CREATE INDEX idx_processed_events_processed_at ON public.processed_events (processed_at);
 

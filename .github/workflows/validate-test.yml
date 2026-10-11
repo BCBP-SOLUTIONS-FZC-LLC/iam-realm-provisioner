@@ -1,7 +1,11 @@
 # Reusable workflow - test gate.
 # Race detector (unit · postgres/RLS · integration) + coverage + arch lint +
-# AsyncAPI-vs-schema drift check. Called by ci.yml. Gates the build-image
-# job. Mirrors the sibling IAM services' validate-test.yml.
+# AsyncAPI-vs-schema drift check, plus a separate e2e job. Called by ci.yml
+# and release.yml, so both share exactly one definition of "tests pass".
+# e2e runs as its own job (not a step in `test`), matching
+# iam-authz-enrichment: it starts in parallel instead of waiting behind the
+# race + coverage run, and an e2e failure is attributable at a glance in the
+# Actions UI rather than buried at the end of the `test` job's log.
 name: Validate / Test
 
 "on":
@@ -115,20 +119,63 @@ jobs:
       - name: Architecture lint
         run: bash .github/scripts/arch-lint.sh
 
-      # Enforces the Enterprise Platform Observability Standard's
-      # governance rules 11/12: no unratified (Status: Proposed in
-      # internal/adapter/outbound/metrics/registry.go's PlatformRegistry)
-      # platform_* metric may source a live alert/recording-rule/SLO
-      # expression.
+      # Enforces the Enterprise Platform Observability Standard against the
+      # central Platform Observability Registry (platform-gincommon
+      # pkg/obsregistry): no removed metric name in the rule/HPA/adapter
+      # files, and every alert reading a "proposed" metric carries
+      # metric_status: proposed.
       - name: Metrics registry compliance lint
         run: bash .github/scripts/metrics-registry-lint.sh
 
-      # End-to-end tests exercise the full HTTP router (RP-1..RP-16) against
-      # real Postgres, plus the three SQS consumers and all four reconciler
-      # jobs against local Testcontainers (§17). Not part of the coverage
-      # gate, but must still pass before anything downstream builds on this
-      # ref.
-      - name: End-to-end tests
+  # Drives the production route table (internal/adapter/inbound/http.NewRouter,
+  # the exact construction cmd/server wires) over real HTTP against a real
+  # Postgres and a real Keycloak 26 testcontainer: trial provision →
+  # conversion, IdP configure behind the §11.6 gate, suspend → reactivate,
+  # idempotency replay (test/e2e's package doc has the full scope). The suite
+  # starts its own containers, so unlike iam-authz-enrichment's e2e job it
+  # needs no `services:` block. Independent of `test` (own checkout, own
+  # containers) so it runs in parallel rather than serializing behind it. Not
+  # part of the coverage gate, but every caller's downstream jobs need it.
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            go.mod
+
+      - name: Configure private module access
+        run: |
+          git config --global credential.helper store
+          echo "https://x-access-token:${{ secrets.GO_PRIVATE_TOKEN }}@github.com" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+
+      - name: Download modules
+        env:
+          GOPRIVATE: github.com/BCBP-SOLUTIONS-FZC-LLC/*
+          GONOSUMDB: github.com/BCBP-SOLUTIONS-FZC-LLC/*
+        run: go mod download
+
+      # Pull the two images up front so their download time is not charged
+      # against the suite's container-start waits (Keycloak's is 120s).
+      - name: Pre-pull container images
+        run: |
+          docker pull postgres:16-alpine
+          docker pull quay.io/keycloak/keycloak:26.0
+
+      - name: E2E tests
         env:
           TESTCONTAINERS_RYUK_DISABLED: 'true'
         run: make test-e2e

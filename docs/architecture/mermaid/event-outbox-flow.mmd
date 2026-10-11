@@ -34,7 +34,7 @@ sequenceDiagram
             Runner ->>+ SNS: Publish(TopicArn=SNS_TOPIC_TENANT_ARN,<br/>MessageAttributes{EventType, TenantID, Source, EventID, Subject})
             SNS -->>- Runner: MessageID
             Runner ->> OB: UPDATE outbox_events SET published_at = now()
-            Note over Runner: retry to OUTBOX_MAX_ATTEMPTS (5) with backoff, DLQ beyond (outbox_dead_letters_total)
+            Note over Runner: retry to OUTBOX_MAX_ATTEMPTS (5) with backoff, DLQ beyond (platform_dlq_messages_total{operation=outbox_publish})
         end
     end
 
@@ -56,15 +56,15 @@ sequenceDiagram
 
     SNS_M ->>+ Q1: filter EventType IN [DepartmentMembershipGranted,<br/>DepartmentMembershipLevelChanged, TenantRoleGranted, TenantRoleRevoked]
     Q1 -->>- C1: message
-    C1 ->> C1: processed_events(event_id, consumer='membership') dedup — MarkProcessed inside RunInTx after Keycloak reconcile
+    C1 ->> C1: inbox IsProcessed pre-check → Keycloak reconcile → inbox ProcessOnce claim (consumer='membership', no local write)
 
     SNS_T2 ->>+ Q2: filter EventType IN [TrialStarted]
     Q2 -->>- C2: message
-    C2 ->> C2: RunInTx { UPDATE tenant_realms.trial_ends_at, MarkProcessed(consumer='tenant') } — same tx
+    C2 ->> C2: inbox ProcessOnce { claim(consumer='tenant'), UPDATE tenant_realms.trial_ends_at } — one tx
 
     SNS_B ->>+ Q3: filter EventType IN [TenantReactivated]
     Q3 -->>- C3: message
-    C3 ->> C3: RunInTx { EnableRealm outside tx, then MarkProcessed(consumer='billing') } — Keycloak-effect-first
+    C3 ->> C3: IsProcessed pre-check → EnableRealm outside tx → inbox ProcessOnce { claim(consumer='billing'), UPDATE } — Keycloak-effect-first
 
-    Note over Q1,C3: Every queue runs the same pipeline before the handlers above (consumerOptions + inboundHandler):<br/>GlueDecodeCodec strips the Glue header → instrumentConsumer (platform_messages_*) →<br/>validateConsumed against eventschema.ConsumedByConsumer (per consumer — billing's TenantReactivated is Billing's)<br/>violation → consumed_schema_violations_total++ and an error, the handler is never called
-    Note over Q1,C3: A message that keeps failing: deliveries 1-4 → handler, 5th → dlqHandler<br/>(platform_dlq_messages_total++, returns an error so it is not deleted) → SQS RedrivePolicy moves it to -dlq
+    Note over Q1,C3: Every queue runs the same pipeline before the handlers above (sqspipeline.NewConsumer + Handler):<br/>library GlueDecodeCodec strips the Glue header (platform-events counts platform_messages_* by queue) →<br/>validateConsumed against eventschema.ConsumedByConsumer (per consumer — billing's TenantReactivated is Billing's)<br/>violation → consumed_schema_violations_total++ → straight to -dlq (reason schema_violation), handler never called
+    Note over Q1,C3: A message that keeps failing: deliveries 1-4 → handler, 5th → platform-events forwards it to -dlq<br/>(WithDLQForwarding, platform_dlq_messages_total++) before SQS's own RedrivePolicy would

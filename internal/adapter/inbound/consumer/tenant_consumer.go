@@ -16,36 +16,26 @@ import (
 // (the row already exists — created synchronously at RP-1 before O&M's
 // TrialStarted would even fire). RP never queries O&M for trial data.
 // This consumer's only side effect is a Postgres write, so the projection
-// update and the processed_events insert are committed in ONE transaction
-// via tx (§7.1, IDEMP-2) — matching the sibling iam-org-membership
-// consumer. Marking after a separate commit would let a crash in between
-// replay the update on redelivery.
+// update and the processed_events claim are committed in ONE transaction
+// through the platform-events inbox (§7.1, IDEMP-2) — matching the sibling
+// iam-org-membership consumer.
 type TenantConsumer struct {
 	realms port.TenantRealmRepository
-	dedup  port.ProcessedEventsStore
-	tx     port.TxRunner
+	inbox  port.Inbox
 	log    port.Logger
 }
 
 // NewTenantConsumer constructs a TenantConsumer for tenant-realm-q.
-func NewTenantConsumer(realms port.TenantRealmRepository, dedup port.ProcessedEventsStore, tx port.TxRunner, log port.Logger) *TenantConsumer {
-	return &TenantConsumer{realms: realms, dedup: dedup, tx: tx, log: log}
+func NewTenantConsumer(realms port.TenantRealmRepository, inbox port.Inbox, log port.Logger) *TenantConsumer {
+	return &TenantConsumer{realms: realms, inbox: inbox, log: log}
 }
 
 // Handle dispatches one tenant-realm-q message.
 func (c *TenantConsumer) Handle(ctx context.Context, env events.Envelope[json.RawMessage]) error {
 	if env.Type != domain.EventTrialStarted {
-		if err := ackUnknown(ctx, c.tx, c.dedup, c.log, domain.ConsumerTenant, env); err != nil {
+		if err := ackUnknown(ctx, c.inbox, c.log, domain.ConsumerTenant, env); err != nil {
 			return fmt.Errorf("tenant consumer: %w", err)
 		}
-		return nil
-	}
-
-	processed, err := skipDuplicate(ctx, c.dedup, domain.ConsumerTenant, env.ID)
-	if err != nil {
-		return fmt.Errorf("tenant consumer: check processed_events: %w", err)
-	}
-	if processed {
 		return nil
 	}
 
@@ -58,12 +48,12 @@ func (c *TenantConsumer) Handle(ctx context.Context, env events.Envelope[json.Ra
 		return fmt.Errorf("tenant consumer: parse trial_ends_at %q: %w", p.TrialEndsAt, err)
 	}
 
-	// One transaction for the read, the update, and the dedup mark: the
-	// repositories and MarkProcessed both join the tx bound into txCtx, so
-	// either the trial_ends_at write and the processed_events row both land
-	// or neither does.
+	// One transaction for the claim, the read and the update: the
+	// repositories join the inbox's tx bound into txCtx, so either the
+	// trial_ends_at write and the processed_events row both land or neither
+	// does.
 	gucCtx := withTenantGUC(ctx, p.TenantID)
-	return c.tx.RunInTx(gucCtx, func(txCtx context.Context) error {
+	err = processOnce(gucCtx, c.inbox, domain.ConsumerTenant, env, func(txCtx context.Context) error {
 		row, err := c.realms.FindByTenantID(txCtx, p.TenantID)
 		if err != nil {
 			return fmt.Errorf("tenant consumer: find tenant_realms row: %w", err)
@@ -72,9 +62,10 @@ func (c *TenantConsumer) Handle(ctx context.Context, env events.Envelope[json.Ra
 		if err := c.realms.Update(txCtx, row); err != nil {
 			return fmt.Errorf("tenant consumer: update trial_ends_at: %w", err)
 		}
-		if err := c.dedup.MarkProcessed(txCtx, domain.ConsumerTenant, env.ID); err != nil {
-			return fmt.Errorf("tenant consumer: mark processed: %w", err)
-		}
 		return nil
 	})
+	if err != nil {
+		return fmt.Errorf("tenant consumer: %w", err)
+	}
+	return nil
 }

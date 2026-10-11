@@ -76,25 +76,48 @@ type IdempotencyStore interface {
 	Begin(ctx context.Context, key string, tenantID uuid.UUID, operation string) (existing *domain.ProvisioningOperation, found bool, err error)
 	Complete(ctx context.Context, key string, result json.RawMessage) error
 	Fail(ctx context.Context, key string) error
-	// ExpireStaleInProgress transitions `in_progress` rows older than
-	// olderThan to `failed`, up to limit rows per call. This unblocks callers
-	// that received a 503 mid-operation and cannot retry because their key
-	// appears stuck in_progress (the operation's transaction rolled back but
-	// Fail was never reached). Returns the count of rows transitioned.
-	ExpireStaleInProgress(ctx context.Context, olderThan time.Duration, limit int) (int, error)
 }
 
-// ProcessedEventsStore implements the consumer dedup ledger (§4.5, §7).
-// The concrete implementation is InboxStoreAdapter, which routes to three
-// platform-events inbox.Store instances — one per inbound consumer. All
-// processed_events SQL is owned by inbox.Store; this port defines the
-// per-consumer lookup/mark/prune contract used by consumers and the
-// reconciler's processed-events-prune job.
-type ProcessedEventsStore interface {
+// Inbox is the exactly-once consumer port backing the processed_events
+// table (§4.5, §7, IDEMP-1..4), implemented over platform-events'
+// pkg/inbox (one inbox.Store per consumer name) — matching
+// iam-org-membership's port.Inbox.
+//
+// ProcessOnce claims (consumer, eventID) and runs fn in ONE transaction:
+// the claim (INSERT … ON CONFLICT DO NOTHING) is the first statement, so a
+// concurrent delivery of the same event blocks on the claim's row lock and
+// then sees it as a duplicate, instead of both deliveries applying the
+// projection twice. fn's ctx carries that transaction (and the tx-bound
+// event publisher), so every repository call inside fn joins it. If fn
+// returns an error nothing is recorded and the message is retried.
+// duplicate is true when the event was already processed; fn was not run.
+//
+// IsProcessed is the cheap pre-check a consumer runs before an external
+// side effect that must not repeat on a duplicate (a Keycloak call, which
+// by §9.1 never runs inside a database transaction).
+//
+// eventID must be a UUID (every platform-events envelope ID is).
+type Inbox interface {
 	IsProcessed(ctx context.Context, consumer domain.ProcessedEventsConsumer, eventID string) (bool, error)
-	MarkProcessed(ctx context.Context, consumer domain.ProcessedEventsConsumer, eventID string) error
-	// Prune deletes up to limit rows older than ttlDays across all consumers
-	// (PE-1 / IDEMP-4). Batched so a backlog larger than one tick converges
-	// over several ticks instead of one unbounded DELETE.
-	Prune(ctx context.Context, ttlDays, limit int) (int, error)
+	ProcessOnce(ctx context.Context, consumer domain.ProcessedEventsConsumer, eventID, eventType string, fn func(txCtx context.Context) error) (duplicate bool, err error)
+}
+
+// InboxPruner deletes one consumer's processed_events rows older than
+// retention, in batches of batch rows until none are left (PE-1).
+type InboxPruner interface {
+	Prune(ctx context.Context, consumer domain.ProcessedEventsConsumer, retention time.Duration, batch int) (int64, error)
+}
+
+// RetentionPruner deletes rows past their retention window from the
+// operational/audit tables no other job prunes (ledger-prune). Each method
+// deletes in batches of batch rows until none is left and returns the
+// total. Requires the BYPASSRLS pool (cross-tenant).
+type RetentionPruner interface {
+	// PruneProvisioningOperations deletes idempotency-ledger rows created
+	// before olderThan ago — far past any caller's retry window and the
+	// in_progress lease.
+	PruneProvisioningOperations(ctx context.Context, olderThan time.Duration, batch int) (int64, error)
+	// PruneRLSViolationLog deletes sampled RLS violation records older than
+	// olderThan (they are already counted into rls_violations_total).
+	PruneRLSViolationLog(ctx context.Context, olderThan time.Duration, batch int) (int64, error)
 }

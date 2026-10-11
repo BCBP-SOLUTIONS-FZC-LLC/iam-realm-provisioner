@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -585,6 +586,123 @@ func TestConvert_NoEventPublisherInContext_StillCommitsLocally(t *testing.T) {
 	row, err := realms.FindByTenantID(context.Background(), tenantID)
 	require.NoError(t, err)
 	assert.Equal(t, domain.RealmStrategyDedicated, row.Strategy)
+}
+
+// RP-3 conversion is O(users) Keycloak calls and can outrun the request
+// deadline. When the request is done first, the caller gets 409
+// operation_in_progress (its contract: retry with the same key) while the
+// conversion keeps running on a detached context instead of being cut off
+// half-way through the user migration; the retry then replays the result.
+func TestConvert_RequestDoneFirst_ReturnsInProgress_ConversionCompletes(t *testing.T) {
+	svc, kc, realms, idem, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	seedSharedRealm(realms, tenantID)
+	user := uuid.New()
+
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
+	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) { return nil, nil }
+	kc.ListUsersByTenantFn = func(ctx context.Context, realmName string, tid uuid.UUID) ([]uuid.UUID, error) {
+		return []uuid.UUID{user}, nil
+	}
+	started, release := make(chan struct{}), make(chan struct{})
+	kc.MigrateUserFn = func(ctx context.Context, sourceRealm, targetRealm string, uid uuid.UUID) (bool, error) {
+		close(started)
+		<-release
+		assert.NoError(t, ctx.Err(), "the migration must not run on the request's cancelled context")
+		return false, nil
+	}
+	kc.ForceLogoutRealmFn = func(ctx context.Context, realmName string) error { return nil }
+	kc.DeleteServiceAccountClientIfExistsFn = func(ctx context.Context, realmName, clientID string) error { return nil }
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	go func() { <-started; cancel() }()
+	_, err := svc.Convert(reqCtx, "conv-slow", tenantID, service.ConvertRequest{Plan: "pro"})
+	var de *domain.Error
+	require.ErrorAs(t, err, &de)
+	assert.Equal(t, domain.ErrOperationInProgress, de.Code)
+
+	close(release)
+	require.NoError(t, svc.Drain(context.Background()))
+	assert.Equal(t, domain.OpStatusSucceeded, idem.rows["conv-slow"].Status, "the detached conversion finished and recorded its outcome")
+
+	result, err := svc.Convert(context.Background(), "conv-slow", tenantID, service.ConvertRequest{Plan: "pro"})
+	require.NoError(t, err, "the retry replays the stored result")
+	assert.Equal(t, 1, result.UsersMigrated)
+}
+
+// A conversion longer than its own budget is cut off and recorded failed
+// (retryable), never left in_progress.
+func TestConvert_DetachedBudgetExceeded_FailsTheKey(t *testing.T) {
+	svc, kc, realms, idem, _ := newProvisioningTestService(t)
+	svc.WithConvertTimeout(50 * time.Millisecond)
+	tenantID := uuid.New()
+	seedSharedRealm(realms, tenantID)
+
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	kc.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error {
+		assert.NoError(t, ctx.Err(), "compensating teardown must not inherit the expired budget")
+		return nil
+	}
+
+	_, err := svc.Convert(context.Background(), "conv-budget", tenantID, service.ConvertRequest{Plan: "pro"})
+	require.Error(t, err)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["conv-budget"].Status)
+}
+
+// A panic inside the detached conversion goroutine must not crash the
+// process: it is recovered, the key is recorded failed (retryable) and the
+// caller gets an error.
+func TestConvert_DetachedPanic_RecoveredAndFailsTheKey(t *testing.T) {
+	svc, kc, realms, idem, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	seedSharedRealm(realms, tenantID)
+
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error {
+		panic("keycloak adapter bug")
+	}
+
+	_, err := svc.Convert(context.Background(), "conv-panic", tenantID, service.ConvertRequest{Plan: "pro"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "keycloak adapter bug")
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["conv-panic"].Status)
+	require.NoError(t, svc.Drain(context.Background()))
+}
+
+// Drain returns the shutdown context's error when a conversion is still
+// running at the deadline, rather than blocking past the grace period.
+func TestDrain_DeadlineBeforeConversionFinishes_ReturnsContextError(t *testing.T) {
+	svc, kc, realms, _, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	seedSharedRealm(realms, tenantID)
+
+	started, release := make(chan struct{}), make(chan struct{})
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error {
+		close(started)
+		<-release
+		return errors.New("stopped")
+	}
+	kc.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error { return nil }
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	go func() { <-started; cancel() }()
+	_, err := svc.Convert(reqCtx, "conv-drain", tenantID, service.ConvertRequest{Plan: "pro"})
+	require.Error(t, err)
+
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer drainCancel()
+	assert.ErrorIs(t, svc.Drain(drainCtx), context.DeadlineExceeded)
+
+	close(release)
+	require.NoError(t, svc.Drain(context.Background()))
+}
+
+// With nothing in flight Drain returns immediately.
+func TestDrain_NothingInFlight_ReturnsNil(t *testing.T) {
+	svc, _, _, _, _ := newProvisioningTestService(t)
+	require.NoError(t, svc.Drain(context.Background()))
 }
 
 // CRITICAL (RP-GAP-004, TS-RP-GAP-002): RP-3 must call TS-4 (RegisterPrincipal

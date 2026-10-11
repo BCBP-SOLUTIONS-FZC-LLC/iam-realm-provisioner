@@ -23,10 +23,39 @@ func clearPgEnv(t *testing.T) {
 	for _, k := range []string{
 		"DATABASE_URL", "PG_HOST", "PG_PORT", "PG_USER", "PG_PASSWORD", "PG_DBNAME", "PG_SSLMODE",
 		"PG_STATEMENT_TIMEOUT", "SYSTEM_DATABASE_URL", "MIGRATION_DATABASE_URL",
-		"PG_BOUNCER_MODE", "PG_MAX_CONNS", "PG_SLOW_QUERY_THRESHOLD",
+		"PG_BOUNCER_MODE", "PG_MAX_CONNS", "PG_MIN_CONNS", "PG_SLOW_QUERY_THRESHOLD",
 	} {
 		t.Setenv(k, "")
 	}
+}
+
+func TestDSNFromEnv_UsesDatabaseURLVerbatim(t *testing.T) {
+	clearPgEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://user:pass@host:5432/db?sslmode=disable")
+
+	got := DSNFromEnv()
+
+	assert.Equal(t, "postgres://user:pass@host:5432/db?sslmode=disable", got,
+		"DATABASE_URL must pass through unchanged, not get a statement_timeout option appended")
+}
+
+// PG_STATEMENT_TIMEOUT is never baked into the DSN: pgcommon applies
+// Config.StatementTimeout per transaction (SET LOCAL), which is safe behind
+// PgBouncer transaction pooling.
+func TestDSNFromEnv_BuildsFromDiscreteVarsWithoutStatementTimeout(t *testing.T) {
+	clearPgEnv(t)
+	t.Setenv("PG_HOST", "localhost")
+	t.Setenv("PG_PORT", "5544")
+	t.Setenv("PG_USER", "realm_provisioner_app")
+	t.Setenv("PG_PASSWORD", "secret")
+	t.Setenv("PG_DBNAME", "provisioner")
+	t.Setenv("PG_STATEMENT_TIMEOUT", "5s")
+
+	got := DSNFromEnv()
+
+	assert.Contains(t, got, "localhost")
+	assert.Contains(t, got, "provisioner")
+	assert.NotContains(t, got, "statement_timeout")
 }
 
 func TestSystemDSNFromEnv_PrefersSystemDatabaseURL(t *testing.T) {
@@ -37,11 +66,50 @@ func TestSystemDSNFromEnv_PrefersSystemDatabaseURL(t *testing.T) {
 	assert.Equal(t, "postgres://migrator@host/db", SystemDSNFromEnv())
 }
 
-func TestSystemDSNFromEnv_FallsBackToAppDSN(t *testing.T) {
+func TestSystemDSNFromEnv_FallsBackToDSNFromEnv(t *testing.T) {
 	clearPgEnv(t)
 	t.Setenv("DATABASE_URL", "postgres://app@host/db")
 
 	assert.Equal(t, "postgres://app@host/db", SystemDSNFromEnv())
+}
+
+func TestMigrationDSNFromEnv_PrefersMigrationDatabaseURL(t *testing.T) {
+	clearPgEnv(t)
+	t.Setenv("MIGRATION_DATABASE_URL", "postgres://migrator@host/db")
+	t.Setenv("DATABASE_URL", "postgres://app@host/db")
+
+	assert.Equal(t, "postgres://migrator@host/db", MigrationDSNFromEnv())
+}
+
+// Long DDL and the advisory-lock wait must never be cut short.
+func TestMigrationDSNFromEnv_NeverAppliesStatementTimeout(t *testing.T) {
+	clearPgEnv(t)
+	t.Setenv("MIGRATION_DATABASE_URL", "postgres://m:x@migrations.example:5432/db?sslmode=disable")
+	t.Setenv("PG_STATEMENT_TIMEOUT", "5s")
+	assert.Equal(t, "postgres://m:x@migrations.example:5432/db?sslmode=disable", MigrationDSNFromEnv())
+}
+
+// The system pool reports its platform_db_* series under its own pool
+// label, inherits the per-transaction statement timeout, and — PgBouncer
+// mode being forced — lets PgBouncer manage backends unless PG_MIN_CONNS is
+// set deliberately.
+func TestSystemPoolConfig_PoolNameStatementTimeoutAndMinConns(t *testing.T) {
+	clearPgEnv(t)
+	t.Setenv("PG_STATEMENT_TIMEOUT", "5s")
+	cfg := SystemPoolConfig("postgres://m@h/db", nil)
+	assert.Equal(t, SystemPoolName, cfg.PoolName)
+	assert.Equal(t, 5*time.Second, cfg.StatementTimeout)
+	assert.Zero(t, cfg.MinConns)
+
+	t.Setenv("PG_MIN_CONNS", "3")
+	assert.Equal(t, int32(3), SystemPoolConfig("postgres://m@h/db", nil).MinConns)
+}
+
+func TestMigrationDSNFromEnv_FallsBackToDSNFromEnv(t *testing.T) {
+	clearPgEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://app@host/db")
+
+	assert.Equal(t, "postgres://app@host/db", MigrationDSNFromEnv())
 }
 
 func TestSystemPoolConfig_ForcesPGBouncerMode(t *testing.T) {
@@ -57,16 +125,6 @@ func TestSystemPoolConfig_ForcesPGBouncerMode(t *testing.T) {
 	assert.Nil(t, cfg.Tracer, "Tracer is wired by the call site, not SystemPoolConfig")
 	assert.Nil(t, cfg.Logger, "nil log must leave Logger unset")
 	assert.Equal(t, int32(20), cfg.MaxConns, "sysPool inherits pool sizing from ConfigFromEnv")
-}
-
-func TestSystemPoolConfig_StatementTimeoutFromEnv(t *testing.T) {
-	clearPgEnv(t)
-	t.Setenv("PG_STATEMENT_TIMEOUT", "5s")
-	cfg := SystemPoolConfig("postgres://sys@host/db?sslmode=disable", nil)
-	// pgcommon v2 reads PG_STATEMENT_TIMEOUT into Config.StatementTimeout and
-	// applies it as SET LOCAL per transaction — not appended to the DSN.
-	assert.Equal(t, 5*time.Second, cfg.StatementTimeout)
-	assert.NotContains(t, cfg.DSN, "statement_timeout")
 }
 
 // noopPortLogger is a minimal port.Logger for exercising SystemPoolConfig's
@@ -111,13 +169,7 @@ func TestWrapConnErr_PgConnErrorPassesThroughUnchanged(t *testing.T) {
 }
 
 func TestWrapConnErr_AvailabilitySQLStateMapsToDBUnavailable(t *testing.T) {
-	for _, code := range []string{
-		"08006", // connection_failure (class 08)
-		"53300", // too_many_connections (class 53)
-		"57P01", // admin_shutdown (class 57, operator_intervention)
-		"57014", // query_canceled — statement_timeout or explicit cancel; MUST be 503
-		"58030", // io_error (class 58, system_error)
-	} {
+	for _, code := range []string{"08006", "53300", "57P01", "58030"} {
 		t.Run(code, func(t *testing.T) {
 			pgErr := &pgconn.PgError{Code: code}
 			got := wrapConnErr(pgErr)
@@ -125,6 +177,19 @@ func TestWrapConnErr_AvailabilitySQLStateMapsToDBUnavailable(t *testing.T) {
 			assert.True(t, errors.As(got, &de))
 			assert.Equal(t, domain.ErrDBUnavailable, de.Code)
 		})
+	}
+}
+
+// 57014 (query_canceled — statement_timeout fired) and 55P03
+// (lock_not_available — lock_timeout fired) are slow-query/contention
+// signals, not outages: request_timeout (503), never db_unavailable.
+func TestWrapConnErr_StatementOrLockTimeoutMapsToRequestTimeout(t *testing.T) {
+	for _, code := range []string{"57014", "55P03"} {
+		got := wrapConnErr(&pgconn.PgError{Code: code})
+		var de *domain.Error
+		require.True(t, errors.As(got, &de), code)
+		assert.Equal(t, domain.ErrRequestTimeout, de.Code, code)
+		assert.Equal(t, 503, de.Status())
 	}
 }
 
@@ -166,9 +231,11 @@ func TestWrapConnErr_UnrecognizedGenericErrorPassesThroughUnchanged(t *testing.T
 	assert.True(t, errors.Is(got, businessErr))
 }
 
-// pgcommon.IsPoolClosed covers puddle.ErrClosedPool and pgcommon's own
-// closed-pool sentinel. A closed pool is never a SQL-protocol response
-// but is unambiguously "the database is unavailable".
+// puddle.ErrClosedPool (surfaced by pgxpool.Pool.BeginTx/Acquire on a
+// closed pool) is the one non-PgError shape wrapConnErr does positively
+// recognize as a genuine connectivity failure — a closed pool is never a
+// SQL-protocol response, but is unambiguously "the database is
+// unavailable", not a caller's business error.
 func TestWrapConnErr_ClosedPoolMapsToDBUnavailable(t *testing.T) {
 	got := wrapConnErr(puddle.ErrClosedPool)
 

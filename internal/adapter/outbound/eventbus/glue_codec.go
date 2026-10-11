@@ -17,9 +17,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
 )
 
-// Compile-time assertion: GlueCodec implements events.Codec (Encode + Decode).
-var _ events.Codec = (*GlueCodec)(nil)
-
 const (
 	glueHeaderVersion byte = 0x03 // magic byte for the AWS Glue Schema Registry wire format
 	glueNoCompression byte = 0x00
@@ -82,10 +79,9 @@ func (g *GlueCodec) Encode(ctx context.Context, schemaName string, payload json.
 }
 
 // Decode strips the Glue wire header from encoded, returning the raw JSON
-// payload. Delegates to events.GlueDecodeCodec which additionally validates
-// the compression byte and that the remaining bytes are valid JSON.
-func (g *GlueCodec) Decode(ctx context.Context, schemaName string, encoded []byte) (json.RawMessage, error) {
-	return events.GlueDecodeCodec{}.Decode(ctx, schemaName, encoded)
+// payload.
+func (g *GlueCodec) Decode(_ context.Context, _ string, encoded []byte) (json.RawMessage, error) {
+	return stripGlueHeader(encoded)
 }
 
 func (g *GlueCodec) versionID(ctx context.Context, schemaName string) (string, error) {
@@ -178,4 +174,14 @@ func prependGlueHeader(schemaVersionID string, payload []byte) ([]byte, error) {
 	copy(out[2:18], id[:])
 	copy(out[glueHeaderSize:], payload)
 	return out, nil
+}
+
+func stripGlueHeader(encoded []byte) (json.RawMessage, error) {
+	if len(encoded) < glueHeaderSize {
+		return nil, fmt.Errorf("glue codec: encoded payload is %d bytes — shorter than the %d-byte Glue header", len(encoded), glueHeaderSize)
+	}
+	if encoded[0] != glueHeaderVersion {
+		return nil, fmt.Errorf("glue codec: unexpected header version byte 0x%02x — want 0x%02x", encoded[0], glueHeaderVersion)
+	}
+	return json.RawMessage(encoded[glueHeaderSize:]), nil
 }

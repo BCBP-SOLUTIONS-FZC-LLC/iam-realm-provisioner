@@ -25,24 +25,25 @@ type Context struct {
 	TenantRealms       port.TenantRealmRepository
 	Reconciliations    port.ReconciliationRepository
 	Idempotency        port.IdempotencyStore
-	ProcessedEvents    port.ProcessedEventsStore
+	ProcessedEvents    port.InboxPruner // platform-events inbox.Store per consumer
+	Retention          port.RetentionPruner
 	Keycloak           port.KeycloakAdmin
 	ObjectStore        port.ObjectStore
 	SubscriptionLapses port.SubscriptionLapseReader // O&M's I-16 GET /subscription-lapses (§16 RP-C3)
 
 	Logger port.SlogStyleLogger
 
-	BatchLimit                int
-	TrialGraceDays            int
-	CancelledGraceDays        int
-	RetentionDays             int
-	OutboxRetentionDays       int
-	ProcessedEventsTTLDays    int
-	MaxReconciliationAttempts int
-	// InProgressTTLHours is the age threshold (in hours) above which
-	// `in_progress` provisioning_operations rows are expired to `failed` by
-	// the idempotency-cleanup job. Defaults to 1 hour when 0.
-	InProgressTTLHours int
+	BatchLimit             int
+	TrialGraceDays         int
+	CancelledGraceDays     int
+	RetentionDays          int
+	OutboxRetentionDays    int
+	ProcessedEventsTTLDays int
+	// ProvisioningOperationsTTLDays / RLSViolationLogTTLDays are
+	// ledger-prune's retention windows.
+	ProvisioningOperationsTTLDays int
+	RLSViolationLogTTLDays        int
+	MaxReconciliationAttempts     int
 }
 
 // Result summarizes a reconciler run.

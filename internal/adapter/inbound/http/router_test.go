@@ -163,7 +163,7 @@ func TestDocsRoutes_ActiveOutsideProduction(t *testing.T) {
 func TestDocsRoutes_DisabledInProduction(t *testing.T) {
 	r := NewRouter(RouterConfig{
 		GinConfig: testGinConfig,
-		Docs:      DocsConfig{Environment: "production", Enabled: false},
+		Docs:      DocsConfig{Environment: "prod", Enabled: false},
 		Handlers:  newServiceDeps().handler(),
 	}).Handler()
 
@@ -176,7 +176,7 @@ func TestDocsRoutes_DisabledInProduction(t *testing.T) {
 func TestDocsRoutes_ProductionAuthToken(t *testing.T) {
 	r := NewRouter(RouterConfig{
 		GinConfig: testGinConfig,
-		Docs:      DocsConfig{Environment: "production", Enabled: true, AuthToken: "s3cr3t"},
+		Docs:      DocsConfig{Environment: "prod", Enabled: true, AuthToken: "s3cr3t"},
 		Handlers:  newServiceDeps().handler(),
 	}).Handler()
 
@@ -239,7 +239,7 @@ func TestDocsRoutes_SwaggerAssetRouting(t *testing.T) {
 func TestDocsRoutes_ProductionNoAuthToken_OpenAccess(t *testing.T) {
 	r := NewRouter(RouterConfig{
 		GinConfig: testGinConfig,
-		Docs:      DocsConfig{Environment: "production", Enabled: true, AuthToken: ""},
+		Docs:      DocsConfig{Environment: "prod", Enabled: true, AuthToken: ""},
 		Handlers:  newServiceDeps().handler(),
 	}).Handler()
 

@@ -2,7 +2,7 @@
 
 This document describes the internal structure, dependency rules, and runtime data flows of `iam-realm-provisioner`.
 
-`iam-realm-provisioner` is a **private Go service** (`github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.6) deployed as a containerised microservice (HPA 2–4 replicas), refining **IAM HLD v1.42 §5.2** (LLD v1.14, `docs/lld/iam-lld-realm-provisioner-service.md`; where LLD and HLD disagree, HLD is authoritative). It is the **single writer to the Keycloak Admin API** across the entire IAM subsystem (RP-INV-1, HLD §4.2/§5.2) and the system of record for the small amount of local state — realm identity, IdP config, reconciliation and idempotency ledgers — needed to make that writing safe, idempotent, and replayable. Org & Membership owns the application-side `tenants` row; this service owns Keycloak-side realm reality and its `tenant_realms` mirror (RP-D6) — neither writes the other's store. It ships as **two binaries from one image**: `cmd/server` (the mesh-only `/api/v1/internal` API, RP-1..RP-17, three inbound SQS consumers, and the transactional outbox runner) and `cmd/reconciler` (a single binary dispatched by `--job=<name>`, covering RP-C1..RP-C4 plus three operational jobs (`outbox-prune`, `processed-events-prune`, `idempotency-cleanup`), each its own Kubernetes CronJob). The service sits on **neither of the platform's two hot paths** (HLD §4.3) — work is bursty, coarse-grained tenant-lifecycle operations, where correctness, auditability, and idempotency matter more than latency.
+`iam-realm-provisioner` is a **private Go service** (`github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.9) deployed as a containerised microservice (HPA 2–4 replicas), refining **IAM HLD v1.42 §5.2** (LLD v1.21, `docs/lld/iam-lld-realm-provisioner-service.md`; where LLD and HLD disagree, HLD is authoritative). It is the **single writer to the Keycloak Admin API** across the entire IAM subsystem (RP-INV-1, HLD §4.2/§5.2) and the system of record for the small amount of local state — realm identity, IdP config, reconciliation and idempotency ledgers — needed to make that writing safe, idempotent, and replayable. Org & Membership owns the application-side `tenants` row; this service owns Keycloak-side realm reality and its `tenant_realms` mirror (RP-D6) — neither writes the other's store. It ships as **two binaries from one image**: `cmd/server` (the mesh-only `/api/v1/internal` API, RP-1..RP-17, three inbound SQS consumers, and the transactional outbox runner) and `cmd/reconciler` (a single binary dispatched by `--job=<name>`, covering RP-C1..RP-C4 plus two operational prune jobs, each its own Kubernetes CronJob). The service sits on **neither of the platform's two hot paths** (HLD §4.3) — work is bursty, coarse-grained tenant-lifecycle operations, where correctness, auditability, and idempotency matter more than latency.
 
 **Does not own:** tenants-as-business-entities, memberships, roles, invitations (Org & Membership); JWT issuance / login (Keycloak itself); delegation, tender ACL, group-mapping, or the plan/department catalogues (sibling services extracted from Core); any per-user table (there is none — Keycloak is the sole store of user identity and credentials); secret material in Postgres (IdP secrets live only in OpenBao).
 
@@ -17,8 +17,8 @@ The service is organised in concentric Clean Architecture layers. Inner layers h
 ```mermaid
 graph TD
     subgraph cmd["Composition Roots  —  cmd/"]
-        main["server/main.go\nwire pool + sysPool (GUCProvider = GUCSetFromContext, RLS-6)\nmigrations · outbox runner · 3 SQS consumers\ngraceful shutdown: SIGTERM → gincommon.Shutdown, terminationGracePeriodSeconds=30"]
-        reconciler["reconciler/main.go\nsingle binary, --job=<name> dispatch\n7 CronJobs: trial-expiry · trial-hard-delete\nsubscription-lapse · realm-config-reconcile\noutbox-prune · processed-events-prune · idempotency-cleanup"]
+        main["server/main.go\nwire pool + sysPool (GUCProvider = GUCSetFromContext, RLS-6)\nmigrations · outbox runner · 3 SQS consumers\ngraceful shutdown: SIGTERM → parallel drain (HTTP · consumers · in-flight RP-3), then outbox, then pools; terminationGracePeriodSeconds=75"]
+        reconciler["reconciler/main.go\nsingle binary, --job=<name> dispatch\n7 CronJobs: ledger-prune · trial-expiry · trial-hard-delete\nsubscription-lapse · realm-config-reconcile\noutbox-prune · processed-events-prune"]
     end
 
     subgraph adapters_in["Inbound Adapters  —  internal/adapter/inbound/"]
@@ -34,7 +34,7 @@ graph TD
         tokenservice["tokenservice/\nHTTPClient — TS-1/TS-3/TS-4 platform-automation\ncredential handshake (§2.5, RP-17/RP-18)"]
         s3["s3/\nObjectStore — realm export (RP-EVT-4)"]
         eventbus["eventbus/\nValidatingCodec (enqueue) · GlueCodec (SNS)\nOutbox Runner · single topic iam.tenant.events"]
-        metrics["metrics/\niam_realm_provisioner_* (Tier 3, authoritative) +\nplatform_* (Tier 1, Status: Proposed) instruments"]
+        metrics["metrics/\niam_realm_provisioner_* (Tier 3) +\nplatform_dependency_request_seconds (Tier 1, keycloak) instruments"]
     end
 
     subgraph eventschema_grp["Embedded Schemas  —  internal/eventschema/"]
@@ -43,7 +43,7 @@ graph TD
 
     subgraph core["Core  —  internal/core/"]
         service["service/\nProvisioningService · LifecycleService\nIdpService · RealmConfigService · MfaService"]
-        port["port/\nKeycloakAdmin · TenantRealmRepository · IdpConfigRepository\nIdpValidationRepository · ReconciliationRepository\nIdempotencyStore · ProcessedEventsStore · EventPublisher · TxRunner\nOpenBaoClient · OrgMembershipClient · ObjectStore\nSubscriptionLapseReader (RP-C3) · TokenServiceClient (§2.5)"]
+        port["port/\nKeycloakAdmin · TenantRealmRepository · IdpConfigRepository\nIdpValidationRepository · ReconciliationRepository\nIdempotencyStore · Inbox · InboxPruner · EventPublisher · TxRunner\nOpenBaoClient · OrgMembershipClient · ObjectStore\nSubscriptionLapseReader (RP-C3) · TokenServiceClient (§2.5)"]
         domain["domain/\nTenantRealm · IdpConfig · IdpConfigValidation\nProvisioningOperation · RealmConfigReconciliation\nErrorCode catalogue · 9 event payload types"]
     end
 
@@ -213,7 +213,7 @@ sequenceDiagram
     SG ->>+ GW: POST /api/v1/internal/tenants/provision-trial<br/>Idempotency-Key: <key>, x-user-id, x-tenant-id, x-tenant-roles
     GW ->>+ CAP: forward (mTLS + NetworkPolicy is the primary boundary)
     CAP ->>+ OBS: MaxBytesReader(1<<20) wraps request body
-    Note over OBS: gincommon.TimeoutMiddleware(30s) then<br/>PanicRecovery → RequestID → Tracing →<br/>CorrelationHeaders → Metrics → Logging
+    Note over OBS: PanicRecovery → RequestID → Tracing →<br/>CorrelationHeaders → Metrics → Logging →<br/>TimeoutMiddleware(30s) innermost (Config.RequestTimeout)
 
     OBS ->>+ PROT: c.Next()
     Note over PROT: gincommon.ProtectedMiddlewares —<br/>RequireAuth (401 missing_identity_headers if absent)<br/>ContextMiddleware (build gincommon RequestContext)
@@ -266,8 +266,9 @@ sequenceDiagram
 
 ```
 body-size cap (1 MB)
-  TimeoutMiddleware(30s)
-    ObservabilityMiddlewares (PanicRecovery · RequestID · Tracing · CorrelationHeaders · Metrics · Logging)
+    ObservabilityMiddlewares (PanicRecovery · RequestID · Tracing · CorrelationHeaders · Metrics · Logging
+                              · TimeoutMiddleware(30s) innermost, via gincommon.Config.RequestTimeout —
+                              so metrics/logs/spans record the same 503 the client gets)
       ProtectedMiddlewares (RequireAuth · ContextMiddleware)
         GUCBridgeMiddleware       — binds pgcommon.WithGUCSet(ctx), RLS-6
           RequireJSONContentType  — 415 on non-JSON body
@@ -309,11 +310,11 @@ sequenceDiagram
     alt key already succeeded
         IDEM -->> SVC: existing row, status=succeeded
         SVC -->> H: replay stored result (no Keycloak call, no tx — IDEMP-3)
-    else key in_progress or failed
-        IDEM -->> SVC: existing row, status != succeeded
+    else key in_progress, within IDEMPOTENCY_IN_PROGRESS_LEASE
+        IDEM -->> SVC: existing row, status=in_progress
         SVC -->> H: 409 operation_in_progress
-    else new key
-        IDEM -->>- SVC: not found — proceed, row now in_progress
+    else new, failed, or lease-expired key
+        IDEM -->>- SVC: (re)claimed — proceed, row now in_progress
 
         rect rgb(255, 245, 230)
         Note over SVC,KC: Phase 1 — Keycloak effect (no Postgres transaction open)
@@ -351,10 +352,10 @@ sequenceDiagram
     SNS -->>- Runner: MessageID
     Runner ->> OB: UPDATE outbox_events SET published_at = now()
 
-    Note over SVC,DB: Crash recovery (CONS-2): if the process dies after the Keycloak<br/>effect but before RunInTx commits, the ledger row is stuck in_progress<br/>with a real Keycloak user already created. A caller retry with the SAME<br/>Idempotency-Key re-enters ProvisionTrial — CreateTrialUser reconciles to a<br/>no-op (user already exists), then the local commit lands. A committed<br/>local row therefore ALWAYS reflects a real Keycloak state — never the<br/>reverse, and a Keycloak failure at any point leaves NO local trace.
+    Note over SVC,DB: Crash recovery (CONS-2): if the process dies after the Keycloak<br/>effect but before RunInTx commits, the ledger row is left in_progress<br/>with a real Keycloak user already created. Once IDEMPOTENCY_IN_PROGRESS_LEASE<br/>(15m) passes, a caller retry with the SAME Idempotency-Key reclaims it and re-enters ProvisionTrial — CreateTrialUser reconciles to a<br/>no-op (user already exists), then the local commit lands. A committed<br/>local row therefore ALWAYS reflects a real Keycloak state — never the<br/>reverse, and a Keycloak failure at any point leaves NO local trace.
 ```
 
-`EventPublisher.Enqueue(ctx, Event)` inserts into `outbox_events` inside the caller's transaction — every local state change and its event share one `RunInTx`. The publisher reads the open `pgx.Tx` from ctx (`postgres.TxFromContext`); callers never pass a tx. Every mutating entry point starts with `idempotency.Begin` and every exit path calls `Complete` or `Fail` — no row is left `in_progress` after a definite outcome (IDEMP-1). The outbox runner polls every `OUTBOX_POLL_INTERVAL` (default 500 ms) and publishes to SNS; a successful publish marks `published_at`, a failure retries up to `OUTBOX_MAX_ATTEMPTS` (5) before `outbox_dead_letters`.
+`EventPublisher.Enqueue(ctx, Event)` inserts into `outbox_events` inside the caller's transaction — every local state change and its event share one `RunInTx`. The publisher reads the open `pgx.Tx` from ctx (`postgres.TxFromContext`); callers never pass a tx. Every mutating entry point starts with `idempotency.Begin` and every exit path calls `Complete` or `Fail` — no row is left `in_progress` after a definite outcome (IDEMP-1); `Complete`/`Fail` run on a context detached from the request, so even a timed-out or disconnected request records its outcome. The outbox runner polls every `OUTBOX_POLL_INTERVAL` (default 500 ms) and publishes to SNS; a successful publish marks `published_at`, a failure retries up to `OUTBOX_MAX_ATTEMPTS` (5), then the row moves to platform-events' `outbox_dead_letters` table, counted in `platform_dlq_messages_total{operation="outbox_publish",reason="max_attempts"}`.
 
 ---
 
@@ -381,7 +382,7 @@ sequenceDiagram
 
     SG ->>+ RP: POST /api/v1/internal/tenants/provision-trial<br/>{tenant_id, slug, admin_email, admin_name, hashed_password_seed} + Idempotency-Key
 
-    RP ->> RP: idempotency.Begin(key, tenant_id, OpProvisionTrial)<br/>found+succeeded → replay, found+other → 409 operation_in_progress
+    RP ->> RP: idempotency.Begin(key, tenant_id, OpProvisionTrial)<br/>found+succeeded → replay, in_progress within the lease → 409 operation_in_progress,<br/>new/failed/lease-expired → claimed, proceed
 
     RP ->> KC: create user in 'trial' realm<br/>(email_verified=false, attribute tenant_id=<uuid>, sub preserved)
     alt Keycloak create fails
@@ -476,12 +477,12 @@ flowchart TD
         f1["Every mutating RP-1..RP-6/RP-10/RP-12/RP-14 call starts\nwith idempotency.Begin(key, tenantID, operation)"]
         f2{{"provisioning_operations row\nfound for this key?"}}
         f3["status=succeeded → replay stored result JSON,\nno Keycloak call, no transaction (IDEMP-3)"]
-        f4["status=in_progress or failed →\n409 operation_in_progress (retry with same key)"]
-        f5["not found → row inserted in_progress,\nrequest proceeds Keycloak-effect-first (write-flow.mmd)"]
+        f4["status=in_progress, within the lease →\n409 operation_in_progress (retry with same key)"]
+        f5["not found, failed, or in_progress past\nIDEMPOTENCY_IN_PROGRESS_LEASE (15m) → row (re)claimed\nin_progress, request proceeds Keycloak-effect-first (write-flow.mmd)"]
         f1 --> f2
         f2 -- yes, succeeded --> f3
-        f2 -- yes, other --> f4
-        f2 -- no --> f5
+        f2 -- yes, in_progress --> f4
+        f2 -- no / reclaimable --> f5
     end
 
     subgraph failure["Cache failure mode (§6.4)"]
@@ -504,7 +505,7 @@ The `keycloak` adapter (`internal/adapter/outbound/keycloak/admin_token.go`) wra
 
 ## Data model overview
 
-Database `provisioner` on shared RDS PostgreSQL (Multi-AZ, PgBouncer transaction pooling). **10 tables**: six tenant-scoped with RLS (`FORCE ROW LEVEL SECURITY` + `REVOKE ALL FROM PUBLIC` + `tenant_isolation` policy on `app.tenant_id`) — `tenant_realms`, `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`, `pending_audit_entries` (durable `TenantIdpConfigChanged` → Audit Log AL-5 hand-off, drained by a `cmd/server` goroutine); plus three RLS-exempt operational tables — `processed_events` (dedup ledger, SQL owned by `platform-events inbox.Store` via `InboxStoreAdapter`), `outbox_events` (schema owned by `platform-events` via `outbox.ApplySchema`), and `exporter_watermarks` (the `RLSViolationCounts` exporter's persisted high-water mark, §11.2). `rls_violation_log` is a sampled (1%) audit trail written by `log_rls_violation()`; RLS is disabled on it so logging cannot recurse.
+Database `provisioner` on shared RDS PostgreSQL (Multi-AZ, PgBouncer transaction pooling). **10 tables**: six tenant-scoped with RLS (`FORCE ROW LEVEL SECURITY` + `REVOKE ALL FROM PUBLIC` + `tenant_isolation` policy on `app.tenant_id`) — `tenant_realms`, `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`, `pending_audit_entries` (durable `TenantIdpConfigChanged` → Audit Log AL-5 hand-off, drained by a `cmd/server` goroutine); plus three RLS-exempt operational tables — `processed_events` and `outbox_events` (schema owned by `platform-events` via `outbox.ApplySchema`), and `exporter_watermarks` (the `RLSViolationCounts` exporter's persisted high-water mark, §11.2). `rls_violation_log` is a sampled (1%) audit trail written by `log_rls_violation()`; RLS is disabled on it so logging cannot recurse.
 
 `RealmConfigReconciliation` carries RP-INV-6's durability guarantee: a `pending` row is an observable Keycloak divergence, converged by RP-C4, never a silent miss.
 
@@ -557,7 +558,7 @@ sequenceDiagram
             Runner ->>+ SNS: Publish(TopicArn=SNS_TOPIC_TENANT_ARN,<br/>MessageAttributes{EventType, TenantID, Source, EventID, Subject})
             SNS -->>- Runner: MessageID
             Runner ->> OB: UPDATE outbox_events SET published_at = now()
-            Note over Runner: retry to OUTBOX_MAX_ATTEMPTS (5) with backoff, DLQ beyond (outbox_dead_letters_total)
+            Note over Runner: retry to OUTBOX_MAX_ATTEMPTS (5) with backoff, DLQ beyond (platform_dlq_messages_total{operation=outbox_publish})
         end
     end
 
@@ -579,18 +580,18 @@ sequenceDiagram
 
     SNS_M ->>+ Q1: filter EventType IN [DepartmentMembershipGranted,<br/>DepartmentMembershipLevelChanged, TenantRoleGranted, TenantRoleRevoked]
     Q1 -->>- C1: message
-    C1 ->> C1: processed_events(event_id, consumer='membership') dedup — MarkProcessed inside RunInTx after Keycloak reconcile
+    C1 ->> C1: inbox IsProcessed pre-check → Keycloak reconcile → inbox ProcessOnce claim (consumer='membership', no local write)
 
     SNS_T2 ->>+ Q2: filter EventType IN [TrialStarted]
     Q2 -->>- C2: message
-    C2 ->> C2: RunInTx { UPDATE tenant_realms.trial_ends_at, MarkProcessed(consumer='tenant') } — same tx
+    C2 ->> C2: inbox ProcessOnce { claim(consumer='tenant'), UPDATE tenant_realms.trial_ends_at } — one tx
 
     SNS_B ->>+ Q3: filter EventType IN [TenantReactivated]
     Q3 -->>- C3: message
-    C3 ->> C3: RunInTx { EnableRealm outside tx, then MarkProcessed(consumer='billing') } — Keycloak-effect-first
+    C3 ->> C3: IsProcessed pre-check → EnableRealm outside tx → inbox ProcessOnce { claim(consumer='billing'), UPDATE } — Keycloak-effect-first
 
-    Note over Q1,C3: Every queue runs the same pipeline before the handlers above (consumerOptions + inboundHandler):<br/>GlueDecodeCodec strips the Glue header → instrumentConsumer (platform_messages_*) →<br/>validateConsumed against eventschema.ConsumedByConsumer (per consumer — billing's TenantReactivated is Billing's)<br/>violation → consumed_schema_violations_total++ and an error, the handler is never called
-    Note over Q1,C3: A message that keeps failing: deliveries 1-4 → handler, 5th → dlqHandler<br/>(platform_dlq_messages_total++, returns an error so it is not deleted) → SQS RedrivePolicy moves it to -dlq
+    Note over Q1,C3: Every queue runs the same pipeline before the handlers above (sqspipeline.NewConsumer + Handler):<br/>library GlueDecodeCodec strips the Glue header (platform-events counts platform_messages_* by queue) →<br/>validateConsumed against eventschema.ConsumedByConsumer (per consumer — billing's TenantReactivated is Billing's)<br/>violation → consumed_schema_violations_total++ → straight to -dlq (reason schema_violation), handler never called
+    Note over Q1,C3: A message that keeps failing: deliveries 1-4 → handler, 5th → platform-events forwards it to -dlq<br/>(WithDLQForwarding, platform_dlq_messages_total++) before SQS's own RedrivePolicy would
 ```
 
 **Published: `iam.tenant.events`, 9 event types** — `TrialTenantProvisioned`, `TenantRealmReady`, `TenantConverted`, `DirectPaidSignup`, `TrialExpired`, `TrialReactivated`, `TenantSuspended`, `TenantOffboarded`, `TenantReactivated{source=operator}`. O&M produces `TenantCreated`/`TrialStarted` on the *same* topic (co-producer, disjoint schema names, RP-D5). `TenantOffboarded` is emitted **only after** the S3 export has succeeded and the realm has been deleted (`export_s3_key` always references a durable object, RP-EVT-4); O&M consumes it for its own GDPR wipe and this service does not re-emit it. The envelope carries `{id (UUID v7), source=iam-realm-provisioner, tenant_id, trace_id, specversion, time, subject, actor, dataschema, data}` — `tenant_id` lives on the envelope, never inside `data`.
@@ -603,9 +604,9 @@ sequenceDiagram
 | `tenant-realm-q` | `iam.tenant.events` | `TrialStarted` | Record local `trial_ends_at` (RP-4) — this service never queries O&M for expired trials, it's push-only |
 | `billing-realm-q` | `billing.events` | `TenantReactivated` (`source=billing`) | Re-enable a suspended dedicated realm (no-op if not suspended) |
 
-Each queue's handler runs inside `inboundHandler` (`cmd/server/inbound_schema.go`): `platform_messages_*` counters → **consumed-schema validation** → the consumer's `Handle`. The Glue-decoded payload is validated against this service's own extracted consumed-message schema (`eventschema.ConsumedByConsumer`, keyed per consumer — billing's `TenantReactivated` is Billing's, never this service's own produced one). No Glue call; unknown types pass through to `ackUnknown`. A violation never reaches the handler or `processed_events`; it is returned as an error, so SQS retries it until the queue's RedrivePolicy moves it to `-dlq` (arch-lint's events invariant keeps DLQ handling inside platform-events), and it pages via `iam_realm_provisioner_consumed_schema_violations_total`.
+Each queue's consumer and handler are built by `internal/adapter/inbound/sqspipeline` from platform-events (`eventcfg.LoadSQS`, the library's `GlueDecodeCodec`, `WithDLQForwarding` over `NewSQSDLQPublisherWithClient`; `RequireDLQ` fails startup for a queue with no RedrivePolicy): `platform_messages_*` counters → **straight-to-DLQ route** → a consumer span → **consumed-schema validation** → the consumer's `Handle`, which dedups through platform-events' `pkg/inbox` (`InboxRepository`, claim + projection in one transaction). The Glue-decoded payload is validated against this service's own extracted consumed-message schema (`eventschema.ConsumedByConsumer`, keyed per consumer — billing's `TenantReactivated` is Billing's, never this service's own produced one). No Glue call; unknown types pass through to `ackUnknown`. A violation never reaches the handler or `processed_events`; it is sent straight to `-dlq` on its first delivery through the library's DLQ publisher (original body and attributes, reason `schema_violation`), and it pages via `iam_realm_provisioner_consumed_schema_violations_total`. A message whose handler keeps failing is forwarded to `-dlq` by platform-events on its 5th delivery.
 
-Where the dedup mark is written follows what the handler touches: `TenantConsumer` and `BillingConsumer` write to Postgres, so their projection update and `processed_events` insert commit in **one** `RunInTx` — a failure on either side rolls both back so redelivery retries the whole handler (`BillingConsumer`'s Keycloak `EnableRealm` call itself stays outside that transaction, Keycloak-effect-first). `MembershipConsumer` writes nothing locally; it still marks processed inside `RunInTx` after success, matching `iam-org-membership`. Unknown event types are silently ack'd, counted, and recorded in `processed_events` so a producer adding a type cannot storm the queue. This service **never self-consumes** the nine events it produces, and Billing-produced `TenantReactivated{source=billing}` arrives on a **different** topic than the operator-produced `TenantReactivated{source=operator}` this service itself emits (RP-D13) — the two are never confused. The domain migration `ALTER`s `outbox_events.payload` from JSONB to `text` (a PgBouncer simple-query bytea-hex workaround) and adds a normalize trigger, so `cmd/server/main.go` runs `outbox.ApplySchema` **before** the domain migration (MIG-2, inverted vs. some siblings) — `outbox_events` must already exist for the `ALTER` to apply. After the domain migration, `inbox.ApplySchema` (platform-events v2.1.0) runs `CREATE TABLE IF NOT EXISTS processed_events` and records its version in the `inbox_migrations` tracking table — idempotent on existing deployments where the domain migration already created the table.
+Dedup is platform-events' `pkg/inbox` (`InboxRepository`, one `inbox.Store` per consumer): `ProcessOnce` claims `(event_id, consumer)` as the first statement of the transaction that also runs the handler's Postgres write, so a concurrent redelivery blocks on the claim and then sees a duplicate. `TenantConsumer` claims and writes in one `ProcessOnce`; `BillingConsumer` pre-checks `IsProcessed`, calls Keycloak `EnableRealm` outside any transaction (Keycloak-effect-first), then claims and writes; `MembershipConsumer` writes nothing locally — it pre-checks, reconciles in Keycloak, then claims, matching `iam-org-membership`. Unknown event types are silently ack'd, counted, and recorded in `processed_events` so a producer adding a type cannot storm the queue. This service **never self-consumes** the nine events it produces, and Billing-produced `TenantReactivated{source=billing}` arrives on a **different** topic than the operator-produced `TenantReactivated{source=operator}` this service itself emits (RP-D13) — the two are never confused. The domain migration `ALTER`s `outbox_events.payload` from JSONB to `text` (a PgBouncer simple-query bytea-hex workaround) and adds a normalize trigger, so `postgres.MigrateSchema` (run by the migrate hook Job, or at server startup when `RUN_MIGRATIONS` is not `false`) runs `outbox.ApplySchema` **before** the domain migration (MIG-2, inverted vs. some siblings) — `outbox_events` must already exist for the `ALTER` to apply.
 
 `cmd/server/main.go` starts the outbox runner (after `OUTBOX_STARTUP_JITTER` seconds of random delay, to avoid every replica's runner waking in lockstep) and all three SQS consumers together at the end of composition-root wiring. An unset consumer queue URL disables **that** consumer with a `WARN` log rather than failing startup — a partially-configured deployment degrades one inbound path, it doesn't crash the process.
 
@@ -615,7 +616,7 @@ Where the dedup mark is written follows what the handler touches: `TenantConsume
 
 Two observability concerns run per request: Prometheus metrics (synchronous, in-process) and OpenTelemetry spans (async, OTLP export). Structured logs are written after each response. This service has no user-facing latency hot path, so SLOs target **operation success and freshness**, not p99 request latency — availability target **99.9%** for the `/internal` provisioning API.
 
-`gincommon.ObservabilityMiddlewares` is invoked once in `cmd/server/main.go` **before** any collector registration, so business / events / pgcommon metrics land on the same `gincommon.MetricsRegisterer()` as HTTP `http_*`, with matching `{service, version}` const labels. One `/metrics` scrape (on the dedicated `METRICS_PORT`, never sharing a listener with the API surface) serves HTTP + business + outbox + pg collectors together. Both binaries call `gincommon.InitTracingFromEnv()` unconditionally so in-process spans get valid trace IDs even without a collector.
+`gincommon.ObservabilityMiddlewares` is invoked once in `cmd/server/main.go` **before** any collector registration, so business / events / pgcommon metrics land on the same `gincommon.MetricsRegisterer()` as HTTP `platform_http_*`, with matching `{domain, service, environment}` const labels (`Config.Domain="iam"`, `Environment=APP_ENV`; `events.InitMetrics`/`pgmetrics.InitWithIdentity` reuse gincommon's identity, pgmetrics before `NewPool`). One `/metrics` scrape (`gincommon.MetricsHandler()`, on the dedicated `METRICS_PORT`, never sharing a listener with the API surface) serves HTTP + business + outbox + pg collectors together. Both binaries call `gincommon.InitTracingWithConfig()` (same identity as the metrics) unconditionally so in-process spans get valid trace IDs even without a collector. Reconciler CronJobs have no `/metrics` listener: each run pushes its metrics to the Pushgateway at `PROMETHEUS_PUSHGATEWAY_URL`, grouped by `cronjob`.
 
 > Source: [`docs/architecture/mermaid/observability-stack.mmd`](docs/architecture/mermaid/observability-stack.mmd)
 
@@ -632,19 +633,22 @@ graph LR
     end
 
     subgraph gincommon_only["Single wiring point — no service builds its own logger/registry/tracer"]
-        gc1["platform-gincommon v1.3.0\nZap logging · Prometheus registry · OTel tracer provider\nall constructed ONCE via gincommon.Config in cmd/server/main.go\nand cmd/reconciler/main.go — every adapter/service receives\nthe already-built Logger/Registerer, never builds its own"]
+        gc1["platform-gincommon v1.6.0\nZap logging · Prometheus registry · OTel tracer provider\nall constructed ONCE via gincommon.Config in cmd/server/main.go\nand cmd/reconciler/main.go — every adapter/service receives\nthe already-built Logger/Registerer, never builds its own"]
     end
 
     subgraph prom["Prometheus  →  /metrics on dedicated METRICS_PORT (never shares a listener)"]
-        p1["http_requests_total{method,route,status_class}\nhttp_request_duration_seconds · http_active_requests\n(platform-gincommon, free)"]
-        p2["events_* / outbox_* / sqs_*\n(platform-events, incl. outbox_dead_letters_total)"]
-        p3["iam_realm_provisioner_* Tier 3 (service-specific) instruments —\nAUTHORITATIVE for every alert/SLO\n(internal/adapter/outbound/metrics/metrics.go), §25 frozen prefix:\nprovision_total{kind,result} · users_migrated_total\nrealm_active_gauge{strategy} · keycloak_call_duration_seconds{op}\nkeycloak_call_failures_total{op} · admin_token_refresh_total{trigger}\nidp_validation_total{outcome} · mfa_role_sync_total{action}\nrealm_config_pending_gauge · trial_expiry_processed/deferred_total\nlapse_processed_total{transition} · realm_export_total{result}\nuser_delete_total{result} · session_revoke_total{result}\nmfa_reset_total{result} · template_drift{realm_version}\nrls_violations_total{violation_type} · unknown_event_acknowledged_total{topic=source topic,event_type}\nconsumed_schema_violations_total{consumer,event_type} · processed_events_duplicates_total{consumer}"]
-        p4["platform_* Tier 1 (cross-domain) candidates — Status: Proposed,\nshadow-emitted only, NOT wired into any alert/SLO pending\nPlatform Observability Registry ratification (rules 11/12):\nconst labels: domain=iam, service=realm-provisioner, environment\nplatform_dependency_request_seconds{dependency,operation,outcome}\nplatform_duplicate_messages_total{consumer}\nplatform_rls_violations_total{violation_type}\nplatform_messages_received/processed/failed_total{consumer}\nplatform_dlq_messages_total{consumer}\nsee internal/adapter/outbound/metrics/registry.go's PlatformRegistry"]
+        p1["platform_http_requests_total{method,route,status_class}\nplatform_http_request_duration_seconds · platform_http_active_requests\n(platform-gincommon, free; all series {domain,service,environment})"]
+        p2["platform_messages_* / platform_outbox_* / platform_dlq_messages_total\nplatform_dependency_request_seconds{sns,sqs,codec}\n(platform-events) · platform_db_* (platform-pgcommon)"]
+        p3["iam_realm_provisioner_* Tier 3 (service-specific) instruments —\nsource of every business alert/SLO\n(internal/adapter/outbound/metrics/metrics.go), §25 frozen prefix:\nprovision_total{kind,result} · users_migrated_total\nrealm_active_gauge{strategy} · keycloak_call_duration_seconds{op}\nkeycloak_call_failures_total{op} · admin_token_refresh_total{trigger}\nidp_validation_total{result} · mfa_role_sync_total{action}\nrealm_config_pending_gauge · trial_expiry_processed/deferred_total\nlapse_processed_total{transition} · realm_export_total{result}\nuser_delete_total{result} · session_revoke_total{result}\nmfa_reset_total{result} · template_drift{realm_version}\nrls_violations_total{violation_type} · unknown_event_acknowledged_total{topic=source topic,event_type}\nconsumed_schema_violations_total{consumer,event_type} · processed_events_duplicates_total{consumer}"]
+        p4["platform_dependency_request_seconds{dependency=keycloak,operation,outcome}
+Tier 1 (registry status: proposed) — recorded by this service on the
+same collector platform-events uses; alerts on proposed metrics carry
+metric_status: proposed. Every series: {domain=iam, service=iam-realm-provisioner, environment}"]
     end
 
     subgraph otel["OpenTelemetry Traces"]
-        ot1["gincommon.InitTracingFromEnv() — tracer provider + W3C\npropagator, always installed in BOTH cmd/server and\ncmd/reconciler so in-process spans get valid IDs even\nwithout OTEL_EXPORTER_OTLP_ENDPOINT (export is a no-op)"]
-        ot2["pgcommon.Config.Tracer (pgadapter.NewOTelTracer)\nadds a db.query span per query on both pools"]
+        ot1["gincommon.InitTracingWithConfig() — tracer provider + W3C\npropagator with the SAME identity as metrics, installed in\nBOTH cmd/server and cmd/reconciler so in-process spans get\nvalid IDs even without a collector (OTEL_EXPORTER_OTLP_ENDPOINT=none disables export)"]
+        ot2["pgcommon.Config.Tracer (gincommon.NewSpanTracer)\nadds a db.query span per query on both pools"]
         ot3["Every outbound HTTP call (O&M, OpenBao, Keycloak via\ngocloak's resty client) built on adapter/outbound/httpx —\ninjects traceparent, spans named per-operation\n(keycloak.create_realm, keycloak.migrate_user, etc.)"]
         ot4["SNS envelope carries trace_id explicitly (no header on SNS/SQS) —\nprovision → event → O&M projection stays one trace"]
         ot5["Reconciler runs rooted at a per-job reconciler span\n(e.g. reconciler.trial-expiry)"]
@@ -656,17 +660,17 @@ graph LR
         l3["RLS violation log — ERROR, 1% sampled (rls_violation_log)"]
     end
 
-    subgraph db_obs["Database observability (platform-pgcommon v1.3.0)"]
+    subgraph db_obs["Database observability (platform-pgcommon/v2 v2.0.0)"]
         db1["pgx pool metrics — acquire_count/duration, idle/acquired conns"]
         db2["SlowQueryTracer — WARN log > SlowQueryThreshold"]
     end
 
     subgraph cron["cmd/reconciler — 7 CronJobs"]
-        c1["trial-expiry · trial-hard-delete · subscription-lapse\nrealm-config-reconcile · outbox-prune · processed-events-prune · idempotency-cleanup"]
+        c1["trial-expiry · trial-hard-delete · subscription-lapse\nrealm-config-reconcile · outbox-prune · processed-events-prune · ledger-prune\nmetrics pushed to the Pushgateway, grouped by cronjob"]
     end
 
     subgraph alerts["Alert routing (deploy/monitoring/app-alerts.yml)"]
-        a1["Warning: keycloak_call_failures_total rate > 5% / 5m\ntrial_expiry_deferred_total > 0 sustained 1h\nrealm_config_pending_gauge > 0 sustained 30m (RP-INV-6)\noutbox_dead_letters_total increase > 0 / 30m\n{membership,billing,tenant}-realm-q DLQ depth > 0"]
+        a1["Warning: keycloak_call_failures_total rate > 5% / 5m\ntrial_expiry_deferred_total > 0 in the last pushed run\nrealm_config_pending_gauge > 0 sustained 30m (RP-INV-6)\nplatform_dlq_messages_total{operation=outbox_publish} increase > 0 / 30m\n{membership,billing,tenant}-realm-q DLQ depth > 0\noutbox backlog age · consumer polling stopped · DB pool saturated / acquire errors\nAL-5 audit entries rejected / undelivered"]
         a2["Critical: realm_export_total{result=fail} > 0\n(offboarding blocked — export-before-delete invariant)\nconsumed_schema_violations_total rate > 0 / 5m\n(consumed contract break — events of that type dropped)"]
         a3["Informational: admin_token_refresh_total{trigger=401} spike\n(possible credential rotation)"]
     end
@@ -701,11 +705,11 @@ graph LR
 | Trial-expiry / lapse freshness | ≤ one cron tick (daily) + retry | `*_deferred_total` |
 | Realm-config reconcile freshness | ≤ one RP-C4 tick (10 min) | `realm_config_pending_gauge` |
 
-**DB-state gauge exporters.** `realm_active_gauge`, `realm_config_pending_gauge`, and `template_drift` are refreshed every 5 minutes by goroutines (`runBusinessExporters` in `cmd/server/exporters.go`) polling `pgadapter.GaugeRepository` on the BYPASSRLS `sysPool` — these are counts of current table state, so no request or reconciler path can maintain them directly. A fourth goroutine in the same function keeps `rls_violations_total` (a monotonic counter, not a gauge — `Add`s each tick's window delta rather than `Set`s an absolute value) fresh from `rls_violation_log`, backing RLS-6's two alerts; it needs a Terraform-side `GRANT SELECT` this repo cannot itself provide (`.claude/operations.md` §20). `trial_expiry_*`, `lapse_processed_total`, and `realm_export_total` are correctly incremented but only inside the one-shot reconciler CronJob process, which exits before a scrape lands; treat silence on those series as "no signal", not "no problem" (LLD §11.2).
+**DB-state gauge exporters.** `realm_active_gauge`, `realm_config_pending_gauge`, and `template_drift` are refreshed every 5 minutes by goroutines (`runBusinessExporters` in `cmd/server/exporters.go`) polling `pgadapter.GaugeRepository` on the BYPASSRLS `sysPool` — these are counts of current table state, so no request or reconciler path can maintain them directly. A fourth goroutine in the same function keeps `rls_violations_total` (a monotonic counter, not a gauge — `Add`s each tick's window delta rather than `Set`s an absolute value) fresh from `rls_violation_log`, backing RLS-6's two alerts; it needs a Terraform-side `GRANT SELECT` this repo cannot itself provide (`.claude/operations.md` §20). `trial_expiry_*`, `lapse_processed_total`, and `realm_export_total` are incremented inside the one-shot reconciler CronJob process, which has no `/metrics` listener; each run pushes its registry to the Prometheus Pushgateway (`PROMETHEUS_PUSHGATEWAY_URL`, grouped by `cronjob`, replacing the previous run's group), and the reconciler alerts read the pushed per-run value (LLD §11.2).
 
 **Structured log fields:** `tenant_id`, `operation`, `idempotency_key`, `keycloak_realm`, `actor` — never the admin token, any password seed, or an IdP secret. Slow queries > 200 ms log at WARN with `tenant_id` redacted; RLS violations log at ERROR (1% sampled).
 
-**Graceful shutdown.** `SIGTERM` triggers `gincommon.Shutdown`; `terminationGracePeriodSeconds = 30` drains the outbox runner's current batch and any in-flight SQS-consumer messages before the process exits — at-least-once delivery plus `processed_events` makes a mid-drain redelivery safe either way.
+**Graceful shutdown.** On `SIGTERM`, `cmd/server/main.go` first drains in parallel (bounded by `httpDrainTimeout`, 30s): the HTTP and metrics servers, the three SQS consumers' in-flight messages, and any detached RP-3 conversions (`ProvisioningService.Drain`). It then stops the outbox runner (its current batch, `OUTBOX_DRAIN_TIMEOUT`), cancels background goroutines, and closes both pools on a fresh 10s budget before flushing logs and traces via `gincommon.Shutdown`. `terminationGracePeriodSeconds = 75` covers that sum. At-least-once delivery plus `processed_events` makes a mid-drain redelivery safe; a conversion still running at the deadline leaves its key `in_progress`, and a retry reclaims it after `IDEMPOTENCY_IN_PROGRESS_LEASE`.
 
 ---
 
@@ -769,17 +773,18 @@ Both pools start from `pgcommon.ConfigFromEnv()` so DSN assembly, sizing, `PGBou
 
 ```go
 pgCfg, pgWarnings := pgcommon.ConfigFromEnv() // DATABASE_URL / PG_*, incl. PG_BOUNCER_MODE
-pgCfg.DSN = pgadapter.DSNFromEnv()            // adds PG_STATEMENT_TIMEOUT
+pgCfg.DSN = pgadapter.DSNFromEnv()            // the library's DSN; PG_STATEMENT_TIMEOUT is a per-tx SET LOCAL, not a DSN option
 pgCfg.GUCProvider = pgcommon.GUCSetFromContext // ← the security-critical line
+pgCfg.Tracer = gincommon.NewSpanTracer(cfg.ServiceName)
 pool, err := pgcommon.NewPool(ctx, pgCfg)
 
 // sysPool is built by SystemPoolConfig (ConfigFromEnv + forced PGBouncerMode), never a bare literal.
 sysCfg := pgadapter.SystemPoolConfig(pgadapter.SystemDSNFromEnv(), log)
-sysCfg.Tracer = pgadapter.NewOTelTracer(cfg.ServiceName)
+sysCfg.Tracer = gincommon.NewSpanTracer(cfg.ServiceName)
 sysPool, err := pgcommon.NewPool(ctx, sysCfg)
 ```
 
-`SystemPoolConfig` re-reads `pgcommon.ConfigFromEnv()`, forces `PGBouncerMode: true`, clears `GUCProvider` (a `BYPASSRLS` role must see every tenant), applies `PG_STATEMENT_TIMEOUT`, and wires the gincommon logger — matching `iam-org-membership`. Tracer is set by the call site. A bare `pgcommon.Config{DSN: ...}` literal silently drops `PGBouncerMode`, and under `PG_BOUNCER_MODE=true` that pool would keep pgx's named prepared statements — which PgBouncer rejects in transaction-pooling mode with `prepared statement already exists` (CONFIG-2). In production `SYSTEM_DATABASE_URL` must target the `realm_provisioner_migrator` (`BYPASSRLS`) role — never the app role; in dev it falls back to the app DSN with a startup warning, and cross-tenant queries then correctly return 0 rows under RLS rather than leaking (FAIL-5). `sysPool` is used **only** by the reconciler jobs' cross-tenant sweeps and RP-13's whole-estate scan — never by any tenant-scoped request path. `MIGRATION_DATABASE_URL` is a third, direct (non-PgBouncer) DSN used solely for DDL, since transaction pooling is incompatible with schema changes and the app role has no `CREATE` on `public` (see `outbox.ApplySchema`-before-domain-migration ordering, MIG-2, in § Event and outbox flow above; broader rollout/migration safety — additive-first, `CREATE UNIQUE INDEX CONCURRENTLY` in a separate release, MIG-1/MIG-6/MIG-8/MIG-9 — is unchanged from the LLD). Both binaries drain with `Pool.DrainAndClose` on shutdown.
+`SystemPoolConfig` re-reads `pgcommon.ConfigFromEnv()`, forces `PGBouncerMode: true`, clears `GUCProvider` (a `BYPASSRLS` role must see every tenant), sets `PoolName: "system"` and the PgBouncer `MinConns` default, inherits the per-transaction `StatementTimeout`, and wires the gincommon logger — matching `iam-org-membership`. Tracer is set by the call site. A bare `pgcommon.Config{DSN: ...}` literal silently drops `PGBouncerMode`, and under `PG_BOUNCER_MODE=true` that pool would keep pgx's named prepared statements — which PgBouncer rejects in transaction-pooling mode with `prepared statement already exists` (CONFIG-2). In production `SYSTEM_DATABASE_URL` must target the `realm_provisioner_migrator` (`BYPASSRLS`) role — never the app role; in dev it falls back to the app DSN with a startup warning, and cross-tenant queries then correctly return 0 rows under RLS rather than leaking (FAIL-5). `sysPool` is used **only** by the reconciler jobs' cross-tenant sweeps and RP-13's whole-estate scan — never by any tenant-scoped request path. `MIGRATION_DATABASE_URL` is a third, direct (non-PgBouncer) DSN used solely for DDL, since transaction pooling is incompatible with schema changes and the app role has no `CREATE` on `public` (see `outbox.ApplySchema`-before-domain-migration ordering, MIG-2, in § Event and outbox flow above; broader rollout/migration safety — additive-first, `CREATE UNIQUE INDEX CONCURRENTLY` in a separate release, MIG-1/MIG-6/MIG-8/MIG-9 — is unchanged from the LLD). Both binaries drain with `Pool.DrainAndClose` on shutdown.
 
 ---
 
@@ -803,7 +808,7 @@ The `touch_row()` `BEFORE UPDATE` trigger (attached only to these two tables) bu
 
 - **IDEMP-1** — Every replayable operation converges to the same final state — no duplicate realms, no double-migration, no double-emit.
 - **IDEMP-2** — `processed_events` PK `(event_id, consumer)` is the canonical bus-event dedup. For the two consumers that write to Postgres the mark commits in the same transaction as the projection write, so an event is never recorded as handled unless its effect landed. `provisioning_operations` is the canonical ledger for HTTP-triggered mutations.
-- **IDEMP-3** — A `succeeded` key replays the stored `result` without re-executing Keycloak. `in_progress` → `409 operation_in_progress`.
+- **IDEMP-3** — A `succeeded` key replays the stored `result` without re-executing Keycloak. `in_progress` → `409 operation_in_progress`; a `failed` key, or an `in_progress` one older than `IDEMPOTENCY_IN_PROGRESS_LEASE` (15m — the owning pod died), is reclaimed by the retry. `Complete`/`Fail` run on a context detached from the request, so a request deadline or client disconnect never strands a key `in_progress`.
 - **IDEMP-4** — 8-day `processed_events` window is deliberate (`PROCESSED_EVENTS_TTL_DAYS` > 7-day SQS lifetime). Beyond-window duplicates are backstopped by value-level Keycloak reconcile (create-if-absent / delete-if-exists).
 
 ---
@@ -885,20 +890,22 @@ Two fail-closed calls that sibling services feel (invite, MFA-reset) stop comple
 
 ## Deployment
 
-### Container image — two binaries
+### Container image — three binaries
 
-The `Dockerfile` builds and copies **two** entrypoints into the distroless final image:
+The `Dockerfile` builds and copies **three** entrypoints into the distroless final image, plus the versioned realm template:
 
 | Binary | Path in image | Purpose |
 |---|---|---|
-| `iam-realm-provisioner` | `/iam-realm-provisioner` | HTTP server (`cmd/server`) — long-running, serves `/api/v1/internal/*`, runs the outbox + 3 SQS consumers |
-| `iam-realm-provisioner-reconciler` | `/iam-realm-provisioner-reconciler` | Single-binary reconciler dispatched by `--job=<name>` (`cmd/reconciler`) — one-shot, invoked by 6 K8s CronJobs |
+| `iam-realm-provisioner-server` | `/iam-realm-provisioner-server` | HTTP server (`cmd/server`) — long-running, serves `/api/v1/internal/*`, runs the outbox + 3 SQS consumers + AL-5 audit drainer |
+| `iam-realm-provisioner-reconciler` | `/iam-realm-provisioner-reconciler` | Single-binary reconciler dispatched by `--job=<name>` (`cmd/reconciler`) — one-shot, invoked by 7 K8s CronJobs |
+| `migrate` | `/migrate` | Schema migration (`cmd/migrate`, `postgres.MigrateSchema`) — the Helm pre-install/pre-upgrade hook Job |
+| (data) | `/deploy/keycloak/realm-template.json` | The realm template `REALM_TEMPLATE_PATH` points at (§12.2) |
 
-Two-stage Dockerfile: a Go builder stage compiles both binaries, the runtime stage is `gcr.io/distroless/static-debian12:nonroot` (no shell, no package manager, runs as non-root) — the deployed container copies only the two compiled binaries, not the source tree, which is why `api/asyncapi.yaml` must be compiled in via `//go:embed` rather than read from disk at runtime.
+Two-stage Dockerfile: a Go builder stage compiles the binaries, the runtime stage is `gcr.io/distroless/static-debian12:nonroot` (no shell, no package manager, runs as non-root) — the deployed container copies only the compiled binaries and the realm template, not the source tree, which is why `api/asyncapi.yaml` must be compiled in via `//go:embed` rather than read from disk at runtime.
 
 ### Helm chart
 
-`deploy/helm/` renders a single `Deployment` for the server plus 6 `CronJob` resources, all sharing the same image with a `command: ["/iam-realm-provisioner-reconciler", "--job=<name>"]` override. Schedules are taken from `values.yaml`'s `cronjobs:` map, matched 1:1 to `cmd/reconciler/jobs/*.go`:
+`deploy/helm/` renders a single `Deployment` for the server, a migrate hook `Job`, and 7 `CronJob` resources, all from the same image. Each CronJob overrides `command: ["/iam-realm-provisioner-reconciler"]` with `--job=<name>`. Schedules are taken from `values.yaml`'s `cronjobs:` map, matched 1:1 to `cmd/reconciler/jobs/*.go`:
 
 | CronJob | Schedule | Purpose |
 |---|---|---|
@@ -908,8 +915,11 @@ Two-stage Dockerfile: a Go builder stage compiles both binaries, the runtime sta
 | `realm-config-reconcile` | `*/10 * * * *` | RP-C4: retry every `realm_config_reconciliations` row in `status='pending'`; past `RECONCILER_MAX_ATTEMPTS` (default 20) a row moves to a terminal `failed` status instead of retrying forever (poison-pill cap) |
 | `outbox-prune` | `0 4 * * *` | Prune published `outbox_events` past `OUTBOX_RETENTION_DAYS` |
 | `processed-events-prune` | `30 4 * * *` | Prune `processed_events` past `PROCESSED_EVENTS_TTL_DAYS` |
+| `ledger-prune` | `0 5 * * *` | Prune `provisioning_operations` past `PROVISIONING_OPERATIONS_TTL_DAYS` (30) and `rls_violation_log` past `RLS_VIOLATION_LOG_TTL_DAYS` (90), in batched deletes |
 
-`terminationGracePeriodSeconds = 30` — `SIGTERM` triggers `gincommon.Shutdown`, draining the outbox runner's current batch and any in-flight SQS-consumer messages before the process exits (at-least-once delivery + `processed_events` makes a mid-drain redelivery safe either way). HPA: 2–4 replicas on CPU (70%) + memory (80%). PDB `minAvailable: 1`. Resources (server): CPU 250m/1, Memory 256Mi/512Mi.
+**Migrate hook.** `templates/migrate-job.yaml` runs `/migrate` before the Deployment's pods roll (`pre-install,pre-upgrade`), so replicas run with `RUN_MIGRATIONS=false`. Hook ordering: the Secret (weight -10), then a hook-scoped NetworkPolicy allowing DNS + Postgres egress (weight -5 — the namespace is default-deny), then the Job (weight 0). The Job runs as the namespace's `default` ServiceAccount with no token mounted, because the chart's own ServiceAccount does not exist yet during a first install's pre-install hooks.
+
+`terminationGracePeriodSeconds = 75` — see [Graceful shutdown](#observability-stack) for the drain sequence it covers. HPA: 2–4 replicas on CPU (70%) + memory (80%). PDB `minAvailable: 1`. Resources (server): CPU 250m/1, Memory 256Mi/512Mi.
 
 Pod AWS access (SNS/SQS/Glue/S3/KMS) is IRSA; secret access is OpenBao Kubernetes auth using the same ServiceAccount token (`deploy/openbao/`). `deploy/iam/` is AWS-resources-only — no `secretsmanager:*`.
 
@@ -926,12 +936,15 @@ Rolling deploy, 2 replicas. `migrate.Runner` `lock_timeout=30s`. Additive change
   - `internal/adapter/inbound/http/*_test.go` (functional `fake*` mocks of every port): request binding, path/param parsing, idempotency-key handling, and every `domain.Error` code's HTTP-status mapping per handler.
   - `internal/adapter/outbound/keycloak/*_test.go`: gocloak pointed at an `httptest.Server` standing in for Keycloak's REST API — every realm/user/IdP/MFA method's success and error branches, without a real container.
   - `internal/adapter/outbound/postgres/*_test.go`: pure-logic branches (`withPool`, `wrapConnErr`, `nilIfZeroUUID`) that don't need a live database.
-  - `cmd/reconciler/jobs/*_test.go` (functional mocks, `package jobs` white-box): each of the 6 reconciler jobs' dispatch logic, including RP-C3's two-phase suspend/offboard split — `SubscriptionLapses==nil` degradation, `BatchLimit` budget-sharing between phases, per-tenant idempotency-ledger keys, already-suspended/offboarded no-ops, and the RP-EVT-4 export→put→delete→commit call order.
+  - `cmd/reconciler/jobs/*_test.go` (functional mocks, `package jobs` white-box): each of the 7 reconciler jobs' dispatch logic, including RP-C3's two-phase suspend/offboard split — `SubscriptionLapses==nil` degradation, `BatchLimit` budget-sharing between phases, per-tenant idempotency-ledger keys, already-suspended/offboarded no-ops, and the RP-EVT-4 export→put→delete→commit call order.
 
 - **Postgres / RLS** (`test/postgres/`, testcontainers-go, real PG, full migration suite):
   - RLS fail-closed (missing GUC / cross-tenant write / malformed GUC — all 0 rows or policy violation).
   - **Case 5 (§14.5, RLS-6):** no cross-tenant leak across a pooled backend. Pool pinned to `MaxConns=1`; tenant A tx → return connection → tenant B tx on same backend → assert B sees 0 of A's rows.
-  - `processed_events` dedup, outbox enqueue/publish/prune, `realm_config_reconciliations` retry, `touch_row` no-op guard.
+  - `processed_events` dedup (including a handler's follow-on event enqueued inside the claim transaction, never twice on redelivery), outbox enqueue/publish/prune, `realm_config_reconciliations` retry, `touch_row` no-op guard.
+  - Idempotency ledger: `Complete`/`Fail` persist on a canceled request context; a stale `in_progress` key (older than the lease) is reclaimed, a fresh one is not.
+  - Retention (`ledger-prune`): only rows past each table's window are deleted, in batches, and a canceled job stops between batches; `pending_audit_entries.last_error` stays valid UTF-8 when truncated.
+  - Composition roots against a real database: `cmd/server` and `cmd/reconciler` `main()` (signal-driven, in-process), `cmd/migrate` (fresh schema, then a no-op re-run), and the gauge/RLS-violation-counter exporters.
   - CI greps for the forbidden non-`LOCAL` `SET app.tenant_id`.
 
 - **Integration** (`test/integration/`, capped at `TEST_INTEGRATION_PARALLEL` — JVM/Quarkus containers are heavy): a **Keycloak 26 testcontainer** — real realm clone, `sub`-preserving user create, TOTP copy, IdP create, `requires-mfa` assign/revoke, realm disable/enable/export, admin-token cache + single-flight refresh, rate limiter under a simulated migration burst — and an **OpenBao testcontainer** — real KV v2 write→read→delete round trip, not-found → `ErrIdpConfigNotFound`, permission-denied, and a genuinely RS256-signed ServiceAccount JWT driving OpenBao's real Kubernetes-auth login/role-matching code (only the live cluster's TokenReview response is stubbed, since no real Kubernetes cluster is available to a testcontainer).
@@ -942,7 +955,7 @@ Rolling deploy, 2 replicas. `migrate.Runner` `lock_timeout=30s`. Additive change
 
 - **Smoke** (`make test-smoke`, CI only, `.github/scripts/smoke-tests.sh`) checks the CI-built image (`/healthz` 200, `/asyncapi.yaml` serves the real spec) and fail-fast on missing required env.
 
-Coverage is measured over `./cmd/...`, `./internal/...`, and `./pkg/...` (`COVER_PKG_LIST` in the Makefile — `cmd/...` is included so composition-root helpers like the gauge exporters and reconciler jobs are counted too), merged across the unit/postgres/integration suites (`scripts/merge_coverage.py`). Currently **97.8%**, up from 92.2% before rev 1.17. A rev-1.16 pass judged the remaining gap — composition-root wiring in `cmd/server/main.go`/`cmd/reconciler/main.go`'s `run()` — unreachable without a live Postgres/Keycloak/AWS connection and set a ~92.6% practical ceiling; rev 1.17's new `cmd/server/main_integration_test.go`/`cmd/reconciler/main_integration_test.go`/`cmd/server/exporters_integration_test.go` (`//go:build integration`, real Postgres testcontainers) proved otherwise, exploiting `signal.Notify`'s pre-empt-default-terminate behavior to safely signal-test `main()` in-process. The CI coverage gate's floor moved to 95% accordingly. See [CONTRIBUTING.md](CONTRIBUTING.md) for the coverage gate.
+Coverage is measured over `./cmd/...`, `./internal/...`, and `./pkg/...` (`COVER_PKG_LIST` in the Makefile — `cmd/...` is included so composition-root helpers like the gauge exporters and reconciler jobs are counted too), merged across the unit/postgres/integration suites (`scripts/merge_coverage.py`). Currently **97.2%** (rev 1.21, every suite passing; it was 97.8% at rev 1.17, before the rev 1.20–1.21 library, audit-delivery and production-readiness code landed), up from 92.2% before rev 1.17. A rev-1.16 pass judged the remaining gap — composition-root wiring in `cmd/server/main.go`/`cmd/reconciler/main.go`'s `run()` — unreachable without a live Postgres/Keycloak/AWS connection and set a ~92.6% practical ceiling; rev 1.17's new `cmd/server/main_integration_test.go`/`cmd/reconciler/main_integration_test.go`/`cmd/server/exporters_integration_test.go` (`//go:build integration`, real Postgres testcontainers) proved otherwise, exploiting `signal.Notify`'s pre-empt-default-terminate behavior to safely signal-test `main()` in-process. The CI coverage gate's floor moved to 95% accordingly. See [CONTRIBUTING.md](CONTRIBUTING.md) for the coverage gate.
 
 ---
 
@@ -1058,7 +1071,7 @@ graph LR
         readme["README.md\nmental model · API/event overview · onboarding"]
         asyncapi_yaml["api/asyncapi.yaml\nAsyncAPI 3.0 — iam-tenant-events SNS contract\n(9 published + 6 consumed)"]
         swag_annot["@Summary/@Router annotations\non all 17 RP-1..RP-17 handlers +\ncmd/server/swagger_info.go"]
-        lld["docs/lld/iam-lld-realm-provisioner-service.md\nfrozen LLD v1.14"]
+        lld["docs/lld/iam-lld-realm-provisioner-service.md\nfrozen LLD v1.22"]
     end
 
     subgraph rendered["Rendered by"]
@@ -1088,6 +1101,6 @@ graph LR
 | [`.claude/request-flows.md`](.claude/request-flows.md) | Provisioning, conversion, IdP, MFA, lapse, GDPR ordering |
 | [`.claude/operations.md`](.claude/operations.md) | Security, observability, configuration, deployment, CI/CD, dependency degradation matrix |
 | [`docs/architecture/README.md`](docs/architecture/README.md) | Standalone Mermaid diagram set index (the 9 `.mmd` files embedded above) |
-| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD (v1.14) — §16 open-question register, §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
+| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD (v1.22) — §16 open-question register, §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
 
 Render a diagram locally: open any `.mmd` file in a Mermaid-aware IDE (VS Code + Mermaid Preview, IntelliJ + Mermaid plugin) or paste into [mermaid.live](https://mermaid.live).

@@ -1,53 +1,34 @@
 #!/usr/bin/env bash
-# Enforces the Enterprise Platform Observability Standard's governance
-# rules 11/12: this service MUST NOT use any platform_* metric as a live
-# PromQL target (alert expr, recording-rule expr, SLO expr, HPA metric
-# reference) because:
+# Enforces the Enterprise Platform Observability Standard's registry rules on
+# everything in this repo that queries metrics (alerts, recording rules,
+# SLOs, the HPA and the prometheus-adapter rule), against the central
+# Platform Observability Registry shipped in platform-gincommon
+# (pkg/obsregistry) — there is no local copy of the registry any more:
 #
-#   - platform_* metrics are owned by platform-events and platform-gincommon.
-#   - This service's authoritative, alertable metrics are the Tier 3
-#     iam_realm_provisioner_* family registered in
-#     internal/adapter/outbound/metrics/metrics.go.
-#   - Referencing a platform_* name in an alert/SLO before the Platform
-#     Observability Registry has ratified it for that exact label schema
-#     is prohibited (rules 11/12).
-#
-# The check is a simple grep: if any live PromQL expression in the rule
-# files references a platform_* metric name, the build fails.
+#   1. No removed (pre-standard) metric name may appear in those files, even
+#      in a comment: the platform libraries no longer emit them
+#      (TestMonitoring_NoRemovedMetrics names each replacement).
+#   2. Every alert that depends on a metric whose registry status is still
+#      "proposed" (awaiting governance ratification) — directly or through a
+#      recording rule — carries `metric_status: proposed`, and no other alert
+#      does; an HPA scaling on one carries the
+#      observability.platform/metric-status: proposed annotation
+#      (TestMonitoring_ProposedMetricsAreLabelled).
+#   3. Optionally, when METRICSLINT is set (e.g. METRICSLINT="go run
+#      github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/cmd/metricslint"),
+#      `metricslint refs` also scans deploy/, .github/, cmd/, internal/, the
+#      runbooks and the top-level docs for removed or unregistered names. The
+#      LLD and CHANGELOG are excluded: their revision history intentionally
+#      names metrics that no longer exist.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-RULE_FILES=(
-  deploy/monitoring/app-alerts.yml
-  deploy/monitoring/slo-rules.yml
-  deploy/helm/templates/prometheusrule.yaml
-  deploy/helm/templates/hpa.yaml
-  deploy/monitoring/prometheus-adapter-rule.yaml
-)
+go test ./internal/adapter/outbound/metrics/... \
+  -run 'TestMonitoring_NoRemovedMetrics|TestMonitoring_ProposedMetricsAreLabelled' \
+  -count=1 -v
 
-fail=0
-for f in "${RULE_FILES[@]}"; do
-  [ -f "$f" ] || continue
-  # Find non-comment lines that contain a platform_* name in a PromQL context
-  # (a selector, _count/_bucket suffix, or a rate/increase call).
-  matches=$(grep -n "platform_" "$f" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' || true)
-  [ -z "$matches" ] && continue
-  live=$(echo "$matches" | grep -E '\{|_count|_bucket|rate\(|increase\(' || true)
-  if [ -n "$live" ]; then
-    echo "FAIL: $f references a platform_* metric in a live PromQL expression:"
-    echo "$live" | sed 's/^/  /'
-    fail=1
-  fi
-done
-
-if [ "$fail" -ne 0 ]; then
-  echo
-  echo "This service's authoritative metrics are iam_realm_provisioner_* (Tier 3)."
-  echo "platform_* metrics are owned by platform-events/platform-gincommon and must"
-  echo "not source production alerts, recording rules, SLOs, or HPA references"
-  echo "(Enterprise Platform Observability Standard, rules 11/12)."
-  exit 1
+if [ -n "${METRICSLINT:-}" ]; then
+  # shellcheck disable=SC2086 # METRICSLINT may be a multi-word command.
+  $METRICSLINT refs -ext .yml,.yaml,.json,.sh,.go,.md deploy .github cmd internal docs/runbook.md docs/architecture README.md ARCHITECTURE.md VERSIONING.md
 fi
-
-echo "OK: no platform_* metric is used as a live query target in ${RULE_FILES[*]}"

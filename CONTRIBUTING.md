@@ -4,7 +4,7 @@ This is an internal IAM microservice for the XpertPMS platform. This guide cover
 
 ## Prerequisites
 
-- Go 1.26.6+ (matches `go.mod`)
+- Go 1.26.9+ (matches `go.mod`)
 - Docker (required for PostgreSQL + Floci (SNS/SQS/S3/Glue) + Keycloak integration tests via `testcontainers-go`, and for local dev via `make docker-up`)
 - `golangci-lint` is managed as a Go tool (`go tool golangci-lint`) — no separate install needed
 - `GOPRIVATE=github.com/BCBP-SOLUTIONS-FZC-LLC/*` (private module access; also `GONOSUMDB` for the same prefix)
@@ -38,33 +38,45 @@ Host ports are deliberately non-default so this stack can run alongside sibling 
 
 ```
 cmd/
-  server/            ← Composition root — wiring, pool setup, middleware, SQS consumer loop, outbox runner, graceful shutdown
-  reconciler/        ← Single binary dispatched via --job=<name>; drives 6 K8s CronJobs (RP-C1..RP-C4 + 2 retention jobs)
+  server/            ← Composition root — wiring, pool setup, middleware, SQS consumers, outbox runner, AL-5 audit drainer,
+                       DB-state exporters, graceful shutdown (parallel drain → outbox → pools)
+  reconciler/        ← Single binary dispatched via --job=<name>; drives 7 K8s CronJobs (RP-C1..RP-C4 + 3 retention jobs),
+                       pushing each run's metrics to the Pushgateway
+  migrate/           ← The Helm pre-install/pre-upgrade migrate Job (postgres.MigrateSchema)
 internal/
-  core/domain/       ← Entities, value objects, error taxonomy (§17), event payload structs — no external deps
+  core/domain/       ← Entities, value objects, error taxonomy (§17), event payload structs, AL-5 audit entry — no external deps
   core/port/         ← Interfaces required by the core: KeycloakAdmin (the RP-INV-1 seam), repositories,
-                       IdpValidationRepository, ReconciliationRepository, IdempotencyStore, ProcessedEventsStore,
-                       SubscriptionLapseReader (RP-C3, backed by O&M's I-16)
-  core/service/      ← Use cases: ProvisioningService, LifecycleService, IdpService, MfaService, RealmConfigService
+                       IdpValidationRepository, ReconciliationRepository, IdempotencyStore, Inbox, InboxPruner,
+                       PendingAuditEntryRepository, RetentionPruner, SubscriptionLapseReader (RP-C3, O&M's I-16),
+                       TokenServiceClient, AuditLogClient, OpenBaoClient, ObjectStore
+  core/service/      ← Use cases: ProvisioningService, LifecycleService, IdpService, MfaService, RealmConfigService,
+                       AuditDeliveryService; compensation.go (detached context for compensating teardown)
   adapter/inbound/
-    http/            ← Gin handlers for RP-1..RP-16, DTOs, middleware
+    http/            ← Gin handlers for RP-1..RP-17, DTOs, middleware (incl. RequireTenantMatch)
     consumer/        ← 3 SQS consumers (membership-realm-q, tenant-realm-q, billing-realm-q)
+    sqspipeline/     ← Builds the consumers from platform-events: per-queue config, DLQ forwarding, schema validation
   adapter/outbound/
     keycloak/        ← gocloak-backed KeycloakAdmin implementation — the ONLY package permitted to import
                        Nerzal/gocloak (RP-INV-1, enforced by .github/scripts/arch-lint.sh)
-    postgres/        ← Repository implementations + golang-migrate SQL migrations
-    eventbus/        ← Outbox-backed publisher + ValidatingCodec (JSON Schema draft-07 at enqueue time)
+    postgres/        ← Repository implementations (incl. inbox, idempotency ledger, retention, pending audit entries)
+                       + golang-migrate SQL migrations + MigrateSchema
+    eventbus/        ← Outbox-backed publisher + ValidatingCodec (JSON Schema draft-07 at enqueue time) + Glue codecs
     openbao/         ← KV v2 client for IdP secrets (Kubernetes auth), §12 / RP-D10
-    orgmembership/   ← HTTP client for O&M (I-8 residual-MFA-requirement check)
+    orgmembership/   ← HTTP client for O&M (I-8 residual-MFA-requirement check, I-16 subscription lapses)
+    tokenservice/    ← HTTP client for the Token Service (TS-1/TS-3/TS-4, §2.5)
+    auditlog/        ← HTTP client for Audit Log's AL-5 direct-write ingest
     s3/              ← Realm export target on offboarding (§15.5)
+    httpx/           ← The shared traceparent-injecting HTTP transport
     metrics/         ← iam_realm_provisioner_* Prometheus counters/histograms/gauges
-  eventschema/        ← Embedded JSON Schema files (one per produced event) + ByEventType map
+  eventschema/        ← Embedded JSON Schema files: 9 produced (ByEventType) + 6 consumed (ConsumedByConsumer)
 cmd/reconciler/jobs/  ← trial_expiry, trial_hard_delete, subscription_lapse, realm_config_reconcile,
-                       outbox_prune, processed_events_prune
+                       outbox_prune, processed_events_prune, ledger_prune
 pkg/requestctx/       ← Typed request context
 api/asyncapi.yaml     ← AsyncAPI 3.0 — the iam-tenant-events channel (9 published messages) + 3 inbound SQS channels
 deploy/               ← Helm chart, AWS IAM policy, OpenBao policy, Prometheus alerts, Keycloak realm template
-test/                 ← unit/, postgres/ (RLS, tagged `integration`), integration/ (Keycloak+SQS, tagged `integration`), e2e/ (tagged `e2e`)
+docs/                 ← lld/, architecture/ (*.mmd), observability/ (standard, metric registry, per-alert runbooks), runbook.md
+test/                 ← unit/, postgres/ (RLS, tagged `integration`), integration/ (Keycloak+OpenBao+floci, tagged `integration`),
+                       e2e/ (tagged `e2e`), load/ (tagged `load`), dbseed/
 ```
 
 **Dependency rule:** `domain` ← `port` ← `service` ← `adapter` ← `cmd`. Nothing in `core/` may import an adapter package, Gin, pgx, gocloak, or an AWS SDK. `core/service` may additionally import `pkg/requestctx` and the `metrics` package (a cross-cutting observability leaf, not a "real" adapter). Enforced in CI by `go-arch-lint` (`.go-arch-lint.yml`) plus five custom greps in `.github/scripts/arch-lint.sh`: the two invariants below, plus observability/database/events architectural-invariant checks requiring logs/metrics/traces, database connections, and SNS/SQS/outbox writes to flow through `platform-gincommon`/`platform-pgcommon`/`platform-events` respectively.
@@ -119,7 +131,8 @@ For layering details and the request-flow diagrams, see [ARCHITECTURE.md](ARCHIT
 |-------|----------|--------|-------|
 | Unit | `test/unit/` + white-box `_test.go` files listed in `TEST_INTERNAL_PKGS` (Makefile) | No | See "Test layout" below |
 | PostgreSQL / RLS | `test/postgres/` (`-tags=integration`) | Yes | Real Postgres via testcontainers; the 5 canonical §14.5 RLS cases plus extras |
-| Integration | `test/integration/` (`-tags=integration`) | Yes | Real Keycloak 26 + Postgres via testcontainers |
+| Composition roots | `cmd/server`, `cmd/reconciler`, `cmd/migrate` `*_integration_test.go` (`-tags=integration`, in `TEST_POSTGRES_PKGS`) | Yes | `main()`/`run()` against real Postgres, signal-driven in process |
+| Integration | `test/integration/` (`-tags=integration`) | Yes | Real Keycloak 26 (one shared container per package run — use a uuid-named realm in a new test), OpenBao and floci (Glue/SQS) via testcontainers |
 | E2E | `test/e2e/` (`-tags=e2e`) | Yes | Full lifecycle flows against the app's own test harness |
 
 All unit tests must pass without Docker (`make test-unit`). Run the race detector before submitting a PR:
@@ -248,7 +261,7 @@ Releases are handled via the CI/CD pipeline (`.github/workflows/ci.yml`). SemVer
 1. `validate-test` (race detector + coverage gate + arch-lint + e2e), `validate-quality` (fmt/tidy/vet/lint/vuln/mod-verify/Dockerfile checks), and `build-image` (Hadolint + cache-only Docker build, `linux/amd64`, distroless static-debian12:nonroot, carrying both `iam-realm-provisioner-server` and `iam-realm-provisioner-reconciler`) all run in parallel with no dependency on each other.
 2. `build-image`'s cache then feeds `trivy` (CVE scan) and `smoke` (smoke tests against both binaries), which run in parallel with each other.
 3. On push to `main`, `push` builds+pushes the image to GHCR and signs it with Cosign keyless signing (Sigstore OIDC).
-4. The Helm chart in `deploy/helm/` is applied by the platform CD pipeline — one Deployment (the server) plus 6 CronJobs (the reconciler jobs), all dispatched from the same image with a `command` override.
+4. The Helm chart in `deploy/helm/` is applied by the platform CD pipeline — one Deployment (the server) plus 7 CronJobs (the reconciler jobs), all dispatched from the same image with a `command` override.
 5. Separately, schema changes (`internal/eventschema/*.json`, `api/asyncapi.yaml`) trigger `schema-registry.yml`, which registers this service's 9 event schemas to the shared `iam-tenant-events` Glue registry (staging on push to `main`, production on release) — see `docs/runbook-schema-registry.md`.
 
 Notify the platform team on Slack if a migration or breaking env-var change requires coordinated rollout — especially anything touching the OpenBao path convention or the Keycloak admin credential.

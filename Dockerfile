@@ -14,6 +14,9 @@
 #                                        --job=<name>. No long-running
 #                                        HTTP/metrics server, no ports
 #                                        exposed for it.
+#   /migrate                            schema migration (cmd/migrate), run
+#                                        once per release by the Helm
+#                                        pre-install/pre-upgrade hook Job.
 #
 # One image: the Deployment runs it unmodified; each CronJob template
 # (deploy/helm/templates/cronjobs.yaml) overrides `command` to invoke
@@ -23,7 +26,7 @@
 ########################################
 # Stage: builder
 ########################################
-FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS builder
+FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS builder
 
 ARG BUILD_VERSION=dev
 ARG SOURCE_DATE_EPOCH
@@ -66,7 +69,12 @@ RUN CGO_ENABLED=0 GOOS=linux \
     -trimpath \
     -ldflags="-s -w -X main.buildVersion=${BUILD_VERSION}" \
     -o /out/iam-realm-provisioner-reconciler \
-    ./cmd/reconciler
+    ./cmd/reconciler && \
+    go build \
+    -trimpath \
+    -ldflags="-s -w -X main.buildVersion=${BUILD_VERSION}" \
+    -o /out/migrate \
+    ./cmd/migrate
 
 ########################################
 # Stage: runtime
@@ -88,6 +96,7 @@ WORKDIR /
 
 COPY --from=builder /out/iam-realm-provisioner-server /iam-realm-provisioner-server
 COPY --from=builder /out/iam-realm-provisioner-reconciler /iam-realm-provisioner-reconciler
+COPY --from=builder /out/migrate /migrate
 COPY --from=builder /src/deploy/keycloak/realm-template.json /deploy/keycloak/realm-template.json
 
 USER nonroot:nonroot

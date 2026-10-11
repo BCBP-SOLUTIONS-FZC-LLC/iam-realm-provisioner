@@ -144,7 +144,10 @@ func (r *bufferedRows) Err() error                                   { return r.
 func (r *bufferedRows) CommandTag() pgconn.CommandTag                { return r.tag }
 func (r *bufferedRows) FieldDescriptions() []pgconn.FieldDescription { return r.fields }
 func (r *bufferedRows) Conn() *pgx.Conn                              { return nil }
-func (r *bufferedRows) TypeMap() *pgtype.Map                         { return r.m }
+
+// TypeMap satisfies pgx.Rows from pgx v5.11 (pulled in by platform-pgcommon
+// v1.4.x); harmless on earlier pgx versions, which do not require it.
+func (r *bufferedRows) TypeMap() *pgtype.Map { return r.m }
 
 func (r *bufferedRows) Next() bool {
 	if r.closed {

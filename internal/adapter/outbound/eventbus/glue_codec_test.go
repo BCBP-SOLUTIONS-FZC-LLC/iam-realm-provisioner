@@ -19,7 +19,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/eventschema"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
 )
 
 // testDefinitions backs the arbitrary schema names these tests use.
@@ -58,34 +57,30 @@ func TestPrependGlueHeader_InvalidUUIDErrors(t *testing.T) {
 
 // TestStripGlueHeader_RoundTripsWithPrepend confirms strip(prepend(x)) == x
 // for the payload and recovers nothing but the payload.
-// TestGlueDecodeCodec_RoundTripsWithPrepend verifies that encoding via
-// prependGlueHeader (GlueCodec.Encode's internal helper) and decoding via
-// events.GlueDecodeCodec round-trip correctly — the path every SQS consumer
-// takes when a Glue-encoded event arrives.
-func TestGlueDecodeCodec_RoundTripsWithPrepend(t *testing.T) {
+func TestStripGlueHeader_RoundTripsWithPrepend(t *testing.T) {
 	schemaVersionID := uuid.New().String()
 	payload := []byte(`{"a":1,"b":"two"}`)
 
 	encoded, err := prependGlueHeader(schemaVersionID, payload)
 	require.NoError(t, err)
 
-	decoded, err := events.GlueDecodeCodec{}.Decode(context.Background(), "", encoded)
+	decoded, err := stripGlueHeader(encoded)
 	require.NoError(t, err)
 	assert.JSONEq(t, string(payload), string(decoded))
 }
 
-func TestGlueDecodeCodec_TooShortErrors(t *testing.T) {
-	_, err := events.GlueDecodeCodec{}.Decode(context.Background(), "", []byte{0x03, 0x00, 0x01})
+func TestStripGlueHeader_TooShortErrors(t *testing.T) {
+	_, err := stripGlueHeader([]byte{0x03, 0x00, 0x01})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "shorter than")
 }
 
-func TestGlueDecodeCodec_WrongVersionByteErrors(t *testing.T) {
+func TestStripGlueHeader_WrongVersionByteErrors(t *testing.T) {
 	encoded, err := prependGlueHeader(uuid.New().String(), []byte(`{}`))
 	require.NoError(t, err)
 	encoded[0] = 0x99 // corrupt the version byte
 
-	_, err = events.GlueDecodeCodec{}.Decode(context.Background(), "", encoded)
+	_, err = stripGlueHeader(encoded)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unexpected header version byte")
 }
@@ -300,25 +295,6 @@ func (f *fakeWarnLogger) errorCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.error)
-}
-
-// TestGlueDecodeCodec_DecodeOnly confirms events.GlueDecodeCodec strips headers
-// without needing any Glue client/registry configuration (used by this
-// service's SQS consumers to decode events from producers whose Glue
-// registry this service does not have configured).
-func TestGlueDecodeCodec_DecodeOnly(t *testing.T) {
-	versionID := uuid.New().String()
-	payload := []byte(`{"x":1}`)
-	encoded, err := prependGlueHeader(versionID, payload)
-	require.NoError(t, err)
-
-	decoded, err := events.GlueDecodeCodec{}.Decode(context.Background(), "SomeEvent", encoded)
-	require.NoError(t, err)
-	assert.JSONEq(t, string(payload), string(decoded))
-
-	_, _, err = events.GlueDecodeCodec{}.Encode(context.Background(), "SomeEvent", payload)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "decode-only")
 }
 
 // ── GetSchemaByDefinition resolution ──────────────────────────────────────
