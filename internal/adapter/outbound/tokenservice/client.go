@@ -240,14 +240,36 @@ func (c *Client) IssueOrRotateCredential(ctx context.Context, tenantID, principa
 	}, nil
 }
 
-// RevokeCredential calls TS-2
-// DELETE /api/v1/internal/tenants/:id/service-accounts/:principal_id/credentials.
-// Used during RP-3 conversion to retire the old shared-realm credential after
-// TS-1 has issued the new dedicated-realm credential — must run before the old
-// shared-realm Keycloak client is deleted.
+// RevokeCredential calls TS-2 to retire the rotating credential for principalID —
+// used during RP-3 conversion after TS-1 has issued the new dedicated-realm
+// credential, so the old shared-realm credential stops authenticating immediately
+// rather than waiting for the overlap sweep. TS-2 requires an explicit version,
+// so this first reads the principal via TS-3 to locate the rotating credential,
+// then calls POST .../credentials/:version/revoke for it. Returns nil if no
+// rotating credential exists (idempotent: the overlap sweep may have beaten us).
 func (c *Client) RevokeCredential(ctx context.Context, tenantID, principalID uuid.UUID) error {
-	url := fmt.Sprintf("%s/api/v1/internal/tenants/%s/service-accounts/%s/credentials", c.baseURL, tenantID, principalID)
-	httpReq, err := c.newRequest(ctx, http.MethodDelete, url, nil)
+	principal, err := c.ReadPrincipal(ctx, tenantID, principalID)
+	if err != nil {
+		return fmt.Errorf("tokenservice: RevokeCredential TS-3 lookup: %w", err)
+	}
+	for _, cred := range principal.Credentials {
+		if cred.Status != "rotating" {
+			continue
+		}
+		if err := c.revokeVersion(ctx, tenantID, principalID, cred.Version); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// revokeVersion calls TS-2 POST .../credentials/:version/revoke for a single
+// known version — the inner step of RevokeCredential once the rotating version
+// has been resolved via TS-3.
+func (c *Client) revokeVersion(ctx context.Context, tenantID, principalID uuid.UUID, version int) error {
+	url := fmt.Sprintf("%s/api/v1/internal/tenants/%s/service-accounts/%s/credentials/%d/revoke",
+		c.baseURL, tenantID, principalID, version)
+	httpReq, err := c.newRequest(ctx, http.MethodPost, url, struct{}{})
 	if err != nil {
 		return err
 	}

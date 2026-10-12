@@ -2,9 +2,11 @@ package jobs
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
+
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 )
 
 // TrialHardDelete is RP-C2 (0 3 * * *, §8.7): for trials past
@@ -35,7 +37,7 @@ func TrialHardDelete(ctx context.Context, jctx *Context) (Result, error) {
 
 func listHardDeleteCandidates(ctx context.Context, jctx *Context) ([]tenantRealmRow, error) {
 	var out []tenantRealmRow
-	err := runInTxWithSysPool(ctx, jctx.SysPool, func(ctx context.Context, tx pgx.Tx) error {
+	err := runInTxWithSysPool(ctx, jctx.SysPool, func(ctx context.Context, tx pgcommon.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT tenant_id, realm_name FROM tenant_realms
 			WHERE strategy = 'shared' AND status = 'disabled' AND deleted_at IS NULL
@@ -62,24 +64,17 @@ func hardDeleteTrialTenant(ctx context.Context, jctx *Context, row tenantRealmRo
 	if err := jctx.Keycloak.HardDeleteUsersInRealm(ctx, row.RealmName, row.TenantID); err != nil {
 		return err
 	}
-	return runInTxWithSysPool(ctx, jctx.SysPool, func(ctx context.Context, tx pgx.Tx) error {
-		// §15.2/GDPR: scrub all tenant PII from every tenant-scoped table in
-		// one atomic transaction before marking the row deleted. DELETE is
-		// idempotent — safe to retry if the tx commits after a crash.
-		// outbox_events (platform-events schema) has a tenant_id column but is
-		// not deleted here; its prune job clears it within OUTBOX_RETENTION_DAYS
-		// (default 8 days) after the events are published. Deleting it
-		// synchronously would silently drop the TenantOffboarded event.
-		for _, q := range []string{
-			`DELETE FROM keycloak_idp_configs            WHERE tenant_id = $1`,
-			`DELETE FROM keycloak_idp_config_validations WHERE tenant_id = $1`,
-			`DELETE FROM realm_config_reconciliations    WHERE tenant_id = $1`,
-			`DELETE FROM provisioning_operations         WHERE tenant_id = $1`,
-			`DELETE FROM pending_audit_entries           WHERE tenant_id = $1`,
-		} {
-			if _, err := tx.Exec(ctx, q, row.TenantID); err != nil {
-				return err
-			}
+	if jctx.SysPool == nil {
+		return fmt.Errorf("trial-hard-delete: SysPool is not set — GDPR PII deletion cannot proceed; SYSTEM_DATABASE_URL must be configured (tenant_id=%s)", row.TenantID)
+	}
+	// §15.2/GDPR: scrub PII and mark deleted atomically in a single sysPool
+	// transaction. Combining them prevents the inconsistent window where PII
+	// is already gone but status is still 'disabled' (observable by any
+	// BYPASSRLS query). All DELETEs are idempotent — safe to retry after a
+	// crash because listHardDeleteCandidates re-selects by status='disabled'.
+	return runInTxWithSysPool(ctx, jctx.SysPool, func(ctx context.Context, tx pgcommon.Tx) error {
+		if err := scrubTenantPII(ctx, tx, row.TenantID); err != nil {
+			return err
 		}
 		_, err := tx.Exec(ctx, `
 			UPDATE tenant_realms SET status = 'deleted', deleted_at = now(), updated_at = now()

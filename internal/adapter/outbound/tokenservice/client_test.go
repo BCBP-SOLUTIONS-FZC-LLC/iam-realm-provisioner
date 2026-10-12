@@ -539,3 +539,96 @@ func TestReadPrincipal_DecodeErrorPropagates(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decode TS-3 response")
 }
+
+// ── RevokeCredential (TS-2 via TS-3 lookup) ──────────────────────────────────
+
+// Happy path: one rotating credential → TS-3 read, then POST .../credentials/:version/revoke.
+func TestRevokeCredential_RevokesRotatingCredentialViaVersionedEndpoint(t *testing.T) {
+	tenantID, principalID := uuid.New(), uuid.New()
+	var revokeMethod, revokePath string
+	mux := http.NewServeMux()
+	mux.HandleFunc(fmt.Sprintf("/api/v1/internal/tenants/%s/service-accounts/%s", tenantID, principalID),
+		func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, `{"principal_id":"%s","tenant_id":"%s","keycloak_client_id":"platform-automation",
+				"principal_type":"platform_automation","status":"active","record_version":2,
+				"credentials":[
+					{"version":1,"status":"rotating","openbao_path":"x/v1","issued_at":"2026-09-01T00:00:00Z"},
+					{"version":2,"status":"active","openbao_path":"x/v2","issued_at":"2026-10-01T00:00:00Z"}
+				]}`, principalID, tenantID)
+		})
+	mux.HandleFunc(fmt.Sprintf("/api/v1/internal/tenants/%s/service-accounts/%s/credentials/1/revoke", tenantID, principalID),
+		func(w http.ResponseWriter, r *http.Request) {
+			revokeMethod, revokePath = r.Method, r.URL.Path
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprint(w, `{"version":1,"status":"revoked","revoked_at":"2026-10-12T00:00:00Z","keycloak_invalidation":"caller_responsibility"}`)
+		})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New(srv.URL, noopLogger{})
+	err := c.RevokeCredential(context.Background(), tenantID, principalID)
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, revokeMethod, "TS-2 must use POST, not DELETE")
+	assert.Equal(t, fmt.Sprintf("/api/v1/internal/tenants/%s/service-accounts/%s/credentials/1/revoke", tenantID, principalID), revokePath)
+}
+
+// No rotating credential → only TS-3 is called, returns nil (idempotent).
+func TestRevokeCredential_NoRotatingCredential_ReturnsNil(t *testing.T) {
+	tenantID, principalID := uuid.New(), uuid.New()
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, `{"principal_id":"%s","tenant_id":"%s","keycloak_client_id":"platform-automation",
+			"principal_type":"platform_automation","status":"active","record_version":1,
+			"credentials":[{"version":1,"status":"active","openbao_path":"x/v1","issued_at":"2026-10-01T00:00:00Z"}]}`,
+			principalID, tenantID)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, noopLogger{})
+	err := c.RevokeCredential(context.Background(), tenantID, principalID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, calls, "only TS-3 should be called when no rotating credential exists")
+}
+
+// TS-3 failure (e.g. 503) wraps the error with "TS-3 lookup" context.
+func TestRevokeCredential_TS3FailurePropagates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, noopLogger{})
+	err := c.RevokeCredential(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TS-3 lookup")
+}
+
+// TS-2 server error propagates as ErrTokenServiceUnavailable.
+func TestRevokeCredential_TS2ServerErrorPropagates(t *testing.T) {
+	tenantID, principalID := uuid.New(), uuid.New()
+	mux := http.NewServeMux()
+	mux.HandleFunc(fmt.Sprintf("/api/v1/internal/tenants/%s/service-accounts/%s", tenantID, principalID),
+		func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, `{"principal_id":"%s","tenant_id":"%s","keycloak_client_id":"platform-automation",
+				"principal_type":"platform_automation","status":"active","record_version":2,
+				"credentials":[{"version":1,"status":"rotating","openbao_path":"x/v1","issued_at":"2026-09-01T00:00:00Z"}]}`,
+				principalID, tenantID)
+		})
+	mux.HandleFunc(fmt.Sprintf("/api/v1/internal/tenants/%s/service-accounts/%s/credentials/1/revoke", tenantID, principalID),
+		func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New(srv.URL, noopLogger{})
+	err := c.RevokeCredential(context.Background(), tenantID, principalID)
+	require.Error(t, err)
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrTokenServiceUnavailable, derr.Code)
+}

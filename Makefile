@@ -140,6 +140,7 @@ help:
 	@echo "  make schema-verify    - pre-deploy check: each produced schema definition registered + AVAILABLE (requires AWS)"
 	@echo "  make schema-prune     - dry-run: list orphaned Glue schemas (requires AWS; excludes O&M's TenantCreated/TrialStarted)"
 	@echo ""
+	
 	@echo "Swagger:"
 	@echo "  make swag             - generate Swagger docs from annotations (output: docs/swagger/)"
 	@echo "  make swag-check       - fail if Swagger regeneration changes docs/swagger/"

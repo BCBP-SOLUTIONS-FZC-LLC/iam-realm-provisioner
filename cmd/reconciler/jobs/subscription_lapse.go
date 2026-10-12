@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
@@ -35,8 +33,11 @@ import (
 func SubscriptionLapse(ctx context.Context, jctx *Context) (Result, error) {
 	var res Result
 
+	// The offboard phase is purely local (reads tenant_realms, no O&M call)
+	// and MUST run even when ORG_MEMBERSHIP_BASE_URL is unset — GDPR
+	// retention SLAs apply regardless of whether the suspend feed is wired.
 	if jctx.SubscriptionLapses == nil {
-		return res, fmt.Errorf("subscription-lapse: ORG_MEMBERSHIP_BASE_URL is not set — suspend phase cannot run; configure the env var before scheduling RP-C3")
+		jctx.Logger.WarnContext(ctx, "subscription-lapse: ORG_MEMBERSHIP_BASE_URL not set — suspend phase skipped; offboard phase runs unconditionally")
 	} else if err := runSuspendPhase(ctx, jctx, &res); err != nil {
 		return res, err
 	}
@@ -198,28 +199,15 @@ func offboardTenant(ctx context.Context, jctx *Context, realm *domain.TenantReal
 		return err
 	}
 
-	// §15.2/GDPR: scrub all tenant PII from every tenant-scoped table.
-	// Runs in its own sysPool transaction (idempotent on retry) before the
-	// final commit so the deletions succeed even if the event-emission
-	// transaction later rolls back — re-deleting already-gone rows is a no-op.
-	// SysPool is always set in production; a nil check guards unit tests that
-	// construct a minimal Context without a real pool.
-	if jctx.SysPool == nil {
-		jctx.Logger.WarnContext(ctx, "offboard: SysPool not set — GDPR PII deletion skipped; this must not occur in production", "tenant_id", realm.TenantID)
-	} else if err := runInTxWithSysPool(ctx, jctx.SysPool, func(ctx context.Context, tx pgx.Tx) error {
-		for _, q := range []string{
-			`DELETE FROM keycloak_idp_configs            WHERE tenant_id = $1`,
-			`DELETE FROM keycloak_idp_config_validations WHERE tenant_id = $1`,
-			`DELETE FROM realm_config_reconciliations    WHERE tenant_id = $1`,
-			`DELETE FROM provisioning_operations         WHERE tenant_id = $1`,
-			`DELETE FROM pending_audit_entries           WHERE tenant_id = $1`,
-		} {
-			if _, err := tx.Exec(ctx, q, realm.TenantID); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
+	// §15.2/GDPR: scrub all tenant PII (see gdpr.go — authoritative list of
+	// tables). Runs via GDPRScrubFn (wired to a BYPASSRLS sysPool tx in
+	// production; see cmd/reconciler/main.go). Fail hard rather than emit
+	// TenantOffboarded with PII still in the database.
+	if jctx.GDPRScrubFn == nil {
+		failIdempotency(ctx, jctx, idemKey)
+		return fmt.Errorf("offboard: GDPRScrubFn not wired — SYSTEM_DATABASE_URL must be configured (tenant_id=%s)", realm.TenantID)
+	}
+	if err := jctx.GDPRScrubFn(ctx, realm.TenantID); err != nil {
 		failIdempotency(ctx, jctx, idemKey)
 		return err
 	}

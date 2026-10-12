@@ -7,7 +7,6 @@ import (
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
-	"github.com/jackc/pgx/v5"
 )
 
 // defaultRetentionBatch bounds one DELETE when the caller passes batch <= 0.
@@ -64,7 +63,7 @@ func (r *RetentionRepository) pruneLoop(ctx context.Context, sql string, olderTh
 			return total, err
 		}
 		var n int64
-		err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+		err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 			tag, err := tx.Exec(ctx, sql, olderThan.Seconds(), batch)
 			n = tag.RowsAffected()
 			return err

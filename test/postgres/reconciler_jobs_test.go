@@ -152,6 +152,26 @@ func clearTenantRealms(t testing.TB, ctx context.Context, rawPool *dbseed.Pool) 
 	require.NoError(t, err)
 }
 
+// assertPIITablesEmpty verifies that the five §15.2 GDPR scrub tables have no
+// rows for tenantID — used to confirm that hardDeleteTrialTenant ran the real
+// scrubTenantPII against the database rather than a no-op stub.
+func assertPIITablesEmpty(t testing.TB, ctx context.Context, rawPool *dbseed.Pool, tenantID uuid.UUID) {
+	t.Helper()
+	for _, tbl := range []string{
+		"keycloak_idp_configs",
+		"keycloak_idp_config_validations",
+		"realm_config_reconciliations",
+		"provisioning_operations",
+		"pending_audit_entries",
+	} {
+		var n int
+		require.NoError(t, rawPool.QueryRow(ctx,
+			"SELECT count(*) FROM "+tbl+" WHERE tenant_id = $1", tenantID).Scan(&n),
+			"count from %s", tbl)
+		assert.Zero(t, n, "%s still has rows for tenant %s after hard-delete", tbl, tenantID)
+	}
+}
+
 func seedTenantRealmForHardDelete(t testing.TB, ctx context.Context, rawPool *dbseed.Pool, tenantID uuid.UUID, status string, disabledAt time.Time) {
 	t.Helper()
 	_, err := rawPool.Exec(ctx, `
@@ -211,6 +231,8 @@ func TestTrialHardDelete(t *testing.T) {
 			require.NoError(t, rawPool.QueryRow(ctx, `SELECT status, deleted_at FROM tenant_realms WHERE tenant_id = $1`, tid).Scan(&status, &deletedAt))
 			assert.Equal(t, "deleted", status)
 			assert.NotNil(t, deletedAt)
+			// Verify scrubTenantPII actually ran against the real DB (not a stub).
+			assertPIITablesEmpty(t, ctx, rawPool, tid)
 		}
 		// The excluded rows must be untouched.
 		for _, tid := range []uuid.UUID{notYetPastGrace, wrongStatus} {

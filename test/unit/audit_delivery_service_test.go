@@ -72,12 +72,13 @@ func TestAuditDelivery_MarkFailuresAreLoggedNotPropagated(t *testing.T) {
 	assert.Equal(t, 1, n)
 }
 
-// A row whose Attempts has reached the max-attempts cap is parked as
-// failed on the next transient error instead of retried indefinitely —
-// bounds the blast radius of a misbehaving AL-5 stuck at Retry-After: 1.
+// A row whose Attempts exceeds the max-attempts cap is parked as failed
+// without attempting delivery — bounds the blast radius of a misbehaving
+// AL-5 stuck at Retry-After: 1. ClaimDue post-increments before returning,
+// so parking fires at Attempts = 51 (after 50 actual delivery attempts).
 func TestAuditDelivery_ExhaustedRetryBudget_ParksAsFailed(t *testing.T) {
 	due := pendingEntries(1)
-	due[0].Attempts = 50 // == the max-attempts constant in the service
+	due[0].Attempts = 51 // one past max; ClaimDue post-increments, so 50 actual deliveries were made
 	repo := &mockPendingAuditEntryRepository{Due: due}
 	client := &mockAuditLogClient{Errs: []error{errors.New("timeout")}}
 	svc := service.NewAuditDeliveryService(repo, client).WithLogger(&mockLogger{})

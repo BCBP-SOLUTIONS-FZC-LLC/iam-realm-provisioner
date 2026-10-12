@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,25 +29,10 @@ const maxErrorBody = 512
 // beyond ClaimDue's own 5-minute exponential cap.
 const maxRetryAfter = 5 * time.Minute
 
-// parseRetryAfter interprets a Retry-After header value per RFC 7231
-// §7.1.3 — either delta-seconds or an HTTP-date. Returns 0 for an empty,
-// malformed, or non-positive value. now is injected for testability.
+// parseRetryAfter delegates to httpx.ParseRetryAfter with maxRetryAfter as
+// the ceiling. now is injected for testability.
 func parseRetryAfter(header string, now time.Time) time.Duration {
-	if header == "" {
-		return 0
-	}
-	if secs, err := strconv.Atoi(header); err == nil {
-		if secs <= 0 {
-			return 0
-		}
-		return time.Duration(secs) * time.Second
-	}
-	if t, err := http.ParseTime(header); err == nil {
-		if d := t.Sub(now); d > 0 {
-			return d
-		}
-	}
-	return 0
+	return httpx.ParseRetryAfter(header, now, maxRetryAfter)
 }
 
 // Client implements port.AuditLogClient.
@@ -98,9 +82,6 @@ func (c *Client) WriteEntry(ctx context.Context, idempotencyKey string, entry do
 	case resp.StatusCode == http.StatusTooManyRequests:
 		base := fmt.Errorf("auditlog: AL-5 unavailable (status %d)", resp.StatusCode)
 		if d := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); d > 0 {
-			if d > maxRetryAfter {
-				d = maxRetryAfter
-			}
 			return &port.RetryAfterError{Underlying: base, RetryAfter: d}
 		}
 		return base

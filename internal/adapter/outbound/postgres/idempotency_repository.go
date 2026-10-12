@@ -9,7 +9,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 // DefaultInProgressLease is how long an `in_progress` row is trusted to
@@ -82,7 +81,7 @@ func detachedLedgerContext(ctx context.Context) (context.Context, context.Cancel
 func (r *IdempotencyRepository) Begin(ctx context.Context, key string, tenantID uuid.UUID, operation string) (*domain.ProvisioningOperation, bool, error) {
 	var out *domain.ProvisioningOperation
 	var found bool
-	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		row := tx.QueryRow(ctx, `
 			INSERT INTO provisioning_operations (idempotency_key, tenant_id, operation, status)
 			VALUES ($1, $2, $3, 'in_progress')
@@ -102,7 +101,7 @@ func (r *IdempotencyRepository) Begin(ctx context.Context, key string, tenantID 
 			found = false
 			return nil
 		}
-		if !errors.Is(scanErr, pgx.ErrNoRows) {
+		if !errors.Is(scanErr, pgcommon.ErrNoRows) {
 			return scanErr
 		}
 		// The INSERT conflicted but the ON CONFLICT ... WHERE didn't match
@@ -115,7 +114,7 @@ func (r *IdempotencyRepository) Begin(ctx context.Context, key string, tenantID 
 		var existing domain.ProvisioningOperation
 		var existingResult []byte
 		if scanErr := selRow.Scan(&existing.IdempotencyKey, &existing.TenantID, &existing.Operation, &existing.Status, &existingResult, &existing.CreatedAt, &existing.CompletedAt); scanErr != nil {
-			if errors.Is(scanErr, pgx.ErrNoRows) {
+			if errors.Is(scanErr, pgcommon.ErrNoRows) {
 				found = false
 				return nil
 			}
@@ -137,7 +136,7 @@ func (r *IdempotencyRepository) Begin(ctx context.Context, key string, tenantID 
 func (r *IdempotencyRepository) Complete(ctx context.Context, key string, result json.RawMessage) error {
 	ctx, cancel := detachedLedgerContext(ctx)
 	defer cancel()
-	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		_, err := tx.Exec(ctx, `
 			UPDATE provisioning_operations SET status = 'succeeded', result = $2, completed_at = now()
 			WHERE idempotency_key = $1`, key, result)
@@ -153,7 +152,7 @@ func (r *IdempotencyRepository) Complete(ctx context.Context, key string, result
 func (r *IdempotencyRepository) Fail(ctx context.Context, key string) error {
 	ctx, cancel := detachedLedgerContext(ctx)
 	defer cancel()
-	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		_, err := tx.Exec(ctx, `
 			UPDATE provisioning_operations SET status = 'failed', completed_at = now()
 			WHERE idempotency_key = $1`, key)

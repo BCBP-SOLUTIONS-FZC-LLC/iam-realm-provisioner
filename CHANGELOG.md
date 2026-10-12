@@ -22,7 +22,7 @@ This service has never been deployed to any environment — there is no released
 
 ### Changed
 
-- **RP-C3 `subscription-lapse` fails the job when `ORG_MEMBERSHIP_BASE_URL` is unset**, instead of logging a WARN and skipping the suspend phase.
+- **RP-C3 `subscription-lapse` logs a WARN and skips the suspend phase when `ORG_MEMBERSHIP_BASE_URL` is unset** — the offboard phase (GDPR retention) runs unconditionally regardless of whether the suspend feed is wired, so GDPR SLAs are met even when `ORG_MEMBERSHIP_BASE_URL` is absent.
 - **The Keycloak admin client secret is read at every token refresh** (`keycloak.Config.SecretProvider`), so a rotated secret takes effect without changing the token cache.
 - **`DirectPaidSignup` requires `plan`** (`starter` | `pro` | `enterprise`) in `api/asyncapi.yaml` and the embedded schema.
 - **Helm:** `templates/validate.yaml` fails `helm install`/`upgrade` when `GLUE_REGISTRY_TENANT_NAME` is unset outside dev/test. `NOTES.txt` adds a pre-install checklist (`make schema-register && make schema-verify`, Keycloak `client-jwt` support), and `Chart.yaml` records the minimum Keycloak version. The trial-expiry and trial-hard-delete CronJobs use `activeDeadlineSeconds: 360`.

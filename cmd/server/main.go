@@ -267,17 +267,12 @@ func main() {
 	// ── 7. Outbound adapters (Keycloak — RP-INV-1 sole seam — OpenBao,
 	// Org & Membership, S3) ──────────────────────────────────────────────
 	keycloakAdmin := keycloakadapter.New(keycloakadapter.Config{
-		BaseURL:    mustEnv("KEYCLOAK_BASE_URL", appEnv),
-		AdminRealm: envOr("KEYCLOAK_ADMIN_REALM", "master"),
-		ClientID:   envOr("KEYCLOAK_ADMIN_CLIENT_ID", "iam-realm-provisioner"),
-		SecretProvider: func(_ context.Context) (string, error) {
-			if s := os.Getenv("KEYCLOAK_ADMIN_CLIENT_SECRET"); s != "" {
-				return s, nil
-			}
-			return mustEnv("KEYCLOAK_ADMIN_CLIENT_SECRET", appEnv), nil
-		},
-		RateLimitRPS: envInt("KEYCLOAK_RATE_LIMIT_RPS", 20),
-		Timeout:      envDuration("KEYCLOAK_TIMEOUT_MS", 8*time.Second),
+		BaseURL:        mustEnv("KEYCLOAK_BASE_URL", appEnv),
+		AdminRealm:     envOr("KEYCLOAK_ADMIN_REALM", "master"),
+		ClientID:       envOr("KEYCLOAK_ADMIN_CLIENT_ID", "iam-realm-provisioner"),
+		SecretProvider: keycloakadapter.EnvSecretFn("KEYCLOAK_ADMIN_CLIENT_SECRET"),
+		RateLimitRPS:   envInt("KEYCLOAK_RATE_LIMIT_RPS", 20),
+		Timeout:        envDuration("KEYCLOAK_TIMEOUT_MS", 8*time.Second),
 	}, log)
 
 	openbaoClient := openbao.New(openbao.Config{
@@ -428,7 +423,11 @@ func main() {
 				return fmt.Errorf("outbox initializing")
 			}
 		}),
-		Keycloak: pingerFunc(keycloakAdmin.Ready),
+		Keycloak: pingerFunc(func(ctx context.Context) error {
+			pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			return keycloakAdmin.Ready(pingCtx)
+		}),
 	})
 
 	// ── 11. Graceful shutdown ─────────────────────────────────────────────

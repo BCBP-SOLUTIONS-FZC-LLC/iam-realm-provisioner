@@ -12,7 +12,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 // maxAuditErrorLen caps last_error so an arbitrarily long upstream error
@@ -42,7 +41,7 @@ func (r *PendingAuditEntryRepository) Enqueue(ctx context.Context, entry domain.
 	if err != nil {
 		return fmt.Errorf("pending_audit_entries: encode entry: %w", err)
 	}
-	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		_, err := tx.Exec(ctx, `
 			INSERT INTO pending_audit_entries (tenant_id, entry) VALUES ($1, $2)`,
 			entry.TenantID, body)
@@ -58,7 +57,7 @@ func (r *PendingAuditEntryRepository) Enqueue(ctx context.Context, entry domain.
 // elapses.
 func (r *PendingAuditEntryRepository) ClaimDue(ctx context.Context, limit int) ([]*domain.PendingAuditEntry, error) {
 	var out []*domain.PendingAuditEntry
-	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		rows, err := tx.Query(ctx, `
 			UPDATE pending_audit_entries
 			SET attempts = attempts + 1,
@@ -95,7 +94,7 @@ func (r *PendingAuditEntryRepository) ClaimDue(ctx context.Context, limit int) (
 
 // MarkDelivered deletes delivered row id.
 func (r *PendingAuditEntryRepository) MarkDelivered(ctx context.Context, id uuid.UUID) error {
-	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		_, err := tx.Exec(ctx, `DELETE FROM pending_audit_entries WHERE id = $1`, id)
 		return err
 	})
@@ -103,7 +102,7 @@ func (r *PendingAuditEntryRepository) MarkDelivered(ctx context.Context, id uuid
 
 // MarkRetry records lastErr on row id, leaving it pending.
 func (r *PendingAuditEntryRepository) MarkRetry(ctx context.Context, id uuid.UUID, lastErr string) error {
-	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE pending_audit_entries SET last_error = $2 WHERE id = $1`, id, truncate(lastErr, maxAuditErrorLen))
 		return err
 	})
@@ -111,12 +110,14 @@ func (r *PendingAuditEntryRepository) MarkRetry(ctx context.Context, id uuid.UUI
 
 // MarkRetryAfter records lastErr and overrides next_attempt_at with
 // now()+delay, honoring an AL-5 Retry-After hint over the row's default
-// exponential backoff.
+// exponential backoff. A non-positive delay means "no specific hint" and
+// falls back to MarkRetry, which leaves next_attempt_at unchanged so the
+// row's own exponential-backoff schedule is preserved.
 func (r *PendingAuditEntryRepository) MarkRetryAfter(ctx context.Context, id uuid.UUID, lastErr string, delay time.Duration) error {
-	if delay < 0 {
-		delay = 0
+	if delay <= 0 {
+		return r.MarkRetry(ctx, id, lastErr)
 	}
-	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		_, err := tx.Exec(ctx, `
 			UPDATE pending_audit_entries
 			SET last_error = $2,
@@ -128,7 +129,7 @@ func (r *PendingAuditEntryRepository) MarkRetryAfter(ctx context.Context, id uui
 
 // MarkFailed parks row id as permanently 'failed'.
 func (r *PendingAuditEntryRepository) MarkFailed(ctx context.Context, id uuid.UUID, lastErr string) error {
-	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE pending_audit_entries SET status = 'failed', last_error = $2 WHERE id = $1`, id, truncate(lastErr, maxAuditErrorLen))
 		return err
 	})

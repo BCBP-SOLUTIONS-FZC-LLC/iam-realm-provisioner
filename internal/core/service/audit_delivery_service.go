@@ -69,7 +69,7 @@ func (s *AuditDeliveryService) DrainOnce(ctx context.Context, limit int) (int, e
 				s.log.WarnContext(ctx, "audit_delivery: mark failed did not persist", "entry_id", p.ID, "error", err.Error())
 			}
 		default:
-			if p.Attempts >= maxAuditDeliveryAttempts {
+			if p.Attempts > maxAuditDeliveryAttempts {
 				metrics.AuditEntryDeliveryTotal.WithLabelValues("rejected").Inc()
 				s.log.ErrorContext(ctx, "audit_delivery: entry exhausted retry budget, parking as failed", "entry_id", p.ID, "tenant_id", p.TenantID, "attempts", p.Attempts, "max_attempts", maxAuditDeliveryAttempts, "error", werr.Error())
 				if err := s.entries.MarkFailed(ctx, p.ID, werr.Error()); err != nil {

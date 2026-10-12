@@ -20,7 +20,7 @@ import (
 // @Param        id  path      string  true  "Tenant UUID"  format(uuid)
 // @Success      200 {object}  service.GetRealmResult
 // @Failure      400 {object}  ErrorResponse  "invalid_request"
-// @Failure      404 {object}  ErrorResponse  "realm_not_found"
+// @Failure      404 {object}  ErrorResponse  "tenant_realm_not_found"
 // @Failure      500 {object}  ErrorResponse
 // @Security     SystemRole
 // @Security     TenantID
@@ -60,8 +60,8 @@ type reactivateRequest struct {
 // @Param        request  body      reactivateRequest  false  "Optional reactivation reason"
 // @Success      200      {object}  service.ReactivateResult
 // @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
-// @Failure      404      {object}  ErrorResponse  "realm_not_found"
-// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR invalid_realm_state"
+// @Failure      404      {object}  ErrorResponse  "tenant_realm_not_found"
+// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR tenant_offboarded OR optimistic_lock_conflict"
 // @Failure      500      {object}  ErrorResponse
 // @Security     SystemRole
 // @Security     TenantID
@@ -98,8 +98,8 @@ func (h *InternalHandler) Reactivate(c *gin.Context) {
 // @Param        id  path      string  true  "Tenant UUID"  format(uuid)
 // @Success      200 {object}  service.ExpireTrialResult
 // @Failure      400 {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
-// @Failure      404 {object}  ErrorResponse  "realm_not_found"
-// @Failure      409 {object}  ErrorResponse  "operation_in_progress OR invalid_realm_state"
+// @Failure      404 {object}  ErrorResponse  "tenant_realm_not_found"
+// @Failure      409 {object}  ErrorResponse  "operation_in_progress OR realm_already_dedicated OR tenant_offboarded"
 // @Failure      500 {object}  ErrorResponse
 // @Security     SystemRole
 // @Security     TenantID
@@ -141,8 +141,8 @@ type suspendRequest struct {
 // @Success      200      {object}  service.SuspendResult
 // @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
 // @Failure      403      {object}  ErrorResponse  "insufficient_role (operator role required)"
-// @Failure      404      {object}  ErrorResponse  "realm_not_found"
-// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR invalid_realm_state"
+// @Failure      404      {object}  ErrorResponse  "tenant_realm_not_found"
+// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR tenant_offboarded"
 // @Failure      500      {object}  ErrorResponse
 // @Security     SystemRole
 // @Security     TenantID
@@ -183,7 +183,7 @@ func (h *InternalHandler) Suspend(c *gin.Context) {
 // @Param        keycloak_user_id  path  string  true  "Keycloak user UUID"  format(uuid)
 // @Success      204               "No Content"
 // @Failure      400               {object}  ErrorResponse  "invalid_request"
-// @Failure      404               {object}  ErrorResponse  "realm_not_found"
+// @Failure      404               {object}  ErrorResponse  "tenant_realm_not_found"
 // @Failure      500               {object}  ErrorResponse
 // @Security     SystemRole
 // @Security     TenantID
@@ -223,7 +223,7 @@ func (h *InternalHandler) DeleteUser(c *gin.Context) {
 // @Param        keycloak_user_id  path  string  true  "Keycloak user UUID"  format(uuid)
 // @Success      204               "No Content"
 // @Failure      400               {object}  ErrorResponse  "invalid_request"
-// @Failure      404               {object}  ErrorResponse  "realm_not_found OR user_not_found"
+// @Failure      404               {object}  ErrorResponse  "tenant_realm_not_found OR keycloak_user_not_found"
 // @Failure      500               {object}  ErrorResponse
 // @Security     SystemRole
 // @Security     TenantID

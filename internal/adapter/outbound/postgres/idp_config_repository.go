@@ -8,7 +8,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 const idpConfigColumns = `id, tenant_id, idp_alias, protocol, display_name, enabled, config, status, record_version, created_at, updated_at`
@@ -23,7 +22,7 @@ func NewIdpConfigRepository(pool *pgcommon.Pool) *IdpConfigRepository {
 	return &IdpConfigRepository{pool: pool}
 }
 
-func scanIdpConfig(row pgx.Row) (*domain.IdpConfig, error) {
+func scanIdpConfig(row pgcommon.Row) (*domain.IdpConfig, error) {
 	var c domain.IdpConfig
 	var cfg []byte
 	if err := row.Scan(&c.ID, &c.TenantID, &c.IdpAlias, &c.Protocol, &c.DisplayName, &c.Enabled, &cfg, &c.Status, &c.RecordVersion, &c.CreatedAt, &c.UpdatedAt); err != nil {
@@ -38,11 +37,11 @@ func scanIdpConfig(row pgx.Row) (*domain.IdpConfig, error) {
 // FindByAlias returns tenantID's IdP config for alias, or ErrIdpConfigNotFound.
 func (r *IdpConfigRepository) FindByAlias(ctx context.Context, tenantID uuid.UUID, alias string) (*domain.IdpConfig, error) {
 	var out *domain.IdpConfig
-	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		row := tx.QueryRow(ctx, `SELECT `+idpConfigColumns+` FROM keycloak_idp_configs WHERE tenant_id = $1 AND idp_alias = $2`, tenantID, alias)
 		found, scanErr := scanIdpConfig(row)
 		if scanErr != nil {
-			if errors.Is(scanErr, pgx.ErrNoRows) {
+			if errors.Is(scanErr, pgcommon.ErrNoRows) {
 				return domain.NewError(domain.ErrIdpConfigNotFound, "no such idp config")
 			}
 			return scanErr
@@ -59,7 +58,7 @@ func (r *IdpConfigRepository) FindByAlias(ctx context.Context, tenantID uuid.UUI
 // ListByTenant returns every IdP config for tenantID, ordered by alias.
 func (r *IdpConfigRepository) ListByTenant(ctx context.Context, tenantID uuid.UUID) ([]*domain.IdpConfig, error) {
 	var out []*domain.IdpConfig
-	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT `+idpConfigColumns+` FROM keycloak_idp_configs WHERE tenant_id = $1 ORDER BY idp_alias`, tenantID)
 		if err != nil {
 			return err
@@ -85,7 +84,7 @@ func (r *IdpConfigRepository) ListByTenant(ctx context.Context, tenantID uuid.UU
 // cross-tenant.
 func (r *IdpConfigRepository) ListAll(ctx context.Context) ([]*domain.IdpConfig, error) {
 	var out []*domain.IdpConfig
-	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT `+idpConfigColumns+` FROM keycloak_idp_configs ORDER BY tenant_id, idp_alias`)
 		if err != nil {
 			return err
@@ -113,7 +112,7 @@ func (r *IdpConfigRepository) Upsert(ctx context.Context, c *domain.IdpConfig) e
 	if err != nil {
 		return err
 	}
-	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		_, err := tx.Exec(ctx, `
 			INSERT INTO keycloak_idp_configs (id, tenant_id, idp_alias, protocol, display_name, enabled, config, status)
 			VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8)
@@ -132,7 +131,7 @@ func (r *IdpConfigRepository) Upsert(ctx context.Context, c *domain.IdpConfig) e
 
 // Delete removes tenantID's IdP config for alias.
 func (r *IdpConfigRepository) Delete(ctx context.Context, tenantID uuid.UUID, alias string) error {
-	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		_, err := tx.Exec(ctx, `DELETE FROM keycloak_idp_configs WHERE tenant_id = $1 AND idp_alias = $2`, tenantID, alias)
 		return err
 	})
@@ -161,7 +160,7 @@ func NewIdpValidationRepository(pool *pgcommon.Pool) *IdpValidationRepository {
 func (r *IdpValidationRepository) Insert(ctx context.Context, v *domain.IdpConfigValidation) error {
 	checks, _ := json.Marshal(v.Checks)         //nolint:errcheck // map[string]string can never fail to marshal
 	acks, _ := json.Marshal(v.Acknowledgements) //nolint:errcheck // domain.IdpValidationAck's fields (string/uuid.UUID/time.Time, always set via time.Now()) can never fail to marshal
-	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		_, err := tx.Exec(ctx, `
 			INSERT INTO keycloak_idp_config_validations (tenant_id, idp_alias, validator_version, outcome, checks, acknowledgements)
 			VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -174,7 +173,7 @@ func (r *IdpValidationRepository) Insert(ctx context.Context, v *domain.IdpConfi
 // alias, or nil if none exists.
 func (r *IdpValidationRepository) LatestForAlias(ctx context.Context, tenantID uuid.UUID, alias string) (*domain.IdpConfigValidation, error) {
 	var out *domain.IdpConfigValidation
-	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		row := tx.QueryRow(ctx, `
 			SELECT id, tenant_id, idp_alias, validator_version, outcome, checks, acknowledgements, validated_at
 			FROM keycloak_idp_config_validations
@@ -183,7 +182,7 @@ func (r *IdpValidationRepository) LatestForAlias(ctx context.Context, tenantID u
 		var v domain.IdpConfigValidation
 		var checks, acks []byte
 		if err := row.Scan(&v.ID, &v.TenantID, &v.IdpAlias, &v.ValidatorVersion, &v.Outcome, &checks, &acks, &v.ValidatedAt); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
+			if errors.Is(err, pgcommon.ErrNoRows) {
 				return nil
 			}
 			return err

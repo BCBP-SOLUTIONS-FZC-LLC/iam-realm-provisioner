@@ -16,7 +16,6 @@ import (
 
 	"github.com/Nerzal/gocloak/v13"
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/httpx"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
@@ -50,7 +49,7 @@ type Admin struct {
 	tokens *tokenCache
 	cfg    Config
 	log    port.Logger
-	tracer trace.Tracer
+	tracer gincommon.Tracer
 }
 
 var _ port.KeycloakAdmin = (*Admin)(nil)

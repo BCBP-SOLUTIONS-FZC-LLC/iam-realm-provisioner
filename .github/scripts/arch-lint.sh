@@ -27,8 +27,11 @@ echo "OK: gocloak is imported only by internal/adapter/outbound/keycloak"
 #   1. Logging — the only logger built anywhere in this repo is
 #      platform-gincommon/pkg/logger.NewLogger (cmd/server/main.go,
 #      cmd/reconciler/main.go); every call site takes port.Logger, which
-#      that logger satisfies directly. zap/logrus/stdlib "log" imported
-#      elsewhere would mean a second, ungoverned logging path.
+#      that logger satisfies directly. zap/logrus/stdlib "log"/"log/slog"
+#      imported elsewhere would mean a second, ungoverned logging path.
+#      (log/slog is separately banned: slog.Default() writes to a sink
+#      that is not platform-gincommon's Zap logger. _test.go is exempt:
+#      tests legitimately use slog as a spy/test-double, not a prod sink.)
 #   2. Metrics — every custom Prometheus collector in this repo registers
 #      onto gincommon.MetricsRegisterer() (internal/adapter/outbound/metrics/
 #      metrics.go), never prometheus.DefaultRegisterer/MustRegister
@@ -44,7 +47,7 @@ echo "OK: gocloak is imported only by internal/adapter/outbound/keycloak"
 #      onto an unconfigured or duplicate provider.
 echo "Checking observability invariant (logs/metrics/traces via platform-gincommon only)..."
 
-offenders=$(grep -rlE '"go\.uber\.org/zap"|"github\.com/sirupsen/logrus"|^[[:space:]]*"log"$' --include="*.go" . 2>/dev/null | grep -v "_test.go" || true)
+offenders=$(grep -rlE '"go\.uber\.org/zap"|"github\.com/sirupsen/logrus"|^[[:space:]]*"log"$|^[[:space:]]*"log/slog"$' --include="*.go" . 2>/dev/null | grep -v "_test.go" || true)
 if [ -n "$offenders" ]; then
   echo "FAIL: a logging library other than platform-gincommon's port.Logger is imported:"
   echo "$offenders"
@@ -89,6 +92,13 @@ echo "OK: logs/metrics/traces route through platform-gincommon only"
 #      (internal/adapter/outbound/postgres/migrate.go) is the only
 #      migration runner; a direct golang-migrate/migrate import would be a
 #      second, undocumented migration path alongside it.
+#   4. Transaction/row types — internal/ and cmd/ code uses pgcommon.Tx,
+#      pgcommon.Row, pgcommon.Rows, pgcommon.ErrNoRows, pgcommon.TxOptions
+#      (all type aliases; pgcommon re-exports them so these packages never
+#      import pgx/v5 or pgxpool directly). test/dbseed/pool.go is exempt:
+#      it implements pgcommon.Rows (= pgx.Rows) and exposes pgxpool.Config
+#      for migration test helpers — the interface contract forces those
+#      underlying types.
 echo "Checking database invariant (connections/config/operations via platform-pgcommon only)..."
 
 offenders=$(grep -rlE '"database/sql"|"github\.com/lib/pq"|"github\.com/jackc/pgx/v5/stdlib"' --include="*.go" . 2>/dev/null || true)
@@ -108,6 +118,21 @@ fi
 offenders=$(grep -rlE '"github\.com/golang-migrate/migrate' --include="*.go" . 2>/dev/null || true)
 if [ -n "$offenders" ]; then
   echo "FAIL: golang-migrate imported directly instead of platform-pgcommon/pkg/migrate:"
+  echo "$offenders"
+  exit 1
+fi
+
+# Check 4: internal/ and cmd/ production code must not import pgx/v5 or
+# pgxpool directly — use pgcommon type aliases instead (pgcommon.Tx,
+# pgcommon.Row, pgcommon.Rows, pgcommon.ErrNoRows, pgcommon.TxOptions,
+# pgcommon.Conn). _test.go files are exempt: test doubles that implement
+# pgcommon.Tx (= pgx.Tx) or pgcommon.Rows (= pgx.Rows), and unit tests that
+# construct *pgconn.PgError to verify the error-mapper, legitimately need the
+# underlying interface types that pgcommon re-exports as aliases.
+offenders=$(grep -rlE '"github\.com/jackc/pgx/v5"$|"github\.com/jackc/pgx/v5/pgxpool"$' --include="*.go" \
+    internal/ cmd/ 2>/dev/null | grep -v '_test\.go$' || true)
+if [ -n "$offenders" ]; then
+  echo "FAIL: internal/ or cmd/ production code imports pgx/v5 or pgxpool directly — use pgcommon type aliases (pgcommon.Tx, pgcommon.Row, pgcommon.Rows, pgcommon.ErrNoRows, pgcommon.TxOptions, pgcommon.Conn) instead:"
   echo "$offenders"
   exit 1
 fi

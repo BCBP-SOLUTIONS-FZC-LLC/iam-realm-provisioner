@@ -29,25 +29,6 @@ func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
 func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
 
-func (h *recordingHandler) last(t *testing.T) slog.Record {
-	t.Helper()
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if len(h.records) == 0 {
-		t.Fatal("no records captured")
-	}
-	return h.records[len(h.records)-1]
-}
-
-func attrMap(r slog.Record) map[string]any {
-	m := make(map[string]any, r.NumAttrs())
-	r.Attrs(func(a slog.Attr) bool {
-		m[a.Key] = a.Value.Any()
-		return true
-	})
-	return m
-}
-
 // mockLogger implements the Logger port and records every call so tests can
 // assert exactly which level/msg/fields SlogStyleLogger forwarded.
 type mockLogger struct {
@@ -186,7 +167,11 @@ func TestSlogStyleLogger_ContextMethods_AddTraceIDWhenSpanValid(t *testing.T) {
 	}
 }
 
-func TestSlogStyleLogger_ZeroValue_FallsBackToSlogDefault(t *testing.T) {
+// TestSlogStyleLogger_ZeroValue_IsNoop verifies that a nil underlying Logger
+// is a complete no-op: no entry is forwarded anywhere, and in particular
+// nothing reaches stdlib slog (there is no fallback to slog.Default()).
+func TestSlogStyleLogger_ZeroValue_IsNoop(t *testing.T) {
+	// Intercept slog.Default so we can detect any rogue write.
 	h := &recordingHandler{}
 	old := slog.Default()
 	slog.SetDefault(slog.New(h))
@@ -195,20 +180,17 @@ func TestSlogStyleLogger_ZeroValue_FallsBackToSlogDefault(t *testing.T) {
 	var s SlogStyleLogger // zero value: log == nil
 	s.Warn("fallback", "key", "val")
 
-	rec := h.last(t)
-	if rec.Level != slog.LevelWarn {
-		t.Errorf("Level = %v, want %v", rec.Level, slog.LevelWarn)
-	}
-	if rec.Message != "fallback" {
-		t.Errorf("Message = %q, want %q", rec.Message, "fallback")
-	}
-	attrs := attrMap(rec)
-	if attrs["key"] != "val" {
-		t.Errorf("attrs[key] = %v, want %q", attrs["key"], "val")
+	h.mu.Lock()
+	n := len(h.records)
+	h.mu.Unlock()
+	if n != 0 {
+		t.Errorf("expected 0 slog records (noop), got %d", n)
 	}
 }
 
-func TestSlogStyleLogger_ZeroValue_ContextFallbackAddsTraceID(t *testing.T) {
+// TestSlogStyleLogger_ZeroValue_ContextIsNoop verifies the Context variant is
+// also a no-op when the logger is nil — even with a valid span in ctx.
+func TestSlogStyleLogger_ZeroValue_ContextIsNoop(t *testing.T) {
 	h := &recordingHandler{}
 	old := slog.Default()
 	slog.SetDefault(slog.New(h))
@@ -220,24 +202,22 @@ func TestSlogStyleLogger_ZeroValue_ContextFallbackAddsTraceID(t *testing.T) {
 	var s SlogStyleLogger
 	s.ErrorContext(ctx, "fallback-ctx")
 
-	rec := h.last(t)
-	if rec.Level != slog.LevelError {
-		t.Errorf("Level = %v, want %v", rec.Level, slog.LevelError)
-	}
-	attrs := attrMap(rec)
-	if attrs["trace_id"] != sc.TraceID().String() {
-		t.Errorf("attrs[trace_id] = %v, want %v", attrs["trace_id"], sc.TraceID().String())
+	h.mu.Lock()
+	n := len(h.records)
+	h.mu.Unlock()
+	if n != 0 {
+		t.Errorf("expected 0 slog records (noop), got %d", n)
 	}
 }
 
-// log4's default branch (an out-of-range level) is unreachable through the
+// log4's default branch (an out-of-range logLevel) is unreachable through the
 // public API, which only ever passes the four named levels — but it exists
 // as a defensive fallback, so exercise it directly (white-box, same package).
 func TestLog4_UnknownLevel_FallsBackToError(t *testing.T) {
 	m := &mockLogger{}
 	s := NewSlogStyleLogger(m)
 
-	s.log4(context.Background(), slog.Level(99), "weird", []any{"k", "v"}, false)
+	s.log4(context.Background(), logLevel(99), "weird", []any{"k", "v"}, false)
 
 	got := m.last(t)
 	if got.level != "error" {

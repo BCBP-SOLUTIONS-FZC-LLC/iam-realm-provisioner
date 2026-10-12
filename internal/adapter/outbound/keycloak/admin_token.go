@@ -105,6 +105,15 @@ func (c *tokenCache) Token(ctx context.Context) (string, error) {
 	}
 
 	c.mu.Lock()
+	// If InvalidateUnauthorized fired while this refresh was in flight (the
+	// trigger was captured as "proactive" above before the 401 arrived), the
+	// unauthorized flag may be set. Only consume it on a SUCCESSFUL refresh:
+	// if the refresh failed, leave the flag so the next successful refresh
+	// carries the correct "401" attribution rather than "proactive".
+	if c.unauthorized && err == nil {
+		metrics.AdminTokenRefreshTotal.WithLabelValues("401").Inc()
+		c.unauthorized = false
+	}
 	if err == nil {
 		c.token = tok
 		c.expiresAt = time.Now().Add(time.Duration(expiresIn)*time.Second - adminTokenSafetyMargin)

@@ -16,7 +16,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
-	"github.com/jackc/pgx/v5"
 )
 
 // DSNFromEnv builds a PostgreSQL connection URL for the application pool by
@@ -141,7 +140,7 @@ var writeRetryOpts = pgcommon.RetryOptions{
 // unchanged for service-layer classification. Contended writes retry via
 // pgcommon.RunInTxWithRetryOpts on deadlock / serialization failure.
 func (r *TxRunner) RunInTx(ctx context.Context, fn func(ctx context.Context) error) error {
-	return wrapConnErr(pgcommon.RunInTxWithRetryOpts(ctx, r.pool, pgx.TxOptions{}, writeRetryOpts, func(ctx context.Context, tx pgx.Tx) error {
+	return wrapConnErr(pgcommon.RunInTxWithRetryOpts(ctx, r.pool, pgcommon.TxOptions{}, writeRetryOpts, func(ctx context.Context, tx pgcommon.Tx) error {
 		txCtx := WithTx(ctx, tx)
 		if r.events != nil {
 			txCtx = port.WithEventPublisher(txCtx, r.events)
@@ -150,29 +149,29 @@ func (r *TxRunner) RunInTx(ctx context.Context, fn func(ctx context.Context) err
 	}))
 }
 
-// WithTx stores the active pgx.Tx in ctx so repository withPool joins and
+// WithTx stores the active pgcommon.Tx in ctx so repository withPool joins and
 // EventPublisher.Enqueue writes the outbox on the same transaction.
-func WithTx(ctx context.Context, tx pgx.Tx) context.Context {
+func WithTx(ctx context.Context, tx pgcommon.Tx) context.Context {
 	return context.WithValue(ctx, txKey{}, tx)
 }
 
 type txKey struct{}
 
-// TxFromContext retrieves the active pgx.Tx set by RunInTx, if any.
+// TxFromContext retrieves the active pgcommon.Tx set by RunInTx, if any.
 // Repository helpers call withPool which joins the tx when present.
-func TxFromContext(ctx context.Context) (pgx.Tx, bool) {
-	tx, ok := ctx.Value(txKey{}).(pgx.Tx)
+func TxFromContext(ctx context.Context) (pgcommon.Tx, bool) {
+	tx, ok := ctx.Value(txKey{}).(pgcommon.Tx)
 	return tx, ok
 }
 
 // withPool runs fn inside a transaction, joining an existing one if present
 // in ctx. Used by repository helpers so a read outside a service tx still
 // binds RLS via pgcommon.RunInTx's checkout hook.
-func withPool(ctx context.Context, pool *pgcommon.Pool, fn func(pgx.Tx) error) error {
+func withPool(ctx context.Context, pool *pgcommon.Pool, fn func(pgcommon.Tx) error) error {
 	if tx, ok := TxFromContext(ctx); ok {
 		return wrapConnErr(fn(tx))
 	}
-	return wrapConnErr(pgcommon.RunInTx(ctx, pool, pgx.TxOptions{}, func(_ context.Context, tx pgx.Tx) error {
+	return wrapConnErr(pgcommon.RunInTx(ctx, pool, pgcommon.TxOptions{}, func(_ context.Context, tx pgcommon.Tx) error {
 		return fn(tx)
 	}))
 }

@@ -6,10 +6,10 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 )
 
 // tracerName scopes this adapter's spans. RP-INV-1 makes this package the
@@ -44,8 +44,7 @@ func (a *Admin) begin(ctx context.Context, op string) (opCtx context.Context, do
 		metrics.DependencyRequestDuration.WithLabelValues("keycloak", op, outcome).Observe(dur)
 		if err != nil {
 			metrics.KeycloakCallFailuresTotal.WithLabelValues(op).Inc()
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			gincommon.RecordSpanError(ctx, err, err.Error())
 		}
 		span.End()
 	}

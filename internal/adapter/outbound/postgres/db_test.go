@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
+	"github.com/jackc/pgx/v5/pgconn" // *pgconn.PgError — constructed directly to test the error mapper; no pgcommon wrapper
 	"github.com/jackc/puddle/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -144,7 +144,7 @@ func TestSystemPoolConfig_NonNilLoggerIsWrapped(t *testing.T) {
 
 // wrapConnErr is a pure function of its input error, so every branch can be
 // exercised directly without a database — no repository method in this
-// package actually produces a bare pgx.ErrNoRows or a bare context
+// package actually produces a bare pgcommon.ErrNoRows or a bare context
 // cancellation error by the time it reaches wrapConnErr (every repo either
 // translates ErrNoRows into a *domain.Error or swallows it), so those two
 // passthrough branches are only reachable this way.
@@ -194,10 +194,10 @@ func TestWrapConnErr_StatementOrLockTimeoutMapsToRequestTimeout(t *testing.T) {
 }
 
 func TestWrapConnErr_ErrNoRowsPassesThroughUnchanged(t *testing.T) {
-	got := wrapConnErr(pgx.ErrNoRows)
+	got := wrapConnErr(pgcommon.ErrNoRows)
 
-	assert.Same(t, pgx.ErrNoRows, got)
-	assert.True(t, errors.Is(got, pgx.ErrNoRows))
+	assert.Same(t, pgcommon.ErrNoRows, got)
+	assert.True(t, errors.Is(got, pgcommon.ErrNoRows))
 }
 
 func TestWrapConnErr_ContextCanceledPassesThroughUnchanged(t *testing.T) {

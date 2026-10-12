@@ -4,7 +4,7 @@ The Realm Provisioner Service — the **single writer to the Keycloak Admin API*
 
 **Repository:** `github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`
 **Module:** Go 1.26.9 · private module · deployed as three binaries from one image (`cmd/server`, `cmd/reconciler`, `cmd/migrate`)
-**Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.22 Approved** — names frozen at v1.0 sign-off (`docs/lld/iam-lld-realm-provisioner-service.md`)
+**Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.23 Approved** — names frozen at v1.0 sign-off (`docs/lld/iam-lld-realm-provisioner-service.md`)
 
 ---
 
@@ -156,7 +156,7 @@ iam-realm-provisioner/
 │   ├── asyncapi.yaml                  # AsyncAPI 3.0 — iam-tenant-events (9 published) + 3 inbound SQS channels
 │   └── embed.go                       # //go:embed asyncapi.yaml — served from the compiled binary, no source tree in the image
 ├── deploy/                            # Helm chart, AWS IAM policy, OpenBao policy, Prometheus alerts, Keycloak realm template
-├── docs/lld/                          # LLD v1.22 (names frozen at v1.0)
+├── docs/lld/                          # LLD v1.23 (names frozen at v1.0)
 ├── docs/observability/                # Observability Standard implementation, generated metric registry, metric migration history, per-alert runbooks
 ├── docs/runbook.md                    # Operator procedures for the headline incident scenarios (§24)
 ├── docs/runbook-schema-registry.md    # Schema-governance operator runbook (shared iam-tenant-events registry)
@@ -198,8 +198,8 @@ RLS-6 (no non-`SET LOCAL` write to `app.tenant_id`) is checked separately, inlin
 | Library | Version | Purpose |
 |---|---|---|
 | `platform-gincommon` | v1.6.0 | HTTP middleware (incl. `RequestTimeout`), Zap logging, OTel tracing (`InitTracingWithConfig`, `NewSpanTracer`), Prometheus metrics (`MetricsHandler`, Observability Standard identity) |
-| `platform-events/v2` | v2.0.0 | Transactional outbox (`eventcfg.LoadOutbox`), SNS publisher, SQS consumers (`eventcfg.LoadSQS`, DLQ forwarding), `pkg/inbox` dedup |
-| `platform-pgcommon/v2` | v2.0.0 | pgx/v5 pool, RLS GUC injection, per-tx statement timeout, migrations, error classifiers (`IsConnectionException`/`IsInsufficientResources`/`IsOperatorIntervention`/`IsSystemError`/`IsPoolClosed`) |
+| `platform-events/v2` | v2.1.0 | Transactional outbox (`eventcfg.LoadOutbox`), SNS publisher, SQS consumers (`eventcfg.LoadSQS`, DLQ forwarding), `pkg/inbox` dedup |
+| `platform-pgcommon/v2` | v2.0.1 | pgx/v5 pool, RLS GUC injection, per-tx statement timeout, migrations, error classifiers (`IsConnectionException`/`IsInsufficientResources`/`IsOperatorIntervention`/`IsSystemError`/`IsPoolClosed`) |
 | `Nerzal/gocloak/v13` | v13.9.0 | Keycloak Admin API client — used **only** inside `internal/adapter/outbound/keycloak/` (RP-INV-1) |
 
 ---
@@ -345,8 +345,8 @@ Seven CronJobs, one Helm manifest (`deploy/helm/templates/cronjobs.yaml`), each 
 | CronJob (`--job=`) | Schedule | Purpose |
 |---|---|---|
 | `trial-expiry` | `0 2 * * *` | RP-C1: sweep `tenant_realms WHERE strategy='shared' AND status='active' AND trial_ends_at < now()` — **never queries O&M**. Calls RP-12's idempotent effect per tenant. |
-| `trial-hard-delete` | `0 3 * * *` | RP-C2: past `TRIAL_GRACE_DAYS` beyond expiry, hard-delete trial users from Keycloak and scrub the local row. |
-| `subscription-lapse` | `0 2 * * *` | RP-C3: `cancelled → suspended → offboarded`, in two phases sharing one `RECONCILER_BATCH_LIMIT` budget — suspend polls O&M's I-16 lapse list (skipped with a WARN if `ORG_MEMBERSHIP_BASE_URL` is unset), offboard always runs against locally-tracked `suspension_source='billing_lapse'` rows past `RETENTION_DAYS`. |
+| `trial-hard-delete` | `0 3 * * *` | RP-C2: past `TRIAL_GRACE_DAYS` beyond expiry, hard-delete trial users from Keycloak and scrub the local row. Also atomically deletes `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`, and `pending_audit_entries` via `NewGDPRScrubFn` (`gdpr.go`, BYPASSRLS sysPool tx). |
+| `subscription-lapse` | `0 2 * * *` | RP-C3: `cancelled → suspended → offboarded`, in two phases — suspend polls O&M's I-16 lapse list (skipped with WARN if `ORG_MEMBERSHIP_BASE_URL` unset); offboard always runs, and after deleting the Keycloak realm, calls `NewGDPRScrubFn` to atomically delete the same five PII tables (`keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`, `pending_audit_entries`) — hard-fails and never emits `TenantOffboarded` if `GDPRScrubFn` is nil. |
 | `realm-config-reconcile` | `*/10 * * * *` | RP-C4: retries every `realm_config_reconciliations` row in `status='pending'`; a row past `RECONCILER_MAX_ATTEMPTS` (default 20) moves to a terminal `failed` status instead of retrying forever (poison-pill cap). |
 | `outbox-prune` | `0 4 * * *` | Prunes published `outbox_events` past `OUTBOX_RETENTION_DAYS`. |
 | `processed-events-prune` | `30 4 * * *` | Prunes `processed_events` rows past `PROCESSED_EVENTS_TTL_DAYS`. |
@@ -929,7 +929,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, extending the serv
 | [`.claude/request-flows.md`](.claude/request-flows.md) | Keycloak-effect-first discipline, compensating teardown, every RP-*/RP-C* flow, idempotency mechanics, GDPR/data-lifecycle |
 | [`.claude/operations.md`](.claude/operations.md) | Security, observability, configuration, CI/CD, testing, GDPR, integration points, open items |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Detailed architecture narrative with Mermaid diagrams — layer model, write flow, RLS/GUC flow, threat model |
-| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD, v1.14 Approved — §2.5 platform-automation principal, §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
+| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD, v1.23 Approved — §15 GDPR scrub (five-table erasure via `NewGDPRScrubFn`), §17 error taxonomy (incl. `credential_replay_expired` TS-D22), §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
 | [`docs/runbook.md`](docs/runbook.md) | Full operator procedures for the headline incident scenarios |
 | [`docs/observability/`](docs/observability/README.md) | Observability Standard implementation, generated metric inventory, metric migration history, per-alert runbooks |
 

@@ -192,17 +192,12 @@ func run() int {
 	txRunner := pgadapter.NewTxRunner(sysPool, outboxPublisher)
 
 	keycloakAdmin := keycloakadapter.New(keycloakadapter.Config{
-		BaseURL:    mustEnv("KEYCLOAK_BASE_URL", appEnv),
-		AdminRealm: envOr("KEYCLOAK_ADMIN_REALM", "master"),
-		ClientID:   envOr("KEYCLOAK_ADMIN_CLIENT_ID", "iam-realm-provisioner"),
-		SecretProvider: func(_ context.Context) (string, error) {
-			if s := os.Getenv("KEYCLOAK_ADMIN_CLIENT_SECRET"); s != "" {
-				return s, nil
-			}
-			return mustEnv("KEYCLOAK_ADMIN_CLIENT_SECRET", appEnv), nil
-		},
-		RateLimitRPS: envInt("KEYCLOAK_RATE_LIMIT_RPS", 20),
-		Timeout:      envDuration("KEYCLOAK_TIMEOUT_MS", 8*time.Second),
+		BaseURL:        mustEnv("KEYCLOAK_BASE_URL", appEnv),
+		AdminRealm:     envOr("KEYCLOAK_ADMIN_REALM", "master"),
+		ClientID:       envOr("KEYCLOAK_ADMIN_CLIENT_ID", "iam-realm-provisioner"),
+		SecretProvider: keycloakadapter.EnvSecretFn("KEYCLOAK_ADMIN_CLIENT_SECRET"),
+		RateLimitRPS:   envInt("KEYCLOAK_RATE_LIMIT_RPS", 20),
+		Timeout:        envDuration("KEYCLOAK_TIMEOUT_MS", 8*time.Second),
 	}, rawLog)
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(envOr("AWS_REGION", "ap-south-1")))
@@ -230,28 +225,35 @@ func run() int {
 	}
 
 	var outboxRunner *outbox.Runner
-	// The reconciler's own outbox-prune job reuses the same Runner shape
-	// as cmd/server, constructed with a noop publisher — pruning never
-	// publishes.
-	outboxRunner, err = outbox.NewRunner(outbox.Config{Pool: sysPool, Publisher: noopPublisher{}, Logger: rawLog})
-	if err != nil {
-		drainPools()
-		die("create outbox runner: %v", err)
+	if jobName == "outbox-prune" {
+		// The outbox-prune job reuses the same Runner shape as cmd/server,
+		// constructed with a noop publisher — pruning never publishes.
+		// Constructed only for this one job so other CronJob pods don't hold
+		// a sysPool connection and background goroutine they never use.
+		outboxRunner, err = outbox.NewRunner(outbox.Config{Pool: sysPool, Publisher: noopPublisher{}, Logger: rawLog})
+		if err != nil {
+			drainPools()
+			die("create outbox runner: %v", err)
+		}
 	}
 
 	jctx := &jobs.Context{
-		Pool:                   pool,
-		SysPool:                sysPool,
-		OutboxRunner:           outboxRunner,
-		TxRunner:               txRunner,
-		TenantRealms:           pgadapter.NewTenantRealmRepository(sysPool),
-		Reconciliations:        pgadapter.NewReconciliationRepository(sysPool),
-		Idempotency:            pgadapter.NewIdempotencyRepository(sysPool).WithInProgressLease(envDuration("IDEMPOTENCY_IN_PROGRESS_LEASE", pgadapter.DefaultInProgressLease)),
-		ProcessedEvents:        pgadapter.NewInboxRepository(sysPool, nil),
-		Retention:              pgadapter.NewRetentionRepository(sysPool),
-		Keycloak:               keycloakAdmin,
-		ObjectStore:            objectStore,
-		SubscriptionLapses:     subscriptionLapses,
+		Pool:               pool,
+		SysPool:            sysPool,
+		OutboxRunner:       outboxRunner,
+		TxRunner:           txRunner,
+		TenantRealms:       pgadapter.NewTenantRealmRepository(sysPool),
+		Reconciliations:    pgadapter.NewReconciliationRepository(sysPool),
+		Idempotency:        pgadapter.NewIdempotencyRepository(sysPool).WithInProgressLease(envDuration("IDEMPOTENCY_IN_PROGRESS_LEASE", pgadapter.DefaultInProgressLease)),
+		ProcessedEvents:    pgadapter.NewInboxRepository(sysPool, nil),
+		Retention:          pgadapter.NewRetentionRepository(sysPool),
+		Keycloak:           keycloakAdmin,
+		ObjectStore:        objectStore,
+		SubscriptionLapses: subscriptionLapses,
+		// GDPRScrubFn is the production §15.2 implementation: atomically
+		// deletes all tenant PII inside a BYPASSRLS sysPool transaction.
+		// See cmd/reconciler/jobs/gdpr.go for the authoritative table list.
+		GDPRScrubFn:            jobs.NewGDPRScrubFn(sysPool),
 		Logger:                 log,
 		BatchLimit:             envInt("RECONCILER_BATCH_LIMIT", 100),
 		TrialGraceDays:         envInt("TRIAL_GRACE_DAYS", 30),
