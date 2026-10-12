@@ -1,11 +1,8 @@
 # Reusable workflow - test gate.
 # Race detector (unit · postgres/RLS · integration) + coverage + arch lint +
-# AsyncAPI-vs-schema drift check, plus a separate e2e job. Called by ci.yml
-# and release.yml, so both share exactly one definition of "tests pass".
-# e2e runs as its own job (not a step in `test`), matching
-# iam-authz-enrichment: it starts in parallel instead of waiting behind the
-# race + coverage run, and an e2e failure is attributable at a glance in the
-# Actions UI rather than buried at the end of the `test` job's log.
+# AsyncAPI-vs-schema drift check + e2e — all in one `test` job, matching
+# iam-tender-acl's single-job structure. Called by ci.yml and release.yml,
+# so both share exactly one definition of "tests pass".
 name: Validate / Test
 
 "on":
@@ -44,7 +41,11 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # unit + postgres/RLS + integration (race + coverage): ~10 min
+    # arch-lint + metrics-registry-lint: ~1 min
+    # pre-pull Keycloak 26 image: ~2 min
+    # e2e (real Postgres + Keycloak testcontainers): ~10 min
+    timeout-minutes: 30
     outputs:
       pct: ${{ steps.gate.outputs.pct }}
     steps:
@@ -138,53 +139,6 @@ jobs:
       - name: Metrics registry compliance lint
         run: bash .github/scripts/metrics-registry-lint.sh
 
-  # Drives the production route table (internal/adapter/inbound/http.NewRouter,
-  # the exact construction cmd/server wires) over real HTTP against a real
-  # Postgres and a real Keycloak 26 testcontainer: trial provision →
-  # conversion, IdP configure behind the §11.6 gate, suspend → reactivate,
-  # idempotency replay (test/e2e's package doc has the full scope). The suite
-  # starts its own containers, so unlike iam-authz-enrichment's e2e job it
-  # needs no `services:` block. Independent of `test` (own checkout, own
-  # containers) so it runs in parallel rather than serializing behind it. Not
-  # part of the coverage gate, but every caller's downstream jobs need it.
-  e2e:
-    name: e2e
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7.0.0
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-          persist-credentials: false
-          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
-
-      - name: Set up Go
-        uses: actions/setup-go@v6.5.0
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: |
-            go.sum
-            go.mod
-
-      - name: Configure private module access
-        run: |
-          git config --global credential.helper store
-          echo "https://x-access-token:${{ secrets.GO_PRIVATE_TOKEN }}@github.com" > ~/.git-credentials
-          chmod 600 ~/.git-credentials
-
-      - name: Download modules
-        env:
-          GOPRIVATE: github.com/BCBP-SOLUTIONS-FZC-LLC/*
-          GONOSUMDB: github.com/BCBP-SOLUTIONS-FZC-LLC/*
-        run: go mod download
-
-      - name: Remove private module credentials
-        if: always()
-        run: |
-          rm -f ~/.git-credentials
-          git config --global --unset credential.helper || true
-
       # Pull the two images up front so their download time is not charged
       # against the suite's container-start waits (Keycloak's is 120s).
       - name: Pre-pull container images
@@ -192,7 +146,14 @@ jobs:
           docker pull postgres:16-alpine
           docker pull quay.io/keycloak/keycloak:26.0
 
-      - name: E2E tests
+      # Drives the production route table (internal/adapter/inbound/http.NewRouter,
+      # the exact construction cmd/server wires) over real HTTP against a real
+      # Postgres and a real Keycloak 26 testcontainer: trial provision →
+      # conversion, IdP configure behind the §11.6 gate, suspend → reactivate,
+      # idempotency replay (test/e2e's package doc has the full scope). The suite
+      # starts its own containers. Not part of the coverage gate, but must pass
+      # before any downstream job builds on this ref.
+      - name: End-to-end tests
         env:
           TESTCONTAINERS_RYUK_DISABLED: 'true'
         run: make test-e2e
