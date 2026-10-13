@@ -62,8 +62,9 @@ type provisionTrialRequest struct {
 // @Param        request  body      provisionTrialRequest        true  "Trial provisioning payload"
 // @Success      201      {object}  service.ProvisionTrialResult
 // @Failure      400      {object}  ErrorResponse                "invalid_request OR missing_idempotency_key"
-// @Failure      409      {object}  ErrorResponse                "operation_in_progress OR realm_already_exists"
+// @Failure      409      {object}  ErrorResponse                "operation_in_progress OR realm_already_dedicated OR tenant_offboarded"
 // @Failure      500      {object}  ErrorResponse
+// @Failure      503      {object}  ErrorResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
 // @Security     SystemRole
 // @Security     IdempotencyKey
 // @Router       /tenants/provision-trial [post]
@@ -119,8 +120,9 @@ type provisionDirectRequest struct {
 // @Param        request  body      provisionDirectRequest        true  "Direct provisioning payload"
 // @Success      201      {object}  service.ProvisionDirectResult
 // @Failure      400      {object}  ErrorResponse                 "invalid_request OR missing_idempotency_key"
-// @Failure      409      {object}  ErrorResponse                 "operation_in_progress OR realm_already_exists"
+// @Failure      409      {object}  ErrorResponse                 "operation_in_progress OR realm_already_dedicated OR tenant_offboarded"
 // @Failure      500      {object}  ErrorResponse
+// @Failure      503      {object}  ErrorResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
 // @Security     SystemRole
 // @Security     IdempotencyKey
 // @Router       /tenants/provision-direct [post]
@@ -177,8 +179,10 @@ type convertRequest struct {
 // @Param        request  body      convertRequest  true  "Conversion payload"
 // @Success      200      {object}  service.ConvertResult
 // @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
-// @Failure      404      {object}  ErrorResponse  "realm_not_found"
-// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR invalid_realm_state"
+// @Failure      404      {object}  ErrorResponse  "tenant_realm_not_found"
+// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR realm_already_dedicated OR tenant_offboarded OR optimistic_lock_conflict OR credential_replay_expired"
+// @Failure      502      {object}  ErrorResponse  "conversion_failed"
+// @Failure      503      {object}  ErrorResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
 // @Failure      500      {object}  ErrorResponse
 // @Security     SystemRole
 // @Security     TenantID
@@ -226,9 +230,10 @@ type revertConversionRequest struct {
 // @Param        request  body      revertConversionRequest false  "Optional revert reason"
 // @Success      200      {object}  service.RevertConversionResult
 // @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
-// @Failure      404      {object}  ErrorResponse  "realm_not_found"
+// @Failure      404      {object}  ErrorResponse  "tenant_realm_not_found"
 // @Failure      409      {object}  ErrorResponse  "operation_in_progress OR revert_window_expired"
 // @Failure      500      {object}  ErrorResponse
+// @Failure      503      {object}  ErrorResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
 // @Security     SystemRole
 // @Security     TenantID
 // @Security     IdempotencyKey
@@ -272,9 +277,10 @@ type createInvitedUserRequest struct {
 // @Param        request  body      createInvitedUserRequest  true  "Invited user payload"
 // @Success      201      {object}  service.CreateInvitedUserResult
 // @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
-// @Failure      404      {object}  ErrorResponse  "realm_not_found"
-// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR user_already_exists"
+// @Failure      404      {object}  ErrorResponse  "tenant_realm_not_found"
+// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR user_email_conflict"
 // @Failure      500      {object}  ErrorResponse
+// @Failure      503      {object}  ErrorResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
 // @Security     SystemRole
 // @Security     TenantID
 // @Security     IdempotencyKey
@@ -316,8 +322,9 @@ func (h *InternalHandler) CreateInvitedUser(c *gin.Context) {
 // @Param        keycloak_user_id  path  string  true  "Keycloak user UUID"  format(uuid)
 // @Success      204               "No Content"
 // @Failure      400               {object}  ErrorResponse  "invalid_request"
-// @Failure      404               {object}  ErrorResponse  "realm_not_found OR user_not_found"
+// @Failure      404               {object}  ErrorResponse  "tenant_realm_not_found OR keycloak_user_not_found"
 // @Failure      500               {object}  ErrorResponse
+// @Failure      503               {object}  ErrorResponse  "db_unavailable OR keycloak_unavailable"
 // @Security     SystemRole
 // @Security     TenantID
 // @Router       /tenants/{id}/users/{keycloak_user_id}/mfa-reset [post]

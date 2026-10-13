@@ -8,6 +8,15 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 )
 
+// maxAuditDeliveryAttempts caps how many transient failures one
+// pending_audit_entries row may accumulate before it is parked as failed.
+// At the drainer's 5s default tick plus the row's own exponential backoff
+// (5 min ceiling) this bounds one row to ~4 h of retry storm before it
+// stops consuming a worker slot — enough headroom for a genuine AL-5
+// outage to recover, tight enough that a misbehaving upstream stuck at
+// Retry-After: 1 cannot pin a row indefinitely.
+const maxAuditDeliveryAttempts = 50
+
 // AuditDeliveryService drains pending_audit_entries to Audit Log's AL-5
 // direct-write ingest (HLD §9.4, §10.6) — the delivery half of the
 // TenantIdpConfigChanged hand-off IdpService enqueues transactionally.
@@ -60,7 +69,23 @@ func (s *AuditDeliveryService) DrainOnce(ctx context.Context, limit int) (int, e
 				s.log.WarnContext(ctx, "audit_delivery: mark failed did not persist", "entry_id", p.ID, "error", err.Error())
 			}
 		default:
+			if p.Attempts > maxAuditDeliveryAttempts {
+				metrics.AuditEntryDeliveryTotal.WithLabelValues("rejected").Inc()
+				s.log.ErrorContext(ctx, "audit_delivery: entry exhausted retry budget, parking as failed", "entry_id", p.ID, "tenant_id", p.TenantID, "attempts", p.Attempts, "max_attempts", maxAuditDeliveryAttempts, "error", werr.Error())
+				if err := s.entries.MarkFailed(ctx, p.ID, werr.Error()); err != nil {
+					s.log.WarnContext(ctx, "audit_delivery: mark failed did not persist after retry budget exhausted", "entry_id", p.ID, "error", err.Error())
+				}
+				continue
+			}
 			metrics.AuditEntryDeliveryTotal.WithLabelValues("retry").Inc()
+			var rae *port.RetryAfterError
+			if errors.As(werr, &rae) && rae.RetryAfter > 0 {
+				s.log.WarnContext(ctx, "audit_delivery: delivery failed, will retry after upstream hint", "entry_id", p.ID, "attempts", p.Attempts, "retry_after", rae.RetryAfter.String(), "error", werr.Error())
+				if err := s.entries.MarkRetryAfter(ctx, p.ID, werr.Error(), rae.RetryAfter); err != nil {
+					s.log.WarnContext(ctx, "audit_delivery: mark retry-after did not persist", "entry_id", p.ID, "error", err.Error())
+				}
+				continue
+			}
 			s.log.WarnContext(ctx, "audit_delivery: delivery failed, will retry", "entry_id", p.ID, "attempts", p.Attempts, "error", werr.Error())
 			if err := s.entries.MarkRetry(ctx, p.ID, werr.Error()); err != nil {
 				s.log.WarnContext(ctx, "audit_delivery: mark retry did not persist", "entry_id", p.ID, "error", err.Error())

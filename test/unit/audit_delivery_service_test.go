@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -69,6 +70,40 @@ func TestAuditDelivery_MarkFailuresAreLoggedNotPropagated(t *testing.T) {
 	n, err := svc.DrainOnce(context.Background(), 10)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
+}
+
+// A row whose Attempts exceeds the max-attempts cap is parked as failed
+// without attempting delivery — bounds the blast radius of a misbehaving
+// AL-5 stuck at Retry-After: 1. ClaimDue post-increments before returning,
+// so parking fires at Attempts = 51 (after 50 actual delivery attempts).
+func TestAuditDelivery_ExhaustedRetryBudget_ParksAsFailed(t *testing.T) {
+	due := pendingEntries(1)
+	due[0].Attempts = 51 // one past max; ClaimDue post-increments, so 50 actual deliveries were made
+	repo := &mockPendingAuditEntryRepository{Due: due}
+	client := &mockAuditLogClient{Errs: []error{errors.New("timeout")}}
+	svc := service.NewAuditDeliveryService(repo, client).WithLogger(&mockLogger{})
+
+	_, err := svc.DrainOnce(context.Background(), 10)
+	require.NoError(t, err)
+	assert.Equal(t, []uuid.UUID{due[0].ID}, repo.Failed, "row must park as failed once retry budget is exhausted")
+	assert.Empty(t, repo.Retried, "MarkRetry must not fire past the cap")
+	assert.Empty(t, repo.RetriedAfter, "MarkRetryAfter must not fire past the cap")
+}
+
+// A *port.RetryAfterError routes through MarkRetryAfter with the AL-5
+// upstream hint rather than the default MarkRetry backoff.
+func TestAuditDelivery_RetryAfterErrorRoutesThroughMarkRetryAfter(t *testing.T) {
+	due := pendingEntries(1)
+	repo := &mockPendingAuditEntryRepository{Due: due}
+	base := errors.New("auditlog: AL-5 unavailable (status 429)")
+	client := &mockAuditLogClient{Errs: []error{&port.RetryAfterError{Underlying: base, RetryAfter: 42 * time.Second}}}
+	svc := service.NewAuditDeliveryService(repo, client).WithLogger(&mockLogger{})
+
+	_, err := svc.DrainOnce(context.Background(), 10)
+	require.NoError(t, err)
+	assert.Equal(t, []uuid.UUID{due[0].ID}, repo.RetriedAfter, "row must route through MarkRetryAfter")
+	assert.Equal(t, []time.Duration{42 * time.Second}, repo.RetryAfterHint)
+	assert.Empty(t, repo.Retried, "MarkRetry must not be called when a Retry-After hint is present")
 }
 
 func TestAuditDelivery_EmptyBacklog(t *testing.T) {

@@ -7,7 +7,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 const tenantRealmColumns = `tenant_id, realm_name, strategy, keycloak_shard, status,
@@ -26,7 +25,7 @@ func NewTenantRealmRepository(pool *pgcommon.Pool) *TenantRealmRepository {
 	return &TenantRealmRepository{pool: pool}
 }
 
-func scanTenantRealm(row pgx.Row) (*domain.TenantRealm, error) {
+func scanTenantRealm(row pgcommon.Row) (*domain.TenantRealm, error) {
 	var t domain.TenantRealm
 	err := row.Scan(&t.TenantID, &t.RealmName, &t.Strategy, &t.KeycloakShard, &t.Status,
 		&t.RealmTemplateVersion, &t.TrialEndsAt, &t.ConvertedAt, &t.DisabledAt, &t.SuspensionSource, &t.ExportedAt,
@@ -42,11 +41,11 @@ func scanTenantRealm(row pgx.Row) (*domain.TenantRealm, error) {
 // ErrTenantRealmNotFound.
 func (r *TenantRealmRepository) FindByTenantID(ctx context.Context, tenantID uuid.UUID) (*domain.TenantRealm, error) {
 	var out *domain.TenantRealm
-	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		row := tx.QueryRow(ctx, `SELECT `+tenantRealmColumns+` FROM tenant_realms WHERE tenant_id = $1 AND deleted_at IS NULL`, tenantID)
 		found, scanErr := scanTenantRealm(row)
 		if scanErr != nil {
-			if errors.Is(scanErr, pgx.ErrNoRows) {
+			if errors.Is(scanErr, pgcommon.ErrNoRows) {
 				return domain.NewError(domain.ErrTenantRealmNotFound, "no tenant_realms row for this tenant")
 			}
 			return scanErr
@@ -63,7 +62,7 @@ func (r *TenantRealmRepository) FindByTenantID(ctx context.Context, tenantID uui
 // Upsert inserts a new tenant_realms row, or updates the mutable columns of
 // an existing one keyed by tenant_id (RP-1/RP-2 first-touch semantics, §4.2).
 func (r *TenantRealmRepository) Upsert(ctx context.Context, t *domain.TenantRealm) error {
-	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		_, err := tx.Exec(ctx, `
 			INSERT INTO tenant_realms (tenant_id, realm_name, strategy, keycloak_shard, status,
 				realm_template_version, trial_ends_at, converted_at, disabled_at, suspension_source, exported_at, export_s3_key,
@@ -96,7 +95,7 @@ func (r *TenantRealmRepository) Upsert(ctx context.Context, t *domain.TenantReal
 // record_version (§9.6) — 0 rows affected means a concurrent writer won,
 // surfaced as ErrOptimisticLockConflict.
 func (r *TenantRealmRepository) Update(ctx context.Context, t *domain.TenantRealm) error {
-	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		tag, err := tx.Exec(ctx, `
 			UPDATE tenant_realms SET
 				realm_name = $2, strategy = $3, keycloak_shard = $4, status = $5,
@@ -124,7 +123,7 @@ func (r *TenantRealmRepository) Update(ctx context.Context, t *domain.TenantReal
 // cross-tenant by nature.
 func (r *TenantRealmRepository) CountsByShard(ctx context.Context) (map[string]int, error) {
 	out := map[string]int{}
-	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT keycloak_shard, count(*) FROM tenant_realms
 			WHERE strategy = 'dedicated' AND deleted_at IS NULL AND keycloak_shard IS NOT NULL
@@ -154,7 +153,7 @@ func (r *TenantRealmRepository) CountsByShard(ctx context.Context) (map[string]i
 // (sysPool) since the reconciler sweeps across every tenant.
 func (r *TenantRealmRepository) ListExpiredTrials(ctx context.Context, limit int) ([]*domain.TenantRealm, error) {
 	var out []*domain.TenantRealm
-	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT `+tenantRealmColumns+` FROM tenant_realms
 			WHERE strategy = 'shared' AND status = 'active' AND trial_ends_at < now()
@@ -187,7 +186,7 @@ func (r *TenantRealmRepository) ListExpiredTrials(ctx context.Context, limit int
 // the reconciler sweeps across every tenant.
 func (r *TenantRealmRepository) ListSuspendedPastRetention(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error) {
 	var out []*domain.TenantRealm
-	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT `+tenantRealmColumns+` FROM tenant_realms
 			WHERE status = 'suspended' AND suspension_source = 'billing_lapse'

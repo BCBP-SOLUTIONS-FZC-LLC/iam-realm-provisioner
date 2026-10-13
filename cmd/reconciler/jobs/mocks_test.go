@@ -415,6 +415,16 @@ func newTestContext() (*Context, *mockKeycloakAdmin, *mockTenantRealmRepository,
 		Logger:                    port.NewSlogStyleLogger(logger),
 		BatchLimit:                100,
 		MaxReconciliationAttempts: 20,
+		// Default no-op reader so offboard-only tests don't fail due to nil
+		// SubscriptionLapses. Override in suspend-phase tests.
+		SubscriptionLapses: &mockSubscriptionLapseReader{
+			ListLapsedSubscriptionsFn: func(_ context.Context) ([]port.LapsedSubscription, error) {
+				return nil, nil
+			},
+		},
+		// No-op GDPR scrub for unit tests — no real database pool available.
+		// Tests that must assert on GDPR deletion behavior should override this.
+		GDPRScrubFn: func(_ context.Context, _ uuid.UUID) error { return nil },
 	}
 	return jctx, kc, realms, idem, pub, logger
 }

@@ -78,14 +78,30 @@ func (c *Client) do(req *http.Request, tenantID uuid.UUID) (*http.Response, erro
 
 // classifyStatus maps a non-2xx TS response status to the shared error
 // every RegisterPrincipal/IssueOrRotateCredential/ReadPrincipal apply
-// identically: >=500 as the retryable ErrTokenServiceUnavailable, any
-// other >=300 as a plain unexpected-status error naming endpoint (e.g.
-// "TS-4"). Returns nil for a 2xx status. Callers that need to special-case
-// a specific status first (IssueOrRotateCredential's 409) check that before
-// falling through to this.
-func classifyStatus(status int, endpoint string) error {
+// identically: >=500 as the retryable ErrTokenServiceUnavailable, 404 as
+// ErrServiceAccountNotProvisioned (principal not yet registered), 400 as a
+// typed invalid-request domain error surfacing the TS error code, any other
+// >=300 as a plain unexpected-status error. Returns nil for a 2xx status.
+// Callers that need to special-case a specific status first
+// (IssueOrRotateCredential's 409) check that before falling through here.
+func classifyStatus(status int, endpoint string, body io.Reader) error {
 	if status >= 500 {
 		return domain.NewError(domain.ErrTokenServiceUnavailable, "token service unavailable").WithDetails(map[string]any{"status": status})
+	}
+	if status == http.StatusNotFound {
+		return domain.NewError(domain.ErrServiceAccountNotProvisioned, "token service: principal not found").
+			WithDetails(map[string]any{"endpoint": endpoint})
+	}
+	if status == http.StatusBadRequest || status == http.StatusUnprocessableEntity {
+		var errBody errorResponseBody
+		if decErr := json.NewDecoder(io.LimitReader(body, 4096)).Decode(&errBody); decErr != nil {
+			errBody = errorResponseBody{}
+		}
+		msg := fmt.Sprintf("tokenservice: %s rejected request (status %d)", endpoint, status)
+		if errBody.Error != "" {
+			msg = fmt.Sprintf("tokenservice: %s rejected request — %s", endpoint, errBody.Error)
+		}
+		return fmt.Errorf("%s", msg)
 	}
 	if status >= 300 {
 		return fmt.Errorf("tokenservice: unexpected status %d from %s", status, endpoint)
@@ -123,7 +139,12 @@ func (c *Client) RegisterPrincipal(ctx context.Context, tenantID uuid.UUID, req 
 	}
 	defer httpx.CloseBody(c.log, resp.Body)
 
-	if err := classifyStatus(resp.StatusCode, "TS-4"); err != nil {
+	if resp.StatusCode == http.StatusConflict {
+		return nil, domain.NewError(domain.ErrServiceAccountRotationInFlight,
+			"token service: principal registration conflict — concurrent write in progress").
+			WithDetails(map[string]any{"tenant_id": tenantID})
+	}
+	if err := classifyStatus(resp.StatusCode, "TS-4", resp.Body); err != nil {
 		return nil, err
 	}
 
@@ -159,11 +180,14 @@ type issueOrRotateResponseBody struct {
 
 // IssueOrRotateCredential calls TS-1
 // POST /api/v1/internal/tenants/:id/service-accounts/:principal_id/credentials.
-// A 409 is surfaced as domain.ErrOptimisticLockConflict when TS-1's response
-// body names that cause explicitly, or domain.ErrServiceAccountRotationInFlight
-// otherwise (TS-1's `rotation_in_flight` cause, and the safe default for any
-// other/unparseable 409 body) — so callers can decide retry-vs-fail using
-// the actual upstream cause rather than always assuming a rotation race.
+// A 409 is surfaced as one of the four §17 causes when TS-1's response body
+// names it explicitly — domain.ErrOptimisticLockConflict (record_version
+// mismatch), domain.ErrCredentialReplayRevoked (TS-D13: a replayed
+// rotation_id whose credential has since been revoked),
+// domain.ErrCredentialReplayExpired (TS-D22: a replayed rotation_id past
+// ROTATION_REPLAY_WINDOW), or domain.ErrServiceAccountRotationInFlight
+// (concurrent rotation on the same principal). An empty/unparseable 409 body
+// falls back to ErrServiceAccountRotationInFlight as the safe retryable default.
 func (c *Client) IssueOrRotateCredential(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
 	url := fmt.Sprintf("%s/api/v1/internal/tenants/%s/service-accounts/%s/credentials", c.baseURL, tenantID, principalID)
 	httpReq, err := c.newRequest(ctx, http.MethodPost, url, issueOrRotateRequestBody{
@@ -183,13 +207,18 @@ func (c *Client) IssueOrRotateCredential(ctx context.Context, tenantID, principa
 		var errBody errorResponseBody
 		_ = json.NewDecoder(resp.Body).Decode(&errBody) //nolint:errcheck // best-effort; falls back to the safe default below on a malformed/empty body
 		code := domain.ErrServiceAccountRotationInFlight
-		if errBody.Error == string(domain.ErrOptimisticLockConflict) {
+		switch errBody.Error {
+		case string(domain.ErrOptimisticLockConflict):
 			code = domain.ErrOptimisticLockConflict
+		case string(domain.ErrCredentialReplayRevoked):
+			code = domain.ErrCredentialReplayRevoked
+		case string(domain.ErrCredentialReplayExpired):
+			code = domain.ErrCredentialReplayExpired
 		}
 		return nil, domain.NewError(code, "token service credential issue/rotate conflict").
 			WithDetails(map[string]any{"tenant_id": tenantID, "principal_id": principalID, "upstream_error": errBody.Error})
 	}
-	if err := classifyStatus(resp.StatusCode, "TS-1"); err != nil {
+	if err := classifyStatus(resp.StatusCode, "TS-1", resp.Body); err != nil {
 		return nil, err
 	}
 
@@ -211,12 +240,55 @@ func (c *Client) IssueOrRotateCredential(ctx context.Context, tenantID, principa
 	}, nil
 }
 
+// RevokeCredential calls TS-2 to retire the rotating credential for principalID —
+// used during RP-3 conversion after TS-1 has issued the new dedicated-realm
+// credential, so the old shared-realm credential stops authenticating immediately
+// rather than waiting for the overlap sweep. TS-2 requires an explicit version,
+// so this first reads the principal via TS-3 to locate the rotating credential,
+// then calls POST .../credentials/:version/revoke for it. Returns nil if no
+// rotating credential exists (idempotent: the overlap sweep may have beaten us).
+func (c *Client) RevokeCredential(ctx context.Context, tenantID, principalID uuid.UUID) error {
+	principal, err := c.ReadPrincipal(ctx, tenantID, principalID)
+	if err != nil {
+		return fmt.Errorf("tokenservice: RevokeCredential TS-3 lookup: %w", err)
+	}
+	for _, cred := range principal.Credentials {
+		if cred.Status != "rotating" {
+			continue
+		}
+		if err := c.revokeVersion(ctx, tenantID, principalID, cred.Version); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// revokeVersion calls TS-2 POST .../credentials/:version/revoke for a single
+// known version — the inner step of RevokeCredential once the rotating version
+// has been resolved via TS-3.
+func (c *Client) revokeVersion(ctx context.Context, tenantID, principalID uuid.UUID, version int) error {
+	url := fmt.Sprintf("%s/api/v1/internal/tenants/%s/service-accounts/%s/credentials/%d/revoke",
+		c.baseURL, tenantID, principalID, version)
+	httpReq, err := c.newRequest(ctx, http.MethodPost, url, struct{}{})
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(httpReq, tenantID) //nolint:bodyclose // closed via the shared httpx.CloseBody helper below
+	if err != nil {
+		return err
+	}
+	defer httpx.CloseBody(c.log, resp.Body)
+	return classifyStatus(resp.StatusCode, "TS-2", resp.Body)
+}
+
 type credentialSummaryBody struct {
-	Version     int     `json:"version"`
-	Status      string  `json:"status"`
-	OpenBaoPath string  `json:"openbao_path"`
-	IssuedAt    string  `json:"issued_at"`
-	ExpiresAt   *string `json:"expires_at,omitempty"`
+	Version             int     `json:"version"`
+	Status              string  `json:"status"`
+	OpenBaoPath         string  `json:"openbao_path"`
+	IssuedAt            string  `json:"issued_at"`
+	ExpiresAt           *string `json:"expires_at,omitempty"`
+	RotationCadenceDays *int    `json:"rotation_cadence_days,omitempty"`
+	NextRotationAt      *string `json:"next_rotation_at,omitempty"`
 }
 
 type readPrincipalResponseBody struct {
@@ -245,7 +317,7 @@ func (c *Client) ReadPrincipal(ctx context.Context, tenantID, principalID uuid.U
 	}
 	defer httpx.CloseBody(c.log, resp.Body)
 
-	if err := classifyStatus(resp.StatusCode, "TS-3"); err != nil {
+	if err := classifyStatus(resp.StatusCode, "TS-3", resp.Body); err != nil {
 		return nil, err
 	}
 
@@ -267,8 +339,18 @@ func (c *Client) ReadPrincipal(ctx context.Context, tenantID, principalID uuid.U
 			}
 			expiresAt = &t
 		}
+		var nextRotationAt *time.Time
+		if cr.NextRotationAt != nil {
+			t, err := time.Parse(time.RFC3339, *cr.NextRotationAt)
+			if err != nil {
+				return nil, fmt.Errorf("tokenservice: decode TS-3 next_rotation_at: %w", err)
+			}
+			nextRotationAt = &t
+		}
 		creds = append(creds, port.CredentialSummary{
-			Version: cr.Version, Status: cr.Status, OpenBaoPath: cr.OpenBaoPath, IssuedAt: issuedAt, ExpiresAt: expiresAt,
+			Version: cr.Version, Status: cr.Status, OpenBaoPath: cr.OpenBaoPath,
+			IssuedAt: issuedAt, ExpiresAt: expiresAt,
+			RotationCadenceDays: cr.RotationCadenceDays, NextRotationAt: nextRotationAt,
 		})
 	}
 	return &port.ReadPrincipalResult{

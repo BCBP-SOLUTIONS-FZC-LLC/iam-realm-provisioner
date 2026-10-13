@@ -129,13 +129,10 @@ func retryDelay(attempt int, resp *http.Response) time.Duration {
 			return d
 		}
 	}
-	shift := attempt - 1
-	if shift > 32 {
-		// Clamp: 2^32 * retryBaseDelay already vastly exceeds any sane
-		// retryMaxDelay, so this keeps the shift-then-convert below well
-		// clear of int64 overflow regardless of how large attempt gets.
-		shift = 32
-	}
+	// Clamp shift: 2^32 * retryBaseDelay already vastly exceeds any sane
+	// retryMaxDelay, so min keeps the shift-then-convert below well
+	// clear of int64 overflow regardless of how large attempt gets.
+	shift := min(attempt-1, 32)
 	//nolint:gosec // G115: shift is clamped just above, so this uint->int64 conversion cannot overflow
 	backoff := retryBaseDelay * time.Duration(uint(1)<<uint(shift))
 	if backoff > retryMaxDelay || backoff <= 0 {
@@ -151,11 +148,14 @@ func retryDelay(attempt int, resp *http.Response) time.Duration {
 // oversized or hostile Retry-After value is clamped here rather than
 // silently wrapping into a negative duration, which would fire an
 // immediate retry instead of the backoff the header was asking for.
+// Shares the same RFC 9110 §7.1.3 contract as httpx.ParseRetryAfter; the
+// caller (retryDelay) applies its own retryMaxDelay cap on the result.
 const maxRetryAfterSeconds = int64(math.MaxInt64) / int64(time.Second)
 
 // parseRetryAfter accepts both forms RFC 9110 allows: an integer number of
 // seconds, or an HTTP-date. A date already in the past yields a zero delay
-// (retry immediately) rather than a negative one.
+// (retry immediately) rather than a negative one. Returns (0, false) when the
+// header is absent or unparseable so the caller falls back to backoff.
 func parseRetryAfter(v string) (time.Duration, bool) {
 	if v == "" {
 		return 0, false
@@ -170,11 +170,7 @@ func parseRetryAfter(v string) (time.Duration, bool) {
 		return time.Duration(secs) * time.Second, true
 	}
 	if when, err := http.ParseTime(v); err == nil {
-		d := time.Until(when)
-		if d < 0 {
-			d = 0
-		}
-		return d, true
+		return max(time.Until(when), 0), true
 	}
 	return 0, false
 }

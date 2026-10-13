@@ -32,7 +32,7 @@ func tokenEndpointServer(t *testing.T, expiresIn int) (*httptest.Server, *int32)
 func TestTokenCache_CachesUntilExpiry(t *testing.T) {
 	srv, calls := tokenEndpointServer(t, 3600)
 	client := gocloak.NewClient(srv.URL)
-	cache := newTokenCache(client, "master", "cid", "secret")
+	cache := newTokenCache(client, "master", "cid", func(_ context.Context) (string, error) { return "secret", nil })
 
 	tok1, err := cache.Token(context.Background())
 	require.NoError(t, err)
@@ -45,7 +45,7 @@ func TestTokenCache_CachesUntilExpiry(t *testing.T) {
 func TestTokenCache_InvalidateForcesRefresh(t *testing.T) {
 	srv, calls := tokenEndpointServer(t, 3600)
 	client := gocloak.NewClient(srv.URL)
-	cache := newTokenCache(client, "master", "cid", "secret")
+	cache := newTokenCache(client, "master", "cid", func(_ context.Context) (string, error) { return "secret", nil })
 
 	tok1, err := cache.Token(context.Background())
 	require.NoError(t, err)
@@ -61,7 +61,7 @@ func TestTokenCache_ExpiredTokenTriggersRefresh(t *testing.T) {
 	// the past, so the very next Token() call must re-mint.
 	srv, calls := tokenEndpointServer(t, 0)
 	client := gocloak.NewClient(srv.URL)
-	cache := newTokenCache(client, "master", "cid", "secret")
+	cache := newTokenCache(client, "master", "cid", func(_ context.Context) (string, error) { return "secret", nil })
 
 	_, err := cache.Token(context.Background())
 	require.NoError(t, err)
@@ -81,7 +81,7 @@ func TestTokenCache_SingleFlightConcurrentRefresh(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	client := gocloak.NewClient(srv.URL)
-	cache := newTokenCache(client, "master", "cid", "secret")
+	cache := newTokenCache(client, "master", "cid", func(_ context.Context) (string, error) { return "secret", nil })
 
 	const n = 5
 	var wg sync.WaitGroup
@@ -124,7 +124,7 @@ func TestTokenCache_RefreshErrorPropagates(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	client := gocloak.NewClient(srv.URL)
-	cache := newTokenCache(client, "master", "cid", "wrong-secret")
+	cache := newTokenCache(client, "master", "cid", func(_ context.Context) (string, error) { return "wrong-secret", nil })
 
 	_, err := cache.Token(context.Background())
 	require.Error(t, err)
@@ -139,7 +139,7 @@ func TestTokenCache_ContextCanceledWhileWaitingOnInflight(t *testing.T) {
 	}))
 	t.Cleanup(func() { close(release); srv.Close() })
 	client := gocloak.NewClient(srv.URL)
-	cache := newTokenCache(client, "master", "cid", "secret")
+	cache := newTokenCache(client, "master", "cid", func(_ context.Context) (string, error) { return "secret", nil })
 
 	go func() { _, _ = cache.Token(context.Background()) }()
 	time.Sleep(50 * time.Millisecond) // let the first call take the inflight slot

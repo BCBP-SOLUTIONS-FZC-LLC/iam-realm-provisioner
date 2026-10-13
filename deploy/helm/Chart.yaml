@@ -16,3 +16,6 @@ sources:
 maintainers:
   - name: BCBP Solutions IAM Team
     email: platform@bcbpsolutions.com
+annotations:
+  keycloak/minimum-version: "24.0.0"
+  keycloak/required-authenticator: "client-jwt with jwks_uri (EXT-6 platform-automation)"

@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/google/uuid"
+
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/outbox"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
@@ -32,6 +34,16 @@ type Context struct {
 	SubscriptionLapses port.SubscriptionLapseReader // O&M's I-16 GET /subscription-lapses (§16 RP-C3)
 
 	Logger port.SlogStyleLogger
+
+	// GDPRScrubFn deletes all tenant-scoped PII rows from the five tables
+	// listed in gdpr.go (§15.2). Used by RP-C3 offboardTenant, where the
+	// scrub must run in its own pre-commit transaction before the realm-status
+	// RunInTx. Wired in cmd/reconciler/main.go to a BYPASSRLS sysPool tx.
+	// Unit tests wire a no-op. A nil GDPRScrubFn is a hard error in
+	// offboardTenant. RP-C2 (hardDeleteTrialTenant) calls scrubTenantPII
+	// directly inside its own sysPool tx for full atomicity with the status
+	// update — it does not use this field.
+	GDPRScrubFn func(ctx context.Context, tenantID uuid.UUID) error
 
 	BatchLimit             int
 	TrialGraceDays         int
@@ -66,7 +78,10 @@ type Func func(ctx context.Context, jctx *Context) (Result, error)
 // its own error/skip reason to record via Result, so this is best-effort.
 func failIdempotency(ctx context.Context, jctx *Context, idemKey string) {
 	if err := jctx.Idempotency.Fail(ctx, idemKey); err != nil {
-		jctx.Logger.WarnContext(ctx, "idempotency: mark failed did not persist", "idempotency_key", idemKey, "error", err.Error())
+		// ErrorContext (not Warn): a key stuck in_progress causes the next
+		// scheduled run to silently skip this operation until the 15-minute
+		// lease expires. Surface it so alert rules catch it.
+		jctx.Logger.ErrorContext(ctx, "idempotency: mark failed did not persist — key stays in_progress until lease expires", "idempotency_key", idemKey, "error", err.Error())
 	}
 }
 

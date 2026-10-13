@@ -6,7 +6,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 // ReconciliationRepository implements port.ReconciliationRepository against
@@ -23,7 +22,7 @@ func NewReconciliationRepository(pool *pgcommon.Pool) *ReconciliationRepository 
 
 // Insert records a pending realm-config reconciliation for rec.
 func (r *ReconciliationRepository) Insert(ctx context.Context, rec *domain.RealmConfigReconciliation) error {
-	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		_, err := tx.Exec(ctx, `
 			INSERT INTO realm_config_reconciliations (tenant_id, setting_key, desired_value, status)
 			VALUES ($1, $2, $3, 'pending')`,
@@ -35,7 +34,7 @@ func (r *ReconciliationRepository) Insert(ctx context.Context, rec *domain.Realm
 // ListPending returns up to limit pending reconciliations, oldest first.
 func (r *ReconciliationRepository) ListPending(ctx context.Context, limit int) ([]*domain.RealmConfigReconciliation, error) {
 	var out []*domain.RealmConfigReconciliation
-	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT id, tenant_id, setting_key, desired_value, status, attempts, last_error, created_at, applied_at
 			FROM realm_config_reconciliations
@@ -63,7 +62,7 @@ func (r *ReconciliationRepository) ListPending(ctx context.Context, limit int) (
 
 // MarkApplied marks reconciliation id as applied.
 func (r *ReconciliationRepository) MarkApplied(ctx context.Context, id uuid.UUID) error {
-	return withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE realm_config_reconciliations SET status = 'applied', applied_at = now() WHERE id = $1`, id)
 		return err
 	})
@@ -77,7 +76,7 @@ func (r *ReconciliationRepository) MarkApplied(ctx context.Context, id uuid.UUID
 // rather than a read-then-write that could race a concurrent tick.
 func (r *ReconciliationRepository) MarkFailed(ctx context.Context, id uuid.UUID, lastErr string, maxAttempts int) (domain.ReconStatus, error) {
 	var status domain.ReconStatus
-	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		return tx.QueryRow(ctx, `
 			UPDATE realm_config_reconciliations
 			SET attempts = attempts + 1,

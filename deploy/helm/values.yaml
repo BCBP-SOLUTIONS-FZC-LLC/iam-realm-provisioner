@@ -459,7 +459,10 @@ cronjobs:
     concurrencyPolicy: Forbid
     successfulJobsHistoryLimit: 3
     failedJobsHistoryLimit: 3
-    activeDeadlineSeconds: 600
+    # Must exceed RECONCILER_TIMEOUT (5m/300s) so the application's internal
+    # context deadline fires first and the job exits cleanly before Kubernetes
+    # hard-kills it. 360s = 300s + 60s buffer (same as realmConfigReconcile).
+    activeDeadlineSeconds: 360
     resources:
       requests:
         cpu: 100m
@@ -474,7 +477,8 @@ cronjobs:
     concurrencyPolicy: Forbid
     successfulJobsHistoryLimit: 3
     failedJobsHistoryLimit: 3
-    activeDeadlineSeconds: 600
+    # Must exceed RECONCILER_TIMEOUT (5m/300s) — same reasoning as trialExpiry above.
+    activeDeadlineSeconds: 360
     resources:
       requests:
         cpu: 100m

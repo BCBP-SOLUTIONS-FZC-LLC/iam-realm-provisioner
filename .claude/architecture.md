@@ -25,12 +25,13 @@ iam-realm-provisioner/
 │       └── jobs/                       # RP-C1..RP-C4 + 3 operational prune jobs (7 total)
 │           ├── context.go              # jobs.Context dependency bag, jobs.Result, jobs.Func signature
 │           ├── trial_expiry.go         # RP-C1
-│           ├── trial_hard_delete.go    # RP-C2
-│           ├── subscription_lapse.go   # RP-C3 (suspend + offboard transitions)
+│           ├── trial_hard_delete.go    # RP-C2 — uses NewGDPRScrubFn to atomically delete keycloak_idp_configs, keycloak_idp_config_validations, realm_config_reconciliations, provisioning_operations, pending_audit_entries
+│           ├── subscription_lapse.go   # RP-C3 (suspend + offboard transitions) — offboard phase uses NewGDPRScrubFn for the same five-table PII erasure
 │           ├── realm_config_reconcile.go # RP-C4
 │           ├── outbox_prune.go         # operational — outbox_events retention
 │           ├── processed_events_prune.go # operational — processed_events retention
 │           ├── ledger_prune.go         # operational — provisioning_operations + rls_violation_log retention
+│           ├── gdpr.go                 # — GDPR PII scrub shared by RP-C2 and RP-C3 (NewGDPRScrubFn)
 │           └── tx_helper.go            # runInTxWithSysPool for BYPASSRLS raw-SQL sweeps
 ├── internal/
 │   ├── core/
@@ -114,7 +115,7 @@ iam-realm-provisioner/
 │                                        # metrics-registry-lint.sh, smoke-tests.sh, release/schema-gov helper scripts
 ├── .githooks/pre-commit                # tidy + fmt-check + vet + lint; installed via `make setup`/`make install-hooks`
 ├── test/{unit,postgres,integration,e2e,load,dbseed}/
-├── docs/lld/                           # LLD v1.21 (names frozen at v1.0)
+├── docs/lld/                           # LLD v1.23 (names frozen at v1.0)
 ├── docs/observability/                 # Observability Standard README, generated metric-registry.md, migration.md, runbooks.md (one entry per alert)
 ├── docs/runbook.md                     # operator procedures for the headline incident scenarios (§24)
 ├── docs/runbook-schema-registry.md     # schema-governance operator runbook (shared iam-tenant-events registry)
@@ -136,8 +137,8 @@ iam-realm-provisioner/
 ```go
 require (
     github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon  v1.6.0
-    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2     v2.0.0
-    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2   v2.0.0
+    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2     v2.1.0
+    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2   v2.0.1
     github.com/Nerzal/gocloak/v13                         v13.9.0
 )
 ```

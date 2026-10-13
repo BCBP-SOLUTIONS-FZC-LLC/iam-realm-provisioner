@@ -1,0 +1,15 @@
+{{- /*
+  Pre-install validation — fails helm install/upgrade with a clear message
+  rather than letting the pod panic at runtime.
+
+  RP-GAP-005: GLUE_REGISTRY_TENANT_NAME must be set in non-dev/test
+  environments. The server resolves all 9 produced schema version UUIDs at
+  startup via Glue GetSchemaByDefinition — a missing registry name causes an
+  immediate panic. Run 'make schema-register && make schema-verify' before
+  deploying to staging or production.
+*/ -}}
+{{- $appEnv := default "" .Values.env.APP_ENV -}}
+{{- $isDevTest := or (eq $appEnv "dev") (eq $appEnv "test") -}}
+{{- if and (not $isDevTest) (not .Values.env.GLUE_REGISTRY_TENANT_NAME) }}
+  {{- fail (printf "iam-realm-provisioner: GLUE_REGISTRY_TENANT_NAME is required in APP_ENV=%q. Run 'make schema-register && make schema-verify' before installing." $appEnv) }}
+{{- end }}

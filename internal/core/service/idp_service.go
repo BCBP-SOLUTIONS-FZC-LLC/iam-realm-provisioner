@@ -2,17 +2,18 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"time"
 
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/pkg/requestctx"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 )
 
 // validIdpAlias restricts idp_alias to a safe charset — letters, digits,
@@ -277,18 +278,28 @@ func (s *IdpService) RemoveIdp(ctx context.Context, tenantID uuid.UUID, idpAlias
 	})
 }
 
+// auditMetadataMaxBytes mirrors AL-5's MAX_METADATA_BYTES (NormalizeMetadata).
+// Metadata exceeding the cap causes AL to return 422, which the delivery
+// drainer treats as permanent (ErrAuditEntryRejected → MarkFailed). A
+// fallback marker is substituted so the audit entry is never silently lost.
+const auditMetadataMaxBytes = 8192
+
 // idpAuditEntry builds the TenantIdpConfigChanged AL-5 entry (HLD §9.4,
 // §10.6). The actor is the mesh caller — normally the iam-system principal
 // O&M calls as — and trace_id is captured now, since delivery happens
 // later from the drainer on an unrelated trace.
 func idpAuditEntry(ctx context.Context, tenantID uuid.UUID, alias, action string, metadata map[string]any) domain.AuditEntry {
+	metaJSON, _ := json.Marshal(metadata) //nolint:errcheck // map[string]any with plain serialisable values: cannot fail
+	if len(metaJSON) > auditMetadataMaxBytes {
+		metaJSON, _ = json.Marshal(map[string]any{"_truncated": true}) //nolint:errcheck // static literal map: cannot fail
+	}
 	entry := domain.AuditEntry{
 		TenantID: tenantID, EntryType: domain.AuditEntryTypeIdpChanged, Action: action,
-		Actor:      domain.AuditActor{Type: domain.AuditActorIAMSystem, ID: domain.SystemActorID},
+		Actor:      domain.AuditActor{Type: domain.AuditActorIAMSystem, ID: domain.SystemActorID, Display: domain.Source},
 		Target:     &domain.AuditTarget{Type: "idp", ID: alias},
 		OccurredAt: time.Now().UTC(), SourceService: domain.Source,
 		SourceEventType: domain.AuditSourceTenantIdpConfigChanged,
-		Metadata:        metadata,
+		Metadata:        json.RawMessage(metaJSON),
 	}
 	if rc, ok := requestctx.FromContext(ctx); ok {
 		if rc.UserID != uuid.Nil && rc.UserID.String() != domain.SystemActorID {
@@ -296,8 +307,8 @@ func idpAuditEntry(ctx context.Context, tenantID uuid.UUID, alias, action string
 		}
 		entry.IPAddress, entry.UserAgent = rc.ClientIP, rc.UserAgent
 	}
-	if sc := trace.SpanContextFromContext(ctx); sc.HasTraceID() {
-		entry.TraceID = sc.TraceID().String()
+	if tid := gincommon.SpanTraceID(ctx); tid != "" {
+		entry.TraceID = tid
 	}
 	return entry
 }

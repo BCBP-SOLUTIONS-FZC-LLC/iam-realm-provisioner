@@ -267,12 +267,12 @@ func main() {
 	// ── 7. Outbound adapters (Keycloak — RP-INV-1 sole seam — OpenBao,
 	// Org & Membership, S3) ──────────────────────────────────────────────
 	keycloakAdmin := keycloakadapter.New(keycloakadapter.Config{
-		BaseURL:      mustEnv("KEYCLOAK_BASE_URL", appEnv),
-		AdminRealm:   envOr("KEYCLOAK_ADMIN_REALM", "master"),
-		ClientID:     envOr("KEYCLOAK_ADMIN_CLIENT_ID", "iam-realm-provisioner"),
-		ClientSecret: mustEnv("KEYCLOAK_ADMIN_CLIENT_SECRET", appEnv),
-		RateLimitRPS: envInt("KEYCLOAK_RATE_LIMIT_RPS", 20),
-		Timeout:      envDuration("KEYCLOAK_TIMEOUT_MS", 8*time.Second),
+		BaseURL:        mustEnv("KEYCLOAK_BASE_URL", appEnv),
+		AdminRealm:     envOr("KEYCLOAK_ADMIN_REALM", "master"),
+		ClientID:       envOr("KEYCLOAK_ADMIN_CLIENT_ID", "iam-realm-provisioner"),
+		SecretProvider: keycloakadapter.EnvSecretFn("KEYCLOAK_ADMIN_CLIENT_SECRET"),
+		RateLimitRPS:   envInt("KEYCLOAK_RATE_LIMIT_RPS", 20),
+		Timeout:        envDuration("KEYCLOAK_TIMEOUT_MS", 8*time.Second),
 	}, log)
 
 	openbaoClient := openbao.New(openbao.Config{
@@ -283,7 +283,7 @@ func main() {
 		KeycloakAdminPath: envOr("BAO_KEYCLOAK_ADMIN_PATH", "iam/realm-provisioner/keycloak-admin"),
 	}, log)
 
-	orgMembershipClient := orgmembershipclient.New(mustEnv("ORG_MEMBERSHIP_BASE_URL", appEnv), log)
+	orgMembershipClient := orgmembershipclient.New(mustEnv("ORG_MEMBERSHIP_BASE_URL", appEnv), envDuration("ORG_MEMBERSHIP_TIMEOUT_MS", 5*time.Second), log)
 	tokenServiceClient := tokenserviceclient.New(mustEnv("TOKEN_SERVICE_BASE_URL", appEnv), log)
 
 	objectStore := s3adapter.New(s3Client, s3adapter.Config{
@@ -400,13 +400,17 @@ func main() {
 		},
 		Handlers: internalH,
 		Postgres: pingerFunc(func(ctx context.Context) error {
-			if hs := pool.Health(ctx); !hs.Healthy {
+			pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			if hs := pool.Health(pingCtx); !hs.Healthy {
 				return fmt.Errorf("database not healthy")
 			}
 			return nil
 		}),
 		SysPostgres: pingerFunc(func(ctx context.Context) error {
-			if hs := sysPool.Health(ctx); !hs.Healthy {
+			pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			if hs := sysPool.Health(pingCtx); !hs.Healthy {
 				return fmt.Errorf("sys database not healthy")
 			}
 			return nil
@@ -419,7 +423,11 @@ func main() {
 				return fmt.Errorf("outbox initializing")
 			}
 		}),
-		Keycloak: pingerFunc(keycloakAdmin.Ready),
+		Keycloak: pingerFunc(func(ctx context.Context) error {
+			pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			return keycloakAdmin.Ready(pingCtx)
+		}),
 	})
 
 	// ── 11. Graceful shutdown ─────────────────────────────────────────────
@@ -650,6 +658,9 @@ func validateRequiredEnv(appEnv string) {
 	if os.Getenv("DATABASE_URL") == "" &&
 		(os.Getenv("PG_HOST") == "" || os.Getenv("PG_USER") == "" || os.Getenv("PG_PASSWORD") == "") {
 		missing = append(missing, "DATABASE_URL (or PG_HOST + PG_USER + PG_PASSWORD): PostgreSQL connection required")
+	}
+	if !isDevEnv(appEnv) && os.Getenv("SYSTEM_DATABASE_URL") == "" {
+		missing = append(missing, "SYSTEM_DATABASE_URL: required in production — sysPool must use a BYPASSRLS role (realm_provisioner_migrator); without it cross-tenant reconciler queries return zero rows and RP-C3 offboarding is silently disabled")
 	}
 	if os.Getenv("MIGRATION_DATABASE_URL") == "" && os.Getenv("PG_BOUNCER_MODE") == "true" && os.Getenv("DATABASE_URL") == "" {
 		missing = append(missing, "MIGRATION_DATABASE_URL: required when PG_BOUNCER_MODE=true — migrations must bypass PgBouncer")

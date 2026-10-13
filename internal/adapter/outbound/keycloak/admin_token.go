@@ -2,6 +2,8 @@ package keycloak
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -32,14 +34,32 @@ type tokenCache struct {
 	// the next mint is attributed to trigger="401" (§11.6).
 	unauthorized bool
 
-	client       *gocloak.GoCloak
-	adminRealm   string
-	clientID     string
-	clientSecret string
+	client     *gocloak.GoCloak
+	adminRealm string
+	clientID   string
+	// secretFn is called at every token refresh so a rotated admin credential
+	// is picked up without a pod restart. In current deployments ESO syncs the
+	// secret to a Kubernetes Secret and pods must restart to see it — but this
+	// interface allows future wiring to a live OpenBao reader without changing
+	// the tokenCache API.
+	secretFn func(ctx context.Context) (string, error)
 }
 
-func newTokenCache(client *gocloak.GoCloak, adminRealm, clientID, clientSecret string) *tokenCache {
-	return &tokenCache{client: client, adminRealm: adminRealm, clientID: clientID, clientSecret: clientSecret}
+// EnvSecretFn returns a secretFn that re-reads KEYCLOAK_ADMIN_CLIENT_SECRET
+// from the process environment at each token refresh. This is the default
+// provider used by cmd/server and cmd/reconciler.
+func EnvSecretFn(envKey string) func(ctx context.Context) (string, error) {
+	return func(_ context.Context) (string, error) {
+		s := os.Getenv(envKey)
+		if s == "" {
+			return "", fmt.Errorf("keycloak: %s is not set", envKey)
+		}
+		return s, nil
+	}
+}
+
+func newTokenCache(client *gocloak.GoCloak, adminRealm, clientID string, secretFn func(ctx context.Context) (string, error)) *tokenCache {
+	return &tokenCache{client: client, adminRealm: adminRealm, clientID: clientID, secretFn: secretFn}
 }
 
 // Token returns a valid admin access token, refreshing it if absent or
@@ -85,6 +105,15 @@ func (c *tokenCache) Token(ctx context.Context) (string, error) {
 	}
 
 	c.mu.Lock()
+	// If InvalidateUnauthorized fired while this refresh was in flight (the
+	// trigger was captured as "proactive" above before the 401 arrived), the
+	// unauthorized flag may be set. Only consume it on a SUCCESSFUL refresh:
+	// if the refresh failed, leave the flag so the next successful refresh
+	// carries the correct "401" attribution rather than "proactive".
+	if c.unauthorized && err == nil {
+		metrics.AdminTokenRefreshTotal.WithLabelValues("401").Inc()
+		c.unauthorized = false
+	}
 	if err == nil {
 		c.token = tok
 		c.expiresAt = time.Now().Add(time.Duration(expiresIn)*time.Second - adminTokenSafetyMargin)
@@ -120,7 +149,11 @@ func (c *tokenCache) InvalidateUnauthorized() {
 }
 
 func (c *tokenCache) refresh(ctx context.Context) (accessToken string, expiresIn int, err error) {
-	jwt, err := c.client.LoginClient(ctx, c.clientID, c.clientSecret, c.adminRealm)
+	secret, err := c.secretFn(ctx)
+	if err != nil {
+		return "", 0, fmt.Errorf("keycloak: fetch admin client secret: %w", err)
+	}
+	jwt, err := c.client.LoginClient(ctx, c.clientID, secret, c.adminRealm)
 	if err != nil {
 		return "", 0, err
 	}

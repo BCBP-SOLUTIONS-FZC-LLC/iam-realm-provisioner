@@ -15,14 +15,16 @@ import (
 // itself misbehaving) is logged, never propagated. Exercised directly here
 // since every call site already covers the success path incidentally.
 
-func TestFailIdempotency_PersistFailure_LoggedNotEscalated(t *testing.T) {
+func TestFailIdempotency_PersistFailure_LoggedAsError(t *testing.T) {
 	idem := newMockIdempotencyStore()
 	idem.FailErr = assert.AnError
 	logger := &mockLogger{}
 	jctx := &Context{Idempotency: idem, Logger: port.NewSlogStyleLogger(logger)}
 
 	assert.NotPanics(t, func() { failIdempotency(context.Background(), jctx, "some-key") })
-	assert.GreaterOrEqual(t, logger.warnCalls, 1)
+	// ErrorContext so a key stuck in_progress (silently skipped until the
+	// 15-minute lease expires) is visible in alert rules.
+	assert.GreaterOrEqual(t, logger.errorCalls, 1)
 }
 
 func TestMarshalIdempotencyResult_Success(t *testing.T) {

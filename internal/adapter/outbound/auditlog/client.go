@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/httpx"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
@@ -21,6 +23,17 @@ import (
 
 // maxErrorBody bounds how much of a rejection body is read into the error.
 const maxErrorBody = 512
+
+// maxRetryAfter caps how far a Retry-After hint may push a row's next
+// attempt — a hostile or misconfigured upstream can't stall delivery
+// beyond ClaimDue's own 5-minute exponential cap.
+const maxRetryAfter = 5 * time.Minute
+
+// parseRetryAfter delegates to httpx.ParseRetryAfter with maxRetryAfter as
+// the ceiling. now is injected for testability.
+func parseRetryAfter(header string, now time.Time) time.Duration {
+	return httpx.ParseRetryAfter(header, now, maxRetryAfter)
+}
 
 // Client implements port.AuditLogClient.
 type Client struct {
@@ -40,6 +53,9 @@ func New(baseURL string, log port.Logger) *Client {
 // idempotencyKey) are success; 429 and 5xx are transient; any other
 // non-2xx is a permanent rejection wrapping port.ErrAuditEntryRejected.
 func (c *Client) WriteEntry(ctx context.Context, idempotencyKey string, entry domain.AuditEntry) error {
+	if entry.TenantID == (uuid.UUID{}) {
+		return fmt.Errorf("%w: nil tenant_id in audit entry", port.ErrAuditEntryRejected)
+	}
 	body, err := json.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("%w: encode entry: %v", port.ErrAuditEntryRejected, err)
@@ -63,7 +79,13 @@ func (c *Client) WriteEntry(ctx context.Context, idempotencyKey string, entry do
 	switch {
 	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated:
 		return nil
-	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
+	case resp.StatusCode == http.StatusTooManyRequests:
+		base := fmt.Errorf("auditlog: AL-5 unavailable (status %d)", resp.StatusCode)
+		if d := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); d > 0 {
+			return &port.RetryAfterError{Underlying: base, RetryAfter: d}
+		}
+		return base
+	case resp.StatusCode >= 500:
 		return fmt.Errorf("auditlog: AL-5 unavailable (status %d)", resp.StatusCode)
 	default:
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody)) //nolint:errcheck // best-effort diagnostic only

@@ -8,6 +8,7 @@ package httpx
 import (
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -34,6 +35,37 @@ func NewClient(timeout time.Duration) *http.Client {
 // port.Logger implementation satisfies this structurally.
 type warner interface {
 	Warn(msg string, fields map[string]any)
+}
+
+// ParseRetryAfter parses an HTTP Retry-After header per RFC 9110 §7.1.3,
+// accepting either delta-seconds or an HTTP-date. Returns 0 for an empty,
+// malformed, or non-positive value; values exceeding ceiling are clamped to
+// ceiling. Overflow-safe: a delta-seconds value that would wrap time.Duration
+// is capped before the multiplication. now is injected for testability.
+func ParseRetryAfter(header string, now time.Time, ceiling time.Duration) time.Duration {
+	if header == "" {
+		return 0
+	}
+	maxSecs := int64(ceiling / time.Second)
+	if secs, err := strconv.Atoi(header); err == nil {
+		switch {
+		case secs <= 0:
+			return 0
+		case int64(secs) > maxSecs:
+			return ceiling
+		default:
+			return time.Duration(secs) * time.Second
+		}
+	}
+	if t, err := http.ParseTime(header); err == nil {
+		if d := t.Sub(now); d > 0 {
+			if d > ceiling {
+				return ceiling
+			}
+			return d
+		}
+	}
+	return 0
 }
 
 // CloseBody closes body, logging (not propagating) a failure — by the time

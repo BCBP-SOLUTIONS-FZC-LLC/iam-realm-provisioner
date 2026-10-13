@@ -90,6 +90,7 @@ type TenantConvertedPayload struct {
 type DirectPaidSignupPayload struct {
 	TenantID     uuid.UUID `json:"tenant_id"`
 	Realm        string    `json:"realm"`
+	Plan         string    `json:"plan"`
 	DirectSignup bool      `json:"direct_signup"`
 }
 

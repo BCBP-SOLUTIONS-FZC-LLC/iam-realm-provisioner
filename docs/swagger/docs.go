@@ -104,13 +104,19 @@ const docTemplate = `{
                         }
                     },
                     "409": {
-                        "description": "operation_in_progress OR realm_already_exists",
+                        "description": "operation_in_progress OR realm_already_dedicated OR tenant_offboarded",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "db_unavailable OR keycloak_unavailable OR token_service_unavailable",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -164,13 +170,19 @@ const docTemplate = `{
                         }
                     },
                     "409": {
-                        "description": "operation_in_progress OR realm_already_exists",
+                        "description": "operation_in_progress OR realm_already_dedicated OR tenant_offboarded",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "db_unavailable OR keycloak_unavailable OR token_service_unavailable",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -235,19 +247,31 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "realm_not_found",
+                        "description": "tenant_realm_not_found",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
                     },
                     "409": {
-                        "description": "operation_in_progress OR invalid_realm_state",
+                        "description": "operation_in_progress OR realm_already_dedicated OR tenant_offboarded OR optimistic_lock_conflict OR credential_replay_expired",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "502": {
+                        "description": "conversion_failed",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "db_unavailable OR keycloak_unavailable OR token_service_unavailable",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -300,13 +324,13 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "realm_not_found",
+                        "description": "tenant_realm_not_found",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
                     },
                     "409": {
-                        "description": "operation_in_progress OR invalid_realm_state",
+                        "description": "operation_in_progress OR realm_already_dedicated OR tenant_offboarded",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -371,19 +395,19 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "invalid_request OR missing_idempotency_key OR invalid_idp_protocol",
+                        "description": "invalid_request OR missing_idempotency_key OR invalid_idp_protocol OR idp_region_portability_failed",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
                     },
                     "404": {
-                        "description": "realm_not_found",
+                        "description": "tenant_realm_not_found",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
                     },
                     "409": {
-                        "description": "operation_in_progress OR idp_region_portability_failed",
+                        "description": "operation_in_progress OR idp_requires_dedicated_realm OR optimistic_lock_conflict OR tenant_offboarded",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -449,7 +473,7 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "realm_not_found",
+                        "description": "tenant_realm_not_found OR idp_config_not_found",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -518,13 +542,13 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "realm_not_found",
+                        "description": "tenant_realm_not_found",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
                     },
                     "409": {
-                        "description": "operation_in_progress OR invalid_realm_state",
+                        "description": "operation_in_progress OR tenant_offboarded OR optimistic_lock_conflict",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -580,7 +604,7 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "realm_not_found",
+                        "description": "tenant_realm_not_found",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -648,13 +672,13 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "invalid_request",
+                        "description": "invalid_request OR unsupported_realm_setting",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
                     },
                     "404": {
-                        "description": "realm_not_found",
+                        "description": "tenant_realm_not_found",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -723,7 +747,7 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "realm_not_found",
+                        "description": "tenant_realm_not_found",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -736,6 +760,12 @@ const docTemplate = `{
                     },
                     "500": {
                         "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "db_unavailable OR keycloak_unavailable OR token_service_unavailable",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -859,13 +889,13 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "realm_not_found",
+                        "description": "tenant_realm_not_found",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
                     },
                     "409": {
-                        "description": "operation_in_progress OR invalid_realm_state",
+                        "description": "operation_in_progress OR tenant_offboarded",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -936,19 +966,25 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "realm_not_found",
+                        "description": "tenant_realm_not_found",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
                     },
                     "409": {
-                        "description": "operation_in_progress OR user_already_exists",
+                        "description": "operation_in_progress OR user_email_conflict",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "db_unavailable OR keycloak_unavailable OR token_service_unavailable",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -1003,7 +1039,7 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "realm_not_found",
+                        "description": "tenant_realm_not_found",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -1064,13 +1100,19 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "realm_not_found OR user_not_found",
+                        "description": "tenant_realm_not_found OR keycloak_user_not_found",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "db_unavailable OR keycloak_unavailable",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -1125,7 +1167,7 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "realm_not_found OR user_not_found",
+                        "description": "tenant_realm_not_found OR keycloak_user_not_found",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }

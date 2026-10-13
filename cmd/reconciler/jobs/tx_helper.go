@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
-	"github.com/jackc/pgx/v5"
 )
 
 // sysWriteRetryOpts matches postgres.writeRetryOpts — deadlock (40P01) and
@@ -21,6 +20,6 @@ var sysWriteRetryOpts = pgcommon.RetryOptions{
 // runInTxWithSysPool runs fn inside a pgx.Tx against the BYPASSRLS sysPool
 // via pgcommon.RunInTxWithRetryOpts. Reconcilers span tenants so they must
 // not go through the RLS-scoped app pool.
-func runInTxWithSysPool(ctx context.Context, pool *pgcommon.Pool, fn func(ctx context.Context, tx pgx.Tx) error) error {
-	return pgcommon.RunInTxWithRetryOpts(ctx, pool, pgx.TxOptions{}, sysWriteRetryOpts, fn)
+func runInTxWithSysPool(ctx context.Context, pool *pgcommon.Pool, fn func(ctx context.Context, tx pgcommon.Tx) error) error {
+	return pgcommon.RunInTxWithRetryOpts(ctx, pool, pgcommon.TxOptions{}, sysWriteRetryOpts, fn)
 }

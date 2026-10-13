@@ -3,6 +3,7 @@ package unit_test
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -446,6 +447,7 @@ func (m *mockLogger) Error(msg string, fields map[string]any) { m.errorCalls++ }
 type mockTokenServiceClient struct {
 	RegisterPrincipalFn       func(ctx context.Context, tenantID uuid.UUID, req port.RegisterPrincipalRequest) (*port.RegisterPrincipalResult, error)
 	IssueOrRotateCredentialFn func(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error)
+	RevokeCredentialFn        func(ctx context.Context, tenantID, principalID uuid.UUID) error
 	ReadPrincipalFn           func(ctx context.Context, tenantID, principalID uuid.UUID) (*port.ReadPrincipalResult, error)
 	JWKSURLForFn              func(tenantID uuid.UUID) string
 }
@@ -457,6 +459,9 @@ func (m *mockTokenServiceClient) RegisterPrincipal(ctx context.Context, tenantID
 }
 func (m *mockTokenServiceClient) IssueOrRotateCredential(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
 	return m.IssueOrRotateCredentialFn(ctx, tenantID, principalID, req)
+}
+func (m *mockTokenServiceClient) RevokeCredential(ctx context.Context, tenantID, principalID uuid.UUID) error {
+	return m.RevokeCredentialFn(ctx, tenantID, principalID)
 }
 func (m *mockTokenServiceClient) ReadPrincipal(ctx context.Context, tenantID, principalID uuid.UUID) (*port.ReadPrincipalResult, error) {
 	return m.ReadPrincipalFn(ctx, tenantID, principalID)
@@ -493,6 +498,9 @@ func wirePlatformAutomationHappyPath(kc *mockKeycloakAdmin) *mockTokenServiceCli
 		IssueOrRotateCredentialFn: func(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
 			return &port.IssueCredentialResult{Version: 1, Secret: "test-secret", OpenBaoPath: "iam/serviceaccount/test/v1", RecordVersion: 1}, nil
 		},
+		RevokeCredentialFn: func(ctx context.Context, tenantID, principalID uuid.UUID) error {
+			return nil
+		},
 		JWKSURLForFn: func(tenantID uuid.UUID) string {
 			return "http://token-service.test/api/v1/internal/tenants/" + tenantID.String() + "/service-accounts/platform-automation/jwks.json"
 		},
@@ -507,12 +515,14 @@ type mockPendingAuditEntryRepository struct {
 	Enqueued   []domain.AuditEntry
 	EnqueueErr error
 
-	Due       []*domain.PendingAuditEntry
-	ClaimErr  error
-	Delivered []uuid.UUID
-	Retried   []uuid.UUID
-	Failed    []uuid.UUID
-	MarkErr   error
+	Due            []*domain.PendingAuditEntry
+	ClaimErr       error
+	Delivered      []uuid.UUID
+	Retried        []uuid.UUID
+	RetriedAfter   []uuid.UUID
+	RetryAfterHint []time.Duration
+	Failed         []uuid.UUID
+	MarkErr        error
 }
 
 var _ port.PendingAuditEntryRepository = (*mockPendingAuditEntryRepository)(nil)
@@ -543,6 +553,12 @@ func (m *mockPendingAuditEntryRepository) MarkDelivered(ctx context.Context, id 
 
 func (m *mockPendingAuditEntryRepository) MarkRetry(ctx context.Context, id uuid.UUID, lastErr string) error {
 	m.Retried = append(m.Retried, id)
+	return m.MarkErr
+}
+
+func (m *mockPendingAuditEntryRepository) MarkRetryAfter(ctx context.Context, id uuid.UUID, lastErr string, delay time.Duration) error {
+	m.RetriedAfter = append(m.RetriedAfter, id)
+	m.RetryAfterHint = append(m.RetryAfterHint, delay)
 	return m.MarkErr
 }
 

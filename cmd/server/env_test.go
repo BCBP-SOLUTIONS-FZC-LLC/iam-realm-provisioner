@@ -21,6 +21,7 @@ func clearRequiredEnv(t *testing.T) {
 		"SNS_TOPIC_TENANT_ARN", "GLUE_REGISTRY_TENANT_NAME",
 		"DATABASE_URL", "PG_HOST", "PG_USER", "PG_PASSWORD",
 		"MIGRATION_DATABASE_URL", "PG_BOUNCER_MODE",
+		"SYSTEM_DATABASE_URL",
 	} {
 		t.Setenv(k, "")
 	}
@@ -35,6 +36,8 @@ func setAllRequiredEnv(t *testing.T) {
 	t.Setenv("SNS_TOPIC_TENANT_ARN", "arn:aws:sns:ap-south-1:111111111111:iam-tenant-events")
 	t.Setenv("GLUE_REGISTRY_TENANT_NAME", "iam-tenant-events")
 	t.Setenv("DATABASE_URL", "postgres://user:pass@host/db")
+	// SYSTEM_DATABASE_URL is required in production (§10.1 BYPASSRLS role for sysPool).
+	t.Setenv("SYSTEM_DATABASE_URL", "postgres://migrator:pass@host/db")
 }
 
 func TestIsDevEnv(t *testing.T) {
@@ -117,6 +120,23 @@ func TestValidateRequiredEnv_PGBouncerWithoutMigrationURL_Panics(t *testing.T) {
 	t.Setenv("PG_PASSWORD", "secret")
 	t.Setenv("PG_BOUNCER_MODE", "true")
 	assert.Panics(t, func() { validateRequiredEnv("prod") })
+}
+
+// SYSTEM_DATABASE_URL must be present in production so sysPool uses a
+// BYPASSRLS role. Without it, cross-tenant reconciler queries are
+// RLS-filtered to zero rows and RP-C3 offboarding is silently disabled.
+func TestValidateRequiredEnv_SystemDatabaseURLMissingInProd_Panics(t *testing.T) {
+	clearRequiredEnv(t)
+	setAllRequiredEnv(t)
+	t.Setenv("SYSTEM_DATABASE_URL", "")
+	assert.Panics(t, func() { validateRequiredEnv("production") })
+}
+
+func TestValidateRequiredEnv_SystemDatabaseURLMissingInDev_NoPanic(t *testing.T) {
+	clearRequiredEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://user:pass@host/db")
+	// SYSTEM_DATABASE_URL not required in dev — falls back to app DSN safely.
+	assert.NotPanics(t, func() { validateRequiredEnv("dev") })
 }
 
 func TestMustEnv_SetValue_Returned(t *testing.T) {

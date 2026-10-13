@@ -209,7 +209,15 @@ func TestProvisionTrial_MintPlatformAutomation_RegisterPrincipalFails_ResumedCli
 // The same created-gated cleanup applies to the LATER Token Service call
 // (TS-1 IssueOrRotateCredential) — a fresh client is cleaned up if it
 // fails after RegisterPrincipal (TS-4) already succeeded.
-func TestProvisionTrial_MintPlatformAutomation_IssueOrRotateCredentialFails_OrphanedClientCleanedUp(t *testing.T) {
+// TestProvisionTrial_MintPlatformAutomation_IssueOrRotateCredentialFails_ClientRetainedAfterTS4Success
+// verifies that when TS-4 (RegisterPrincipal) succeeds but TS-1
+// (IssueOrRotateCredential) fails, the Keycloak service-account client is
+// NOT deleted. Deleting it would leave Token Service with an orphaned principal
+// record pointing to a gone client. The idempotent retry path self-heals:
+//  1. CreateServiceAccountClient → created=false (client still exists)
+//  2. RegisterPrincipal (TS-4) → idempotent replay
+//  3. IssueOrRotateCredential (TS-1) → succeeds on retry
+func TestProvisionTrial_MintPlatformAutomation_IssueOrRotateCredentialFails_ClientRetainedAfterTS4Success(t *testing.T) {
 	kc := &mockKeycloakAdmin{}
 	ts := wirePlatformAutomationHappyPath(kc)
 	ts.IssueOrRotateCredentialFn = func(ctx context.Context, tid, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
@@ -222,9 +230,9 @@ func TestProvisionTrial_MintPlatformAutomation_IssueOrRotateCredentialFails_Orph
 
 	tenantID := uuid.New()
 	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
-	var deletedRealm, deletedClientID string
 	kc.DeleteServiceAccountClientIfExistsFn = func(ctx context.Context, realmName, clientID string) error {
-		deletedRealm, deletedClientID = realmName, clientID
+		t.Fatal("client must NOT be deleted when TS-4 (RegisterPrincipal) already succeeded — " +
+			"the Token Service has a record of this client; a retry self-heals via idempotent replay")
 		return nil
 	}
 
@@ -232,8 +240,6 @@ func TestProvisionTrial_MintPlatformAutomation_IssueOrRotateCredentialFails_Orph
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.Error(t, err)
-	assert.Equal(t, "trial", deletedRealm)
-	assert.Equal(t, "platform-automation-"+tenantID.String(), deletedClientID)
 }
 
 // A RESUMED client must never be deleted on an IssueOrRotateCredential

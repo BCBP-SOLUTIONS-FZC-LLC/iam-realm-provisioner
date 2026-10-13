@@ -33,9 +33,9 @@ type configureIdpRequest struct {
 // @Param        id       path      string               true  "Tenant UUID"  format(uuid)
 // @Param        request  body      configureIdpRequest  true  "IdP configuration payload"
 // @Success      200      {object}  service.ConfigureIdpResult
-// @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key OR invalid_idp_protocol"
-// @Failure      404      {object}  ErrorResponse  "realm_not_found"
-// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR idp_region_portability_failed"
+// @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key OR invalid_idp_protocol OR idp_region_portability_failed"
+// @Failure      404      {object}  ErrorResponse  "tenant_realm_not_found"
+// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR idp_requires_dedicated_realm OR optimistic_lock_conflict OR tenant_offboarded"
 // @Failure      422      {object}  ErrorResponse  "idp_warnings_unacknowledged"
 // @Failure      500      {object}  ErrorResponse
 // @Security     SystemRole
@@ -85,7 +85,7 @@ func (h *InternalHandler) ConfigureIdp(c *gin.Context) {
 // @Param        alias  path  string  true  "IdP alias"
 // @Success      204    "No Content"
 // @Failure      400    {object}  ErrorResponse  "invalid_request"
-// @Failure      404    {object}  ErrorResponse  "realm_not_found"
+// @Failure      404    {object}  ErrorResponse  "tenant_realm_not_found OR idp_config_not_found"
 // @Failure      500    {object}  ErrorResponse
 // @Security     SystemRole
 // @Security     TenantID
@@ -152,8 +152,8 @@ type applyRealmConfigRequest struct {
 // @Param        request  body      applyRealmConfigRequest  true  "Realm config setting"
 // @Success      200      {object}  service.ApplyRealmConfigResult  "Applied immediately"
 // @Success      202      {object}  service.ApplyRealmConfigResult  "Queued for reconciliation (applied:false)"
-// @Failure      400      {object}  ErrorResponse  "invalid_request"
-// @Failure      404      {object}  ErrorResponse  "realm_not_found"
+// @Failure      400      {object}  ErrorResponse  "invalid_request OR unsupported_realm_setting"
+// @Failure      404      {object}  ErrorResponse  "tenant_realm_not_found"
 // @Failure      500      {object}  ErrorResponse
 // @Security     SystemRole
 // @Security     TenantID

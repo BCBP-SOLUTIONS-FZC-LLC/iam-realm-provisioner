@@ -2,6 +2,7 @@ package unit_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -42,12 +43,16 @@ func TestConfigureIdp_NewConfig_EnqueuesCreateAuditEntry(t *testing.T) {
 	assert.Equal(t, domain.Source, e.SourceService)
 	assert.Equal(t, domain.AuditActionCreate, e.Action)
 	assert.Equal(t, &domain.AuditTarget{Type: "idp", ID: "acme-sso"}, e.Target)
-	assert.Equal(t, domain.AuditActor{Type: domain.AuditActorIAMSystem, ID: domain.SystemActorID}, e.Actor)
+	// idp_service.go stamps the system actor's Display with the service name so
+	// audit consumers can attribute the entry without cross-referencing the actor ID.
+	assert.Equal(t, domain.AuditActor{Type: domain.AuditActorIAMSystem, ID: domain.SystemActorID, Display: domain.Source}, e.Actor)
 	assert.False(t, e.OccurredAt.IsZero())
-	assert.Equal(t, string(domain.ValidationOutcomePass), e.Metadata["validation_outcome"])
-	assert.Equal(t, true, e.Metadata["secret_rotated"])
-	assert.NotEmpty(t, e.Metadata["checks"])
-	for _, v := range e.Metadata {
+	var meta map[string]any
+	require.NoError(t, json.Unmarshal(e.Metadata, &meta))
+	assert.Equal(t, string(domain.ValidationOutcomePass), meta["validation_outcome"])
+	assert.Equal(t, true, meta["secret_rotated"])
+	assert.NotEmpty(t, meta["checks"])
+	for _, v := range meta {
 		assert.NotEqual(t, "super-secret", v, "the IdP secret must never reach an audit entry")
 	}
 }
@@ -156,7 +161,9 @@ func TestRemoveIdp_EnqueuesDeleteAuditEntry(t *testing.T) {
 	e := audit.Enqueued[0]
 	assert.Equal(t, domain.AuditActionDelete, e.Action)
 	assert.Equal(t, "acme-sso", e.Target.ID)
-	assert.Equal(t, string(domain.IdpProtocolOIDC), e.Metadata["protocol"])
+	var meta map[string]any
+	require.NoError(t, json.Unmarshal(e.Metadata, &meta))
+	assert.Equal(t, string(domain.IdpProtocolOIDC), meta["protocol"])
 }
 
 func TestRemoveIdp_LocalDeleteFailure_EnqueuesNoAuditEntry(t *testing.T) {

@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
-	"github.com/jackc/pgx/v5"
 )
 
 // GaugeRepository serves the read-only, cross-tenant aggregate queries that
@@ -63,7 +62,7 @@ SELECT count(*) FROM public.realm_config_reconciliations WHERE status = 'pending
 // still awaiting application (RP-C4).
 func (r *GaugeRepository) PendingRealmConfigs(ctx context.Context) (int64, error) {
 	var n int64
-	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		return tx.QueryRow(ctx, pendingRealmConfigsSQL).Scan(&n)
 	})
 	if err != nil {
@@ -142,7 +141,7 @@ const rlsViolationsWatermarkName = "rls_violations_total"
 // since the test harness doesn't run the real Terraform either).
 func (r *GaugeRepository) RLSViolationCounts(ctx context.Context, initialWindow time.Duration) (map[string]int64, error) {
 	out := map[string]int64{}
-	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO exporter_watermarks (exporter_name, last_processed_at)
 			VALUES ($1, now() - $2::interval)
@@ -198,7 +197,7 @@ func (r *GaugeRepository) RLSViolationCounts(ctx context.Context, initialWindow 
 // caller might publish.
 func (r *GaugeRepository) groupedCounts(ctx context.Context, sql string, args ...any) (map[string]int64, error) {
 	out := map[string]int64{}
-	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		rows, err := tx.Query(ctx, sql, args...)
 		if err != nil {
 			return err
@@ -234,7 +233,7 @@ GROUP BY s.status`
 // (TenantIdpConfigChanged AL-5 hand-off, §10.6).
 func (r *GaugeRepository) AuditEntryBacklog(ctx context.Context) (map[string]int64, error) {
 	out := map[string]int64{}
-	err := withPool(ctx, r.pool, func(tx pgx.Tx) error {
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		rows, err := tx.Query(ctx, auditEntryBacklogSQL)
 		if err != nil {
 			return err

@@ -20,8 +20,8 @@
 # build-image lints the Dockerfile (Hadolint + .dockerignore check) as its
 # first steps, before the expensive build — a lint failure never starts the
 # build, and there's no separate lint-dockerfile job to pay a job-minute for.
-# validate-test runs two parallel jobs: the race+coverage gate (`test`) and the
-# end-to-end suite (`e2e`). Both gate trivy/smoke (correctness).
+# validate-test runs a single `test` job: race+coverage gate, arch lint,
+# metrics-registry lint, then e2e — matching iam-tender-acl's single-job shape.
 # validate-quality gates push/release only (style + lint).
 # pr-summary posts a status comment on pull_request events (skipped if upstream jobs fail).
 #
@@ -226,7 +226,10 @@ jobs:
     name: Smoke tests
     runs-on: ubuntu-latest
     needs: [validate-test, build-image]
-    timeout-minutes: 10
+    # Binary startup gate (smoke-tests.sh) finishes in < 1 min.
+    # Real HTTP smoke test (smoke-http-test.sh) adds ~3 min for
+    # Postgres + Floci healthchecks + schema migration + HTTP roundtrips.
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.0
@@ -263,6 +266,15 @@ jobs:
           BINARY: reconciler
           ENTRYPOINT: /iam-realm-provisioner-reconciler
         run: bash .github/scripts/smoke-tests.sh
+
+      # Boots the same iam-realm-provisioner-ci-test image against real Postgres
+      # and Floci (SNS/SQS) containers from docker-compose.yml and issues real
+      # HTTP requests — smoke-tests.sh above only proves the binary exits
+      # non-zero on missing env vars, never that the shipped image actually
+      # boots, self-migrates, and serves a real request end-to-end. This is the
+      # gate that would catch a boot-time regression before it reaches release.
+      - name: Real HTTP smoke test (boot + live request against Postgres/Floci)
+        run: bash .github/scripts/smoke-http-test.sh
 
   # ── posts or updates a single comment on every PR push ───────────────────
   pr-summary:

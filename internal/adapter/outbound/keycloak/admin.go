@@ -16,12 +16,11 @@ import (
 
 	"github.com/Nerzal/gocloak/v13"
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/httpx"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 )
 
 // RequiresMFARoleName is the frozen Keycloak realm-role name the
@@ -34,8 +33,14 @@ type Config struct {
 	AdminRealm   string // "master"
 	ClientID     string // "iam-realm-provisioner"
 	ClientSecret string
-	RateLimitRPS int
-	Timeout      time.Duration
+	// SecretProvider, when set, overrides ClientSecret: the returned string is
+	// fetched at every token refresh, enabling live rotation without a pod
+	// restart (e.g. by reading from OpenBao instead of a static env-var copy).
+	// When nil, ClientSecret is used as a static value — the pre-existing
+	// behavior and what tests set directly.
+	SecretProvider func(ctx context.Context) (string, error)
+	RateLimitRPS   int
+	Timeout        time.Duration
 }
 
 // Admin implements port.KeycloakAdmin.
@@ -44,7 +49,7 @@ type Admin struct {
 	tokens *tokenCache
 	cfg    Config
 	log    port.Logger
-	tracer trace.Tracer
+	tracer gincommon.Tracer
 }
 
 var _ port.KeycloakAdmin = (*Admin)(nil)
@@ -58,7 +63,19 @@ func New(cfg Config, log port.Logger) *Admin {
 		cfg.RateLimitRPS = 20
 	}
 	client := gocloak.NewClient(cfg.BaseURL)
-	tokens := newTokenCache(client, cfg.AdminRealm, cfg.ClientID, cfg.ClientSecret)
+	secretFn := cfg.SecretProvider
+	if secretFn == nil {
+		// Static fallback — wraps the value captured at construction time.
+		// Use Config.SecretProvider for live rotation without a pod restart.
+		s := cfg.ClientSecret
+		secretFn = func(_ context.Context) (string, error) {
+			if s == "" {
+				return "", fmt.Errorf("keycloak: ClientSecret is not configured")
+			}
+			return s, nil
+		}
+	}
+	tokens := newTokenCache(client, cfg.AdminRealm, cfg.ClientID, secretFn)
 	limiter := newRateLimiter(cfg.RateLimitRPS)
 
 	// gocloak drives resty, which owns its own http.Client — so the
@@ -79,7 +96,7 @@ func New(cfg Config, log port.Logger) *Admin {
 		tokens: tokens,
 		cfg:    cfg,
 		log:    log,
-		tracer: otel.Tracer(tracerName),
+		tracer: gincommon.NewTracer(tracerName),
 	}
 }
 

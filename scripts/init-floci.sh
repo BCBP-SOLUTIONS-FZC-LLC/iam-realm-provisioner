@@ -152,6 +152,13 @@ subscribe_queue "$TENANT_TOPIC_ARN" "$TENANT_NOTIF_Q" \
 TENANT_AUTHZ_Q=$(create_queue_with_dlq tenant-authz-q)
 subscribe_queue "$TENANT_TOPIC_ARN" "$TENANT_AUTHZ_Q" '{"EventType": ["TenantConverted"]}'
 
+# User Profile — TenantOffboarded only (GDPR scrub via ScrubTenant, §8.11).
+# In production this belongs to iam-user-profile; provisioned here so local
+# dev can test the full TenantOffboarded→ScrubTenant path without standing up
+# iam-user-profile (RP-PREV-5 fix).
+TENANT_LIFECYCLE_UP_Q=$(create_queue_with_dlq tenant-lifecycle-user-profile-q)
+subscribe_queue "$TENANT_TOPIC_ARN" "$TENANT_LIFECYCLE_UP_Q" '{"EventType": ["TenantOffboarded"]}'
+
 # -- S3 realm-export bucket (RP-EVT-4) ---------------------------------------
 aws s3api create-bucket --bucket "$BUCKET" \
   --create-bucket-configuration LocationConstraint="$AWS_REGION" >/dev/null
@@ -187,5 +194,6 @@ echo "  SQS_TENANT_ORGM_QUEUE_URL=$TENANT_ORGM_Q (dev-only fan-out: all 9 produc
 echo "  SQS_TENANT_AUDIT_QUEUE_URL=$TENANT_AUDIT_Q (dev-only fan-out: all 9 produced events)"
 echo "  SQS_TENANT_NOTIF_QUEUE_URL=$TENANT_NOTIF_Q (dev-only fan-out: TenantConverted/DirectPaidSignup/TrialExpired/TenantSuspended/TenantReactivated)"
 echo "  SQS_TENANT_AUTHZ_QUEUE_URL=$TENANT_AUTHZ_Q (dev-only fan-out: TenantConverted only)"
+echo "  SQS_TENANT_LIFECYCLE_UP_QUEUE_URL=$TENANT_LIFECYCLE_UP_Q (dev-only fan-out: TenantOffboarded — iam-user-profile ScrubTenant)"
 echo "  REALM_EXPORT_BUCKET=$BUCKET"
 echo "  GLUE_REGISTRY_TENANT_NAME=iam-tenant-events (9 schemas)"

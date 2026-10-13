@@ -2,7 +2,7 @@
 
 This document describes the internal structure, dependency rules, and runtime data flows of `iam-realm-provisioner`.
 
-`iam-realm-provisioner` is a **private Go service** (`github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.9) deployed as a containerised microservice (HPA 2–4 replicas), refining **IAM HLD v1.42 §5.2** (LLD v1.21, `docs/lld/iam-lld-realm-provisioner-service.md`; where LLD and HLD disagree, HLD is authoritative). It is the **single writer to the Keycloak Admin API** across the entire IAM subsystem (RP-INV-1, HLD §4.2/§5.2) and the system of record for the small amount of local state — realm identity, IdP config, reconciliation and idempotency ledgers — needed to make that writing safe, idempotent, and replayable. Org & Membership owns the application-side `tenants` row; this service owns Keycloak-side realm reality and its `tenant_realms` mirror (RP-D6) — neither writes the other's store. It ships as **two binaries from one image**: `cmd/server` (the mesh-only `/api/v1/internal` API, RP-1..RP-17, three inbound SQS consumers, and the transactional outbox runner) and `cmd/reconciler` (a single binary dispatched by `--job=<name>`, covering RP-C1..RP-C4 plus two operational prune jobs, each its own Kubernetes CronJob). The service sits on **neither of the platform's two hot paths** (HLD §4.3) — work is bursty, coarse-grained tenant-lifecycle operations, where correctness, auditability, and idempotency matter more than latency.
+`iam-realm-provisioner` is a **private Go service** (`github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.9) deployed as a containerised microservice (HPA 2–4 replicas), refining **IAM HLD v1.42 §5.2** (LLD **v1.23**, `docs/lld/iam-lld-realm-provisioner-service.md`; where LLD and HLD disagree, HLD is authoritative). It is the **single writer to the Keycloak Admin API** across the entire IAM subsystem (RP-INV-1, HLD §4.2/§5.2) and the system of record for the small amount of local state — realm identity, IdP config, reconciliation and idempotency ledgers — needed to make that writing safe, idempotent, and replayable. Org & Membership owns the application-side `tenants` row; this service owns Keycloak-side realm reality and its `tenant_realms` mirror (RP-D6) — neither writes the other's store. It ships as **two binaries from one image**: `cmd/server` (the mesh-only `/api/v1/internal` API, RP-1..RP-17, three inbound SQS consumers, and the transactional outbox runner) and `cmd/reconciler` (a single binary dispatched by `--job=<name>`, covering RP-C1..RP-C4 plus two operational prune jobs, each its own Kubernetes CronJob). The service sits on **neither of the platform's two hot paths** (HLD §4.3) — work is bursty, coarse-grained tenant-lifecycle operations, where correctness, auditability, and idempotency matter more than latency.
 
 **Does not own:** tenants-as-business-entities, memberships, roles, invitations (Org & Membership); JWT issuance / login (Keycloak itself); delegation, tender ACL, group-mapping, or the plan/department catalogues (sibling services extracted from Core); any per-user table (there is none — Keycloak is the sole store of user identity and credentials); secret material in Postgres (IdP secrets live only in OpenBao).
 
@@ -660,7 +660,7 @@ metric_status: proposed. Every series: {domain=iam, service=iam-realm-provisione
         l3["RLS violation log — ERROR, 1% sampled (rls_violation_log)"]
     end
 
-    subgraph db_obs["Database observability (platform-pgcommon/v2 v2.0.0)"]
+    subgraph db_obs["Database observability (platform-pgcommon/v2 v2.0.1)"]
         db1["pgx pool metrics — acquire_count/duration, idle/acquired conns"]
         db2["SlowQueryTracer — WARN log > SlowQueryThreshold"]
     end
@@ -910,8 +910,8 @@ Two-stage Dockerfile: a Go builder stage compiles the binaries, the runtime stag
 | CronJob | Schedule | Purpose |
 |---|---|---|
 | `trial-expiry` | `0 2 * * *` | RP-C1: sweep local `tenant_realms` for expired shared-realm trials; call RP-12 per tenant. **Never queries O&M.** |
-| `trial-hard-delete` | `0 3 * * *` | RP-C2: past `TRIAL_GRACE_DAYS`, hard-delete shared-realm trial users and scrub the local row |
-| `subscription-lapse` | `0 2 * * *` | RP-C3: `cancelled → suspended → offboarded`, two phases sharing one `RECONCILER_BATCH_LIMIT` budget — suspend polls O&M's I-16 lapse list (WARN + skip if `ORG_MEMBERSHIP_BASE_URL` is unset), offboard always runs against local `suspension_source='billing_lapse'` rows past `RETENTION_DAYS` |
+| `trial-hard-delete` | `0 3 * * *` | RP-C2: past `TRIAL_GRACE_DAYS`, hard-delete shared-realm trial users and scrub the local row; atomically erases PII from `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`, `pending_audit_entries` via `NewGDPRScrubFn` (`gdpr.go`, BYPASSRLS transaction) |
+| `subscription-lapse` | `0 2 * * *` | RP-C3: `cancelled → suspended → offboarded`, two phases sharing one `RECONCILER_BATCH_LIMIT` budget — suspend polls O&M's I-16 lapse list (WARN + skip if `ORG_MEMBERSHIP_BASE_URL` is unset), offboard always runs against local `suspension_source='billing_lapse'` rows past `RETENTION_DAYS`; offboard phase atomically erases PII from the same five tables via `NewGDPRScrubFn` (`gdpr.go`, BYPASSRLS transaction) |
 | `realm-config-reconcile` | `*/10 * * * *` | RP-C4: retry every `realm_config_reconciliations` row in `status='pending'`; past `RECONCILER_MAX_ATTEMPTS` (default 20) a row moves to a terminal `failed` status instead of retrying forever (poison-pill cap) |
 | `outbox-prune` | `0 4 * * *` | Prune published `outbox_events` past `OUTBOX_RETENTION_DAYS` |
 | `processed-events-prune` | `30 4 * * *` | Prune `processed_events` past `PROCESSED_EVENTS_TTL_DAYS` |
@@ -1071,7 +1071,7 @@ graph LR
         readme["README.md\nmental model · API/event overview · onboarding"]
         asyncapi_yaml["api/asyncapi.yaml\nAsyncAPI 3.0 — iam-tenant-events SNS contract\n(9 published + 6 consumed)"]
         swag_annot["@Summary/@Router annotations\non all 17 RP-1..RP-17 handlers +\ncmd/server/swagger_info.go"]
-        lld["docs/lld/iam-lld-realm-provisioner-service.md\nfrozen LLD v1.21"]
+        lld["docs/lld/iam-lld-realm-provisioner-service.md\nfrozen LLD v1.23"]
     end
 
     subgraph rendered["Rendered by"]
@@ -1101,6 +1101,6 @@ graph LR
 | [`.claude/request-flows.md`](.claude/request-flows.md) | Provisioning, conversion, IdP, MFA, lapse, GDPR ordering |
 | [`.claude/operations.md`](.claude/operations.md) | Security, observability, configuration, deployment, CI/CD, dependency degradation matrix |
 | [`docs/architecture/README.md`](docs/architecture/README.md) | Standalone Mermaid diagram set index (the 9 `.mmd` files embedded above) |
-| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD (v1.21) — §16 open-question register, §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
+| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD (v1.23) — §15 GDPR scrub, §16 open-question register, §17 error taxonomy, §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
 
 Render a diagram locally: open any `.mmd` file in a Mermaid-aware IDE (VS Code + Mermaid Preview, IntelliJ + Mermaid plugin) or paste into [mermaid.live](https://mermaid.live).

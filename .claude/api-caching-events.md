@@ -12,7 +12,7 @@ Middleware chain (`router.go`): 1 MB body-size cap → `gincommon.ObservabilityM
 |---|---|---|---|---|
 | RP-1 | `POST /tenants/provision-trial` | system | required | Create a trial user in the shared realm, stamp `tenant_id`, trigger `VERIFY_EMAIL`. Emits `TrialTenantProvisioned`. |
 | RP-2 | `POST /tenants/provision-direct` | system | required | Provision a **dedicated** realm straight away (no shared-realm intermediate): create realm from template, register OIDC clients, create admin user. Emits `TenantRealmReady` + `DirectPaidSignup` + `TenantConverted{direct_signup:true}`. |
-| RP-3 | `POST /tenants/:id/convert` | system | required | Trial → dedicated conversion: create dedicated realm, migrate every trial user (preserving `sub`, copying TOTP, flagging WebAuthn re-enrollment), force-logout the shared realm. Emits `TenantRealmReady` + `TenantConverted{direct_signup:false}`. |
+| RP-3 | `POST /tenants/:id/convert` | system | required | Trial → dedicated conversion: create dedicated realm, migrate every trial user (preserving `sub`, copying TOTP, flagging WebAuthn re-enrollment), force-logout the shared realm. Emits `TenantRealmReady` + `TenantConverted{direct_signup:false}`. Post-commit, revokes the old shared-realm credential via TS-2 (`RevokeCredential`); a failed revoke is logged and does not fail the conversion. |
 | RP-4 | `POST /tenants/:id/revert-conversion` | system | required | Undo Convert within the reversal window: migrate users back to the shared realm, delete the dedicated realm, re-mint the tenant's `platform-automation` client back in the shared realm (§2.5 — the dedicated realm's client died with the realm), extend the trial. Emits `TrialReactivated`. `409 revert_window_expired` past the window. |
 | RP-5 | `POST /tenants/:id/users` | system | required | Create an invited user in the tenant's current realm with `RequiredActions` applied **verbatim** (never re-derived). No local persistence — no per-user table exists. |
 | RP-6 | `PUT /tenants/:id/idp` | system | required | Configure (create/update) a SAML/OIDC IdP — behind the §11.6 region-portability gate. Requires a `dedicated` realm (`409 idp_requires_dedicated_realm` otherwise). Writes the secret to OpenBao, then calls Keycloak, then upserts the local non-secret config row. |
@@ -51,15 +51,17 @@ Every mutating endpoint above marked "required" enforces `RequireIdempotencyKey`
 | `revert_window_expired` | 409 | RP-4 past the reversal window |
 | `tenant_offboarded` | 409 | Any mutation against a terminal (offboarded) tenant |
 | `operation_in_progress` | 409 | Idempotency-Key replay against a non-`succeeded` row |
-| `optimistic_lock_conflict` | 409 | `record_version` mismatch on a `tenant_realms`/`idp_config` update; also surfaced from `IssueOrRotateCredential` when Token Service's TS-1 409 body names this cause explicitly (disambiguated from `service_account_rotation_in_flight` below by parsing the response body, not flattened into one code) |
+| `optimistic_lock_conflict` | 409 | `record_version` mismatch on a `tenant_realms`/`idp_config` update; also surfaced from `IssueOrRotateCredential` when Token Service's TS-1 409 body names this cause explicitly (disambiguated from `service_account_rotation_in_flight` and `credential_replay_revoked` below by parsing the response body, not flattened into one code) |
 | `user_email_conflict` | 409 | Additive — RP-1/RP-2/RP-5 create-user 409 that `resolveUserCreateConflict` could not resolve as the caller's own lost-response retry (§9.2) |
 | `service_account_rotation_in_flight` | 409 | Additive — Token Service TS-1 rejected a concurrent issue/rotate for the same principal (§2.5); also the safe default for any other/unparseable TS-1 409 body |
+| `credential_replay_revoked` | 409 | Additive — Token Service TS-1 (TS-D13) rejected a replayed `rotation_id` whose credential has since been revoked; distinct from `service_account_rotation_in_flight` so callers can tell "a live rotation race" from "your stored rotation_id is stale" |
+| `credential_replay_expired` | 409 | Additive — Token Service TS-1 (TS-D22) rejected a replayed `rotation_id` whose credential has since expired (distinct from `credential_replay_revoked` where the credential was explicitly revoked); caller should generate a fresh `rotation_id` |
 | `service_account_not_provisioned` | 422 | Additive — RP-17 apply attempted before the tenant's `platform-automation` principal was ever minted |
 | `keycloak_unavailable` | 502 | |
 | `conversion_failed` | 502 | RP-3/RP-4 Keycloak sequence failure (with `WithDetails` context) |
 | `org_membership_unavailable` | 503 | O&M I-8 residual-MFA check unreachable (membership-realm-q consumer) |
 | `object_store_unavailable` | 503 | S3 realm-export failure (RP-C3 offboarding) |
-| `db_unavailable` | 503 | Postgres connectivity / resource SQLSTATE (08/53/57/58) |
+| `db_unavailable` | 503 | Postgres connectivity / resource SQLSTATE classes 08/53/57/58 — class 57 includes 57014 (`query_canceled` / statement_timeout expiry); all map to 503 so clients retry instead of treating a transient timeout as a code bug |
 | `token_service_unavailable` | 503 | Additive — Token Service TS-1/TS-4 unreachable (§2.5) |
 | `request_timeout` | 503 | Additive — Postgres statement/lock timeout (57014/55P03); retryable, not an outage |
 | `tenant_mismatch` | 403 | Additive — `RequireTenantMatch`: the `/tenants/:id` (or provision body) tenant is not the caller's `x-tenant-id`; rejected before any Keycloak call |

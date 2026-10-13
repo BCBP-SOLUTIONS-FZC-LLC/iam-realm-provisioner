@@ -7,22 +7,22 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgconn" // CommandTag — pgcommon.Rows interface method; no pgcommon wrapper
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace"
 
 	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 )
 
-// fakeTx implements pgx.Tx by embedding the nil interface (any method other
-// than Exec panics if called) and recording every Exec call — sufficient
+// fakeTx implements pgcommon.Tx by embedding the nil interface (any method
+// other than Exec panics if called) and recording every Exec call — sufficient
 // because outbox.Enqueue's InsertRecord calls only tx.Exec (verified by
 // reading platform-events' outboxstore.InsertRecord).
 type fakeTx struct {
-	pgx.Tx
+	pgcommon.Tx
 	execCalls [][]any
 	execErr   error
 }

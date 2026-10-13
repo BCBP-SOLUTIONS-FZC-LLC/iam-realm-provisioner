@@ -53,6 +53,17 @@ jobs:
           GONOSUMDB: github.com/BCBP-SOLUTIONS-FZC-LLC/*
         run: go mod download
 
+      # Every private module is resolved by `go mod download` above — no
+      # later step in this job needs network/credential access again, so
+      # the plaintext token doesn't need to sit on disk for the rest of the
+      # job. `if: always()` so this still runs (and the token is still
+      # removed) even if `go mod download` itself failed.
+      - name: Remove private module credentials
+        if: always()
+        run: |
+          rm -f ~/.git-credentials
+          git config --global --unset credential.helper || true
+
       - name: Verify modules
         run: go mod verify
 

@@ -169,7 +169,13 @@ func run() int {
 	// (no GUCProvider, PGBouncerMode forced true, ConfigFromEnv pool
 	// sizing). Tracer is wired separately so db.query spans export
 	// through gincommon's TracerProvider.
-	sysCfg := pgadapter.SystemPoolConfig(pgadapter.SystemDSNFromEnv(), rawLog)
+	sysDSNStr := pgadapter.SystemDSNFromEnv()
+	if sysDSNStr == pgCfg.DSN && !isDevEnv(appEnv) {
+		drainPools()
+		die("startup aborted: SYSTEM_DATABASE_URL is not set — reconciler jobs require a BYPASSRLS role; " +
+			"without it all cross-tenant queries are RLS-filtered to zero rows and RP-C3 GDPR hard-delete is silently disabled")
+	}
+	sysCfg := pgadapter.SystemPoolConfig(sysDSNStr, rawLog)
 	sysCfg.Tracer = gincommon.NewSpanTracer(serviceName)
 	sysPool, err = pgcommon.NewPool(ctx, sysCfg)
 	if err != nil {
@@ -186,12 +192,12 @@ func run() int {
 	txRunner := pgadapter.NewTxRunner(sysPool, outboxPublisher)
 
 	keycloakAdmin := keycloakadapter.New(keycloakadapter.Config{
-		BaseURL:      mustEnv("KEYCLOAK_BASE_URL", appEnv),
-		AdminRealm:   envOr("KEYCLOAK_ADMIN_REALM", "master"),
-		ClientID:     envOr("KEYCLOAK_ADMIN_CLIENT_ID", "iam-realm-provisioner"),
-		ClientSecret: mustEnv("KEYCLOAK_ADMIN_CLIENT_SECRET", appEnv),
-		RateLimitRPS: envInt("KEYCLOAK_RATE_LIMIT_RPS", 20),
-		Timeout:      envDuration("KEYCLOAK_TIMEOUT_MS", 8*time.Second),
+		BaseURL:        mustEnv("KEYCLOAK_BASE_URL", appEnv),
+		AdminRealm:     envOr("KEYCLOAK_ADMIN_REALM", "master"),
+		ClientID:       envOr("KEYCLOAK_ADMIN_CLIENT_ID", "iam-realm-provisioner"),
+		SecretProvider: keycloakadapter.EnvSecretFn("KEYCLOAK_ADMIN_CLIENT_SECRET"),
+		RateLimitRPS:   envInt("KEYCLOAK_RATE_LIMIT_RPS", 20),
+		Timeout:        envDuration("KEYCLOAK_TIMEOUT_MS", 8*time.Second),
 	}, rawLog)
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(envOr("AWS_REGION", "ap-south-1")))
@@ -215,32 +221,39 @@ func run() int {
 	// other reconciler job's dispatch.
 	var subscriptionLapses port.SubscriptionLapseReader
 	if omBaseURL := envOr("ORG_MEMBERSHIP_BASE_URL", ""); omBaseURL != "" {
-		subscriptionLapses = orgmembershipadapter.New(omBaseURL, rawLog)
+		subscriptionLapses = orgmembershipadapter.New(omBaseURL, envDuration("ORG_MEMBERSHIP_TIMEOUT_MS", 5*time.Second), rawLog)
 	}
 
 	var outboxRunner *outbox.Runner
-	// The reconciler's own outbox-prune job reuses the same Runner shape
-	// as cmd/server, constructed with a noop publisher — pruning never
-	// publishes.
-	outboxRunner, err = outbox.NewRunner(outbox.Config{Pool: sysPool, Publisher: noopPublisher{}, Logger: rawLog})
-	if err != nil {
-		drainPools()
-		die("create outbox runner: %v", err)
+	if jobName == "outbox-prune" {
+		// The outbox-prune job reuses the same Runner shape as cmd/server,
+		// constructed with a noop publisher — pruning never publishes.
+		// Constructed only for this one job so other CronJob pods don't hold
+		// a sysPool connection and background goroutine they never use.
+		outboxRunner, err = outbox.NewRunner(outbox.Config{Pool: sysPool, Publisher: noopPublisher{}, Logger: rawLog})
+		if err != nil {
+			drainPools()
+			die("create outbox runner: %v", err)
+		}
 	}
 
 	jctx := &jobs.Context{
-		Pool:                   pool,
-		SysPool:                sysPool,
-		OutboxRunner:           outboxRunner,
-		TxRunner:               txRunner,
-		TenantRealms:           pgadapter.NewTenantRealmRepository(sysPool),
-		Reconciliations:        pgadapter.NewReconciliationRepository(sysPool),
-		Idempotency:            pgadapter.NewIdempotencyRepository(sysPool).WithInProgressLease(envDuration("IDEMPOTENCY_IN_PROGRESS_LEASE", pgadapter.DefaultInProgressLease)),
-		ProcessedEvents:        pgadapter.NewInboxRepository(sysPool, nil),
-		Retention:              pgadapter.NewRetentionRepository(sysPool),
-		Keycloak:               keycloakAdmin,
-		ObjectStore:            objectStore,
-		SubscriptionLapses:     subscriptionLapses,
+		Pool:               pool,
+		SysPool:            sysPool,
+		OutboxRunner:       outboxRunner,
+		TxRunner:           txRunner,
+		TenantRealms:       pgadapter.NewTenantRealmRepository(sysPool),
+		Reconciliations:    pgadapter.NewReconciliationRepository(sysPool),
+		Idempotency:        pgadapter.NewIdempotencyRepository(sysPool).WithInProgressLease(envDuration("IDEMPOTENCY_IN_PROGRESS_LEASE", pgadapter.DefaultInProgressLease)),
+		ProcessedEvents:    pgadapter.NewInboxRepository(sysPool, nil),
+		Retention:          pgadapter.NewRetentionRepository(sysPool),
+		Keycloak:           keycloakAdmin,
+		ObjectStore:        objectStore,
+		SubscriptionLapses: subscriptionLapses,
+		// GDPRScrubFn is the production §15.2 implementation: atomically
+		// deletes all tenant PII inside a BYPASSRLS sysPool transaction.
+		// See cmd/reconciler/jobs/gdpr.go for the authoritative table list.
+		GDPRScrubFn:            jobs.NewGDPRScrubFn(sysPool),
 		Logger:                 log,
 		BatchLimit:             envInt("RECONCILER_BATCH_LIMIT", 100),
 		TrialGraceDays:         envInt("TRIAL_GRACE_DAYS", 30),

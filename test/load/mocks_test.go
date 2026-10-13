@@ -170,6 +170,9 @@ func (loadTokenServiceClient) RegisterPrincipal(context.Context, uuid.UUID, port
 func (loadTokenServiceClient) IssueOrRotateCredential(context.Context, uuid.UUID, uuid.UUID, port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
 	return &port.IssueCredentialResult{Version: 1, Secret: "load-test-secret", OpenBaoPath: "iam/serviceaccount/load/v1", RecordVersion: 1}, nil
 }
+func (loadTokenServiceClient) RevokeCredential(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
 func (loadTokenServiceClient) ReadPrincipal(context.Context, uuid.UUID, uuid.UUID) (*port.ReadPrincipalResult, error) {
 	return nil, nil
 }

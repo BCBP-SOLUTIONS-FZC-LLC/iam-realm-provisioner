@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -37,7 +38,7 @@ func TestHasResidualMFARequirement_RequestShapeAndHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 5*time.Second, noopLogger{})
 	_, err := c.HasResidualMFARequirement(context.Background(), tenantID, userID)
 	require.NoError(t, err)
 
@@ -57,7 +58,7 @@ func TestHasResidualMFARequirement_TrueOnMFARequiringRole(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			c := New(srv.URL, noopLogger{})
+			c := New(srv.URL, 5*time.Second, noopLogger{})
 			got, err := c.HasResidualMFARequirement(context.Background(), uuid.New(), uuid.New())
 			require.NoError(t, err)
 			assert.True(t, got)
@@ -74,7 +75,7 @@ func TestHasResidualMFARequirement_TrueOnMFARequiringDepartmentLevel(t *testing.
 			}))
 			defer srv.Close()
 
-			c := New(srv.URL, noopLogger{})
+			c := New(srv.URL, 5*time.Second, noopLogger{})
 			got, err := c.HasResidualMFARequirement(context.Background(), uuid.New(), uuid.New())
 			require.NoError(t, err)
 			assert.True(t, got)
@@ -89,7 +90,7 @@ func TestHasResidualMFARequirement_FalseWhenNoMFARequiringGrant(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 5*time.Second, noopLogger{})
 	got, err := c.HasResidualMFARequirement(context.Background(), uuid.New(), uuid.New())
 	require.NoError(t, err)
 	assert.False(t, got)
@@ -109,7 +110,7 @@ func TestHasResidualMFARequirement_WrongDepartmentFieldNameNeverMatches(t *testi
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 5*time.Second, noopLogger{})
 	got, err := c.HasResidualMFARequirement(context.Background(), uuid.New(), uuid.New())
 	require.NoError(t, err)
 	assert.False(t, got, "a department entry keyed \"level\" (not O&M's actual \"role_level\") must not be read as a residual MFA requirement")
@@ -121,7 +122,7 @@ func TestHasResidualMFARequirement_404MeansNoActiveMembership(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 5*time.Second, noopLogger{})
 	got, err := c.HasResidualMFARequirement(context.Background(), uuid.New(), uuid.New())
 	require.NoError(t, err)
 	assert.False(t, got)
@@ -133,7 +134,7 @@ func TestHasResidualMFARequirement_5xxMapsToOrgMembershipUnavailable(t *testing.
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 5*time.Second, noopLogger{})
 	_, err := c.HasResidualMFARequirement(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
 
@@ -148,7 +149,7 @@ func TestHasResidualMFARequirement_TransportErrorMapsToOrgMembershipUnavailable(
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	srv.Close() // closed before use: connection refused
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 5*time.Second, noopLogger{})
 	_, err := c.HasResidualMFARequirement(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
 
@@ -163,7 +164,7 @@ func TestHasResidualMFARequirement_Unexpected3xxStatusReturnsPlainError(t *testi
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 5*time.Second, noopLogger{})
 	_, err := c.HasResidualMFARequirement(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
 	var domErr *domain.Error
@@ -178,14 +179,14 @@ func TestHasResidualMFARequirement_MalformedJSONReturnsDecodeError(t *testing.T)
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 5*time.Second, noopLogger{})
 	_, err := c.HasResidualMFARequirement(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decode I-8 response")
 }
 
 func TestHasResidualMFARequirement_MalformedBaseURLFailsRequestConstruction(t *testing.T) {
-	c := New("http://\x7f-invalid-host", noopLogger{})
+	c := New("http://\x7f-invalid-host", 5*time.Second, noopLogger{})
 	_, err := c.HasResidualMFARequirement(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
 }
@@ -238,7 +239,7 @@ func (c *capturingLogger) Warn(_ string, fields map[string]any) {
 func (capturingLogger) Error(string, map[string]any) {}
 
 func TestNew_SetsBaseURLAndLogger(t *testing.T) {
-	c := New("http://om.internal", noopLogger{})
+	c := New("http://om.internal", 5*time.Second, noopLogger{})
 	assert.Equal(t, "http://om.internal", c.baseURL)
 	require.NotNil(t, c.http)
 }
@@ -271,7 +272,7 @@ func TestListLapsedSubscriptions_RequestShapeAndHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 5*time.Second, noopLogger{})
 	_, err := c.ListLapsedSubscriptions(context.Background())
 	require.NoError(t, err)
 
@@ -294,7 +295,7 @@ func TestListLapsedSubscriptions_DecodesMultipleTenants(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 5*time.Second, noopLogger{})
 	got, err := c.ListLapsedSubscriptions(context.Background())
 	require.NoError(t, err)
 	require.Len(t, got, 2)
@@ -312,7 +313,7 @@ func TestListLapsedSubscriptions_EmptyListWhenNoTenantsLapsed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 5*time.Second, noopLogger{})
 	got, err := c.ListLapsedSubscriptions(context.Background())
 	require.NoError(t, err)
 	assert.Empty(t, got)
@@ -324,7 +325,7 @@ func TestListLapsedSubscriptions_5xxMapsToOrgMembershipUnavailable(t *testing.T)
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 5*time.Second, noopLogger{})
 	_, err := c.ListLapsedSubscriptions(context.Background())
 	require.Error(t, err)
 
@@ -339,7 +340,7 @@ func TestListLapsedSubscriptions_TransportErrorMapsToOrgMembershipUnavailable(t 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	srv.Close() // closed before use: connection refused
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 5*time.Second, noopLogger{})
 	_, err := c.ListLapsedSubscriptions(context.Background())
 	require.Error(t, err)
 
@@ -356,7 +357,7 @@ func TestListLapsedSubscriptions_UnexpectedStatusReturnsPlainError(t *testing.T)
 			}))
 			defer srv.Close()
 
-			c := New(srv.URL, noopLogger{})
+			c := New(srv.URL, 5*time.Second, noopLogger{})
 			_, err := c.ListLapsedSubscriptions(context.Background())
 			require.Error(t, err)
 			var domErr *domain.Error
@@ -373,14 +374,14 @@ func TestListLapsedSubscriptions_MalformedJSONReturnsDecodeError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 5*time.Second, noopLogger{})
 	_, err := c.ListLapsedSubscriptions(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decode I-16 response")
 }
 
 func TestListLapsedSubscriptions_MalformedBaseURLFailsRequestConstruction(t *testing.T) {
-	c := New("http://\x7f-invalid-host", noopLogger{})
+	c := New("http://\x7f-invalid-host", 5*time.Second, noopLogger{})
 	_, err := c.ListLapsedSubscriptions(context.Background())
 	require.Error(t, err)
 }

@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
@@ -32,8 +33,11 @@ import (
 func SubscriptionLapse(ctx context.Context, jctx *Context) (Result, error) {
 	var res Result
 
+	// The offboard phase is purely local (reads tenant_realms, no O&M call)
+	// and MUST run even when ORG_MEMBERSHIP_BASE_URL is unset — GDPR
+	// retention SLAs apply regardless of whether the suspend feed is wired.
 	if jctx.SubscriptionLapses == nil {
-		jctx.Logger.WarnContext(ctx, "subscription-lapse: no SubscriptionLapseReader wired — skipping suspend phase", nil)
+		jctx.Logger.WarnContext(ctx, "subscription-lapse: ORG_MEMBERSHIP_BASE_URL not set — suspend phase skipped; offboard phase runs unconditionally")
 	} else if err := runSuspendPhase(ctx, jctx, &res); err != nil {
 		return res, err
 	}
@@ -191,6 +195,19 @@ func offboardTenant(ctx context.Context, jctx *Context, realm *domain.TenantReal
 	metrics.RealmExportTotal.WithLabelValues("success").Inc()
 
 	if err := jctx.Keycloak.DeleteRealmIfExists(ctx, realm.RealmName); err != nil {
+		failIdempotency(ctx, jctx, idemKey)
+		return err
+	}
+
+	// §15.2/GDPR: scrub all tenant PII (see gdpr.go — authoritative list of
+	// tables). Runs via GDPRScrubFn (wired to a BYPASSRLS sysPool tx in
+	// production; see cmd/reconciler/main.go). Fail hard rather than emit
+	// TenantOffboarded with PII still in the database.
+	if jctx.GDPRScrubFn == nil {
+		failIdempotency(ctx, jctx, idemKey)
+		return fmt.Errorf("offboard: GDPRScrubFn not wired — SYSTEM_DATABASE_URL must be configured (tenant_id=%s)", realm.TenantID)
+	}
+	if err := jctx.GDPRScrubFn(ctx, realm.TenantID); err != nil {
 		failIdempotency(ctx, jctx, idemKey)
 		return err
 	}
