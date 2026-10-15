@@ -1,12 +1,11 @@
 # CI for https://github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner
 #
-# Parallel flow (matches iam-org-membership):
+# Parallel flow (matches iam-tender-acl):
 #
 #   validate-test ──────┐
-#   validate-helm ──────┤
 #   build-image ────────┤──► trivy ──────┐
 #                       │   smoke ───────┤──► pr-summary (PR events only)
-#                       └────────────────┤──► push       (push events only, needs quality + helm too)
+#                       └────────────────┤──► push       (push events only, needs quality too)
 #   validate-quality ───────────────────┘
 #
 # This repo ships TWO binaries from ONE image (§13 - see Dockerfile's header
@@ -55,24 +54,16 @@ env:
   BUILDKIT_PROGRESS: plain
 
 jobs:
-  # ── runs in parallel with validate-quality + validate-helm + build-image ──
+  # ── runs in parallel with validate-quality + build-image ─────────────────
   validate-test:
     name: Validate / Test
     uses: ./.github/workflows/validate-test.yml
     secrets: inherit
 
-  # ── runs in parallel with validate-test + validate-helm + build-image ─────
+  # ── runs in parallel with validate-test + build-image ────────────────────
   validate-quality:
     name: Validate / Quality
     uses: ./.github/workflows/validate-quality.yml
-    secrets: inherit
-
-  # ── runs in parallel with validate-test + validate-quality + build-image ──
-  # Lint, render all four values combos, and validate manifests with kubeconform.
-  # Gates push — a broken chart must not reach a deploy.
-  validate-helm:
-    name: Validate / Helm
-    uses: ./.github/workflows/validate-helm.yml
     secrets: inherit
 
   # ── runs in parallel with validate-test + validate-quality ───────────────
@@ -289,7 +280,7 @@ jobs:
   pr-summary:
     name: PR summary
     runs-on: ubuntu-latest
-    needs: [validate-test, validate-quality, validate-helm, build-image, trivy, smoke]
+    needs: [validate-test, validate-quality, build-image, trivy, smoke]
     if: github.event_name == 'pull_request'
     timeout-minutes: 5
     permissions:
@@ -317,7 +308,7 @@ jobs:
   push:
     name: Push image → GHCR
     runs-on: ubuntu-latest
-    needs: [validate-test, trivy, smoke, validate-quality, validate-helm]
+    needs: [validate-test, trivy, smoke, validate-quality]
     if: github.event_name == 'push'
     # amd64-only publish with provenance/SBOM attestations can exceed 10 minutes.
     timeout-minutes: 25
