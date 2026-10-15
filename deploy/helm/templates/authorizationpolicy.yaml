@@ -1,0 +1,66 @@
+{{- if and .Values.commercialCallers.enabled .Values.commercialCallers.istio.enabled }}
+# Istio AuthorizationPolicy — CD-19: Commercial callers (Billing) on RP-3/RP-4/RP-11.
+#
+# This policy is rendered ONLY when commercialCallers.enabled AND
+# commercialCallers.istio.enabled are both true. Keeping the two flags
+# independent lets operators enable the L4 NetworkPolicy rule (enabled: true)
+# on clusters that do not have Istio CRDs installed, without causing
+# "no matches for kind AuthorizationPolicy" helm errors.
+#
+# Because action: ALLOW denies every request that matches no rule, this
+# policy explicitly admits all namespaces that already have NetworkPolicy
+# ingress access to the API port (existingCallerNamespaces) before adding the
+# billing-restricted rules. Without this list, iam-system callers (Core/O&M in
+# the iam namespace) and Signup BFF calls routed through the gateway namespace
+# would be silently denied the moment this policy is applied.
+#
+# Rules summary:
+#   1. existingCallerNamespaces (e.g. iam, envoy-gateway-system) → all paths
+#      (mirrors the NetworkPolicy same-namespace and ingressController rules)
+#   2. billing namespace / commercial-billing SA → RP-3/RP-4/RP-11 only
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ include "iam-realm-provisioner.fullname" . }}-commercial-callers
+  labels:
+    {{- include "iam-realm-provisioner.labels" . | nindent 4 }}
+  annotations:
+    cd19: "commercial-system allow-list for Billing → RP-3/RP-4/RP-11"
+spec:
+  selector:
+    matchLabels:
+      {{- include "iam-realm-provisioner.selectorLabels" . | nindent 6 }}
+  action: ALLOW
+  rules:
+    # ── Existing callers (rule 3 of the CD-19 alignment spec) ──────────────
+    # Admit all principals from namespaces that already hold NetworkPolicy
+    # ingress access on the API port (iam, envoy-gateway-system, etc.).
+    # Path is unrestricted here — the NetworkPolicy already enforces L4.
+    {{- range .Values.commercialCallers.istio.existingCallerNamespaces }}
+    - from:
+        - source:
+            namespaces:
+              - {{ . | quote }}
+    {{- end }}
+
+    # ── Billing → RP-3/RP-4/RP-11 (CD-19 path-restricted) ────────────────
+    # Billing calls RP-3 (convert), RP-4 (revert-conversion), and RP-11
+    # (realm / idp_count SSO-downgrade guard).  All other /internal/* routes
+    # remain gated by RequireSystemRole (iam-system only); commercial-system
+    # callers hitting those routes receive 403 insufficient_role from the
+    # middleware defense-in-depth layer.
+    - from:
+        - source:
+            principals:
+              - "{{ .Values.commercialCallers.istio.trustDomain }}/ns/{{ .Values.commercialCallers.billingNamespace }}/sa/{{ .Values.commercialCallers.billingServiceAccount }}"
+      to:
+        - operation:
+            methods: ["POST"]
+            paths:
+              - "/api/v1/internal/tenants/*/convert"
+              - "/api/v1/internal/tenants/*/revert-conversion"
+        - operation:
+            methods: ["GET"]
+            paths:
+              - "/api/v1/internal/tenants/*/realm"
+{{- end }}

@@ -54,6 +54,23 @@ spec:
           protocol: TCP
     {{- end }}
 
+    # CD-19: Billing namespace → RP HTTP port for RP-3/RP-4/RP-11.
+    # Mesh AuthorizationPolicy (authorizationpolicy.yaml) further restricts
+    # this to the three specific paths. The "commercial" namespace
+    # (Entitlements, Usage & Metering) does NOT call RP and is NOT admitted.
+    {{- if .Values.commercialCallers.enabled }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.commercialCallers.billingNamespace | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.commercialCallers.billingServiceAccount | quote }}
+      ports:
+        - port: {{ .Values.service.port }}
+          protocol: TCP
+    {{- end }}
+
     {{- with .Values.networkPolicy.additionalIngressRules }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

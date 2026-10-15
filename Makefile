@@ -121,6 +121,7 @@ help:
 	@echo "  make build            - compile server, reconciler and migrate to bin/"
 	@echo "  make cover            - coverage HTML report"
 	@echo "  make cover-func       - coverage summary by function"
+	@echo "  make helm-check       - helm lint + template (4 value combos) + kubeconform (mirrors validate-helm.yml)"
 	@echo "  make ci               - tidy + fmt-check + vet + lint + arch-lint + metrics-registry-lint + metric-naming-lint + metrics-lint + test-ci + build"
 	@echo "  make docker-up        - start Postgres + Floci + Floci UI + Keycloak + OpenBao"
 	@echo "  make docker-down      - stop local containers"
@@ -143,7 +144,23 @@ help:
 	
 	@echo "Swagger:"
 	@echo "  make swag             - generate Swagger docs from annotations (output: docs/swagger/)"
-	@echo "  make swag-check       - fail if Swagger regeneration changes docs/swagger/"
+	@echo " 
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	    - fail if Swagger regeneration changes docs/swagger/"
 
 # -----------------------------
 # GO BASICS
@@ -547,6 +564,14 @@ schema-prune:
 # -----------------------------
 # CI
 # -----------------------------
+
+# helm-check: lint, render all four values combos, and kubeconform-validate
+# rendered manifests. Mirrors .github/workflows/validate-helm.yml exactly.
+# Requires helm + kubeconform (installed automatically on first run via
+# go install if absent). Does not require Docker or a live cluster.
+.PHONY: helm-check
+helm-check:
+	bash .github/scripts/helm-check.sh
 
 .PHONY: ci
 ci: tidy fmt-check vet lint arch-lint metrics-registry-lint metric-naming-lint metrics-lint test-ci build

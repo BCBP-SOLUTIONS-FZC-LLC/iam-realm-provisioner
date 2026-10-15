@@ -55,6 +55,20 @@ func (r *IdpConfigRepository) FindByAlias(ctx context.Context, tenantID uuid.UUI
 	return out, nil
 }
 
+// CountActiveByTenant returns the count of IdP configurations for tenantID
+// with status = 'active', used by RP-11 (CD-20 SSO-downgrade guard).
+// Disabled and pending_validation configs are excluded from the count.
+func (r *IdpConfigRepository) CountActiveByTenant(ctx context.Context, tenantID uuid.UUID) (int, error) {
+	var n int
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM keycloak_idp_configs WHERE tenant_id = $1 AND status = 'active'`,
+			tenantID,
+		).Scan(&n)
+	})
+	return n, err
+}
+
 // ListByTenant returns every IdP config for tenantID, ordered by alias.
 func (r *IdpConfigRepository) ListByTenant(ctx context.Context, tenantID uuid.UUID) ([]*domain.IdpConfig, error) {
 	var out []*domain.IdpConfig

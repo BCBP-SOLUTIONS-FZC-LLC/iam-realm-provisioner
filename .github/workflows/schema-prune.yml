@@ -112,7 +112,7 @@ jobs:
       packages: read     # required to pull the private SCHEMA_GOV_IMAGE from ghcr.io
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
 
@@ -253,7 +253,7 @@ jobs:
       packages: read     # required to pull the private SCHEMA_GOV_IMAGE from ghcr.io
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
 

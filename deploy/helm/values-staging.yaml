@@ -1,0 +1,54 @@
+# Staging environment overrides for iam-realm-provisioner.
+# Usage: helm upgrade ... -f deploy/helm/values.yaml -f deploy/helm/values-staging.yaml
+#
+# Only keys that differ from values.yaml appear here.
+
+env:
+  APP_ENV: "staging"
+
+# CD-19: Billing commercial caller access + Istio ALLOW policy.
+# Both flags are true in staging once the Billing SA exists and Istio is
+# installed; set enabled:false / istio.enabled:false until then.
+commercialCallers:
+  enabled: true
+  istio:
+    # Render the Istio AuthorizationPolicy. Set false if Istio CRDs are absent.
+    enabled: true
+    # Namespaces that already have L4 NetworkPolicy ingress access to the API
+    # port (excluding billing, which gets its own path-restricted rule).
+    # An Istio ALLOW policy denies every request that matches no rule, so every
+    # namespace listed here gets a blanket ALLOW on all paths — same scope the
+    # NetworkPolicy already grants at L4.
+    #
+    #   iam                 — Core / iam-org-membership (same-namespace rule)
+    #   envoy-gateway-system — Envoy Gateway proxy (ingressControllerNamespaceSelector)
+    #   gateway             — Signup BFF pod-to-pod via Istio mesh (see NetworkPolicy
+    #                         additionalIngressRules below; distinct from the
+    #                         envoy-gateway-system ingress-controller rule, which covers
+    #                         externally-routed traffic, not direct mesh calls)
+    #   monitoring          — Prometheus scraping port 9090; Istio sidecar intercepts
+    #                         all inbound ports so /metrics traffic would be denied
+    #                         without this entry even though the NetworkPolicy admits
+    #                         monitoring only on port 9090
+    existingCallerNamespaces:
+      - iam
+      - envoy-gateway-system
+      - gateway
+      - monitoring
+
+# CD-19: admit the Signup BFF (gateway namespace) at L4 for direct pod-to-pod
+# Istio-mesh calls. The ingressControllerNamespaceSelector rule above admits the
+# Envoy proxy (envoy-gateway-system) for externally-routed traffic; Signup BFF
+# calls to RP-2 and the trial-signup endpoint travel pod-to-pod over the mesh,
+# so the NetworkPolicy source is "gateway", not "envoy-gateway-system".
+# monitoring is admitted on port 9090 via networkPolicy.metricsIngress — no
+# additional rule needed.
+networkPolicy:
+  additionalIngressRules:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gateway
+      ports:
+        - port: 8080
+          protocol: TCP

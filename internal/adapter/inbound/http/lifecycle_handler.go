@@ -13,15 +13,15 @@ import (
 
 // GetRealm handles RP-11 (GET /tenants/:id/realm).
 //
-// @Summary      RP-11 — Get realm info
-// @Description  Returns the current realm record for the tenant: realm name, strategy (shared/dedicated), lifecycle status, Keycloak shard, and key timestamps. Read-only; no side effects.
+// @Summary      RP-11 — Get realm info including active IdP count
+// @Description  Returns the tenant's current realm record: realm name, strategy (shared/dedicated), lifecycle status, Keycloak shard, record_version, and idp_count. idp_count is the number of active (status=active) SAML/OIDC IdP configurations — excludes disabled and pending_validation. idp_count is always 0 for shared-strategy (trial) tenants (RP-6 blocks IdP configuration there). On IdP repository failure the endpoint returns 503 db_unavailable or 503 request_timeout — never a silent 0 that could permit an SSO-losing plan downgrade (CD-20). Named callers: Core (iam-org-membership, iam-system principal, I-18 plan-change-check — reads idp_count to block an SSO-losing plan downgrade, CD-20), Billing (commercial-system principal, CD-19 allow-list — interim SSO guard), Signup BFF, Org & Membership (both iam-system). CD-19 NetworkPolicy and mesh AuthorizationPolicy (billing namespace → this route) are implemented in deploy/helm/templates/. Read-only; no side effects.
 // @Tags         Lifecycle
 // @Produce      json
 // @Param        id  path      string  true  "Tenant UUID"  format(uuid)
 // @Success      200 {object}  service.GetRealmResult
 // @Failure      400 {object}  ErrorResponse  "invalid_request"
 // @Failure      404 {object}  ErrorResponse  "tenant_realm_not_found"
-// @Failure      500 {object}  ErrorResponse
+// @Failure      503 {object}  ErrorResponse  "db_unavailable or request_timeout (IdP count query failed — never returns silent zero)"
 // @Security     SystemRole
 // @Security     TenantID
 // @Router       /tenants/{id}/realm [get]

@@ -586,3 +586,154 @@ func TestCreateInvitedUser_InvalidTenantIDInPath(t *testing.T) {
 	rec := doRequest(d.engine(), http.MethodPost, "/api/v1/internal/tenants/not-a-uuid/users", headers, `{"email":"u@example.com","full_name":"User One"}`)
 	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
 }
+
+// ── CD-19: commercial-system allow-list for RP-3 and RP-4 ────────────────
+
+// RP-2 must NOT be reachable by commercial-system (not on the CD-19 allow-list).
+func TestProvisionDirect_CommercialSystem_403(t *testing.T) {
+	d := newServiceDeps()
+	headers := withHeader(commercialHeaders(), "Idempotency-Key", "cd19-rp2-1")
+	rec := doRequest(d.engine(), http.MethodPost, "/api/v1/internal/tenants/provision-direct", headers,
+		`{"tenant_name":"Acme","tenant_slug":"acme","admin_email":"a@example.com","admin_name":"Admin","plan":"pro"}`)
+	assertStatusAndCode(t, rec, http.StatusForbidden, "insufficient_role")
+}
+
+// RP-3 must be reachable by commercial-system (CD-19 allow-list).
+func TestConvert_CommercialSystem_Allowed(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	d.putRealm(sharedRealm(tenantID))
+	d.keycloak.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, templateVersion string) error { return nil }
+	d.keycloak.RegisterOIDCClientsFn = func(ctx context.Context, realmName, tenantSlug string) ([]string, error) {
+		return []string{"web"}, nil
+	}
+	d.keycloak.ListUsersByTenantFn = func(ctx context.Context, realmName string, tid uuid.UUID) ([]uuid.UUID, error) {
+		return []uuid.UUID{uuid.New()}, nil
+	}
+	d.keycloak.MigrateUserFn = func(ctx context.Context, sourceRealm, targetRealm string, uid uuid.UUID) (bool, error) {
+		return false, nil
+	}
+	d.keycloak.ForceLogoutRealmFn = func(ctx context.Context, realmName string) error { return nil }
+	headers := withHeader(commercialHeaders(), "Idempotency-Key", "cd19-rp3-1")
+	rec := doRequest(d.engine(), http.MethodPost, convertPath(tenantID), headers,
+		`{"plan":"pro","billing_subscription_id":"sub_123"}`)
+	// RP-3 runs detached; 200 is the normal result — must NOT be 403 for commercial-system.
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("commercial-system must reach RP-3 (CD-19 allow-list), got 403: %s", rec.Body.String())
+	}
+}
+
+// RP-4 must be reachable by commercial-system (CD-19 allow-list).
+func TestRevertConversion_CommercialSystem_Allowed(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	convertedAt := timeNowMinus(1)
+	realm := dedicatedRealm(tenantID, "kc-shard-1")
+	realm.ConvertedAt = &convertedAt
+	d.putRealm(realm)
+	d.keycloak.ListUsersByTenantFn = func(ctx context.Context, realmName string, tid uuid.UUID) ([]uuid.UUID, error) {
+		return []uuid.UUID{uuid.New()}, nil
+	}
+	d.keycloak.MigrateUserFn = func(ctx context.Context, sourceRealm, targetRealm string, uid uuid.UUID) (bool, error) {
+		return false, nil
+	}
+	d.keycloak.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error { return nil }
+	headers := withHeader(commercialHeaders(), "Idempotency-Key", "cd19-rp4-1")
+	rec := doRequest(d.engine(), http.MethodPost, revertPath(tenantID), headers, `{"reason":"fraud"}`)
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("commercial-system must reach RP-4 (CD-19 allow-list), got 403: %s", rec.Body.String())
+	}
+}
+
+// RP-4: the 7-day revert window is enforced even for commercial-system callers.
+func TestRevertConversion_CommercialSystem_WindowExpired_409(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	convertedAt := timeNowMinus(30 * 24) // 30 days ago, well past the 7-day window
+	realm := dedicatedRealm(tenantID, "kc-shard-1")
+	realm.ConvertedAt = &convertedAt
+	d.putRealm(realm)
+	headers := withHeader(commercialHeaders(), "Idempotency-Key", "cd19-rp4-window-1")
+	rec := doRequest(d.engine(), http.MethodPost, revertPath(tenantID), headers, "")
+	assertStatusAndCode(t, rec, http.StatusConflict, "revert_window_expired")
+}
+
+// ── CD-19: actor recording ────────────────────────────────────────────────
+//
+// When commercial-system calls RP-3 or RP-4, the outbox event's Actor field
+// must carry CommercialActorID (not uuid.Nil, not SystemActorID). This verifies
+// the full path: commercialHeaders() → GUCBridgeMiddleware → parseBridgedIdentity
+// → requestctx.UserID = CommercialActorID → callerActor(ctx) in provisioning
+// service → domain.Event.Actor = CommercialActorID.
+
+// TestConvert_CommercialSystem_RecordsActor verifies that TenantConverted
+// events emitted via RP-3 carry Actor = CommercialActorID when the caller is
+// the commercial-system principal (CD-19).
+func TestConvert_CommercialSystem_RecordsActor(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	d.putRealm(sharedRealm(tenantID))
+	d.keycloak.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, templateVersion string) error { return nil }
+	d.keycloak.RegisterOIDCClientsFn = func(ctx context.Context, realmName, tenantSlug string) ([]string, error) {
+		return []string{"web"}, nil
+	}
+	d.keycloak.ListUsersByTenantFn = func(ctx context.Context, realmName string, tid uuid.UUID) ([]uuid.UUID, error) {
+		return []uuid.UUID{}, nil // zero users — keeps the test simple
+	}
+	d.keycloak.ForceLogoutRealmFn = func(ctx context.Context, realmName string) error { return nil }
+	headers := withHeader(commercialHeaders(), "Idempotency-Key", "cd19-actor-rp3-1")
+	rec := doRequest(d.engine(), http.MethodPost, convertPath(tenantID), headers,
+		`{"plan":"pro","billing_subscription_id":"sub_actor"}`)
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("commercial-system must reach RP-3, got 403: %s", rec.Body.String())
+	}
+	// Find the TenantConverted event and verify its Actor.
+	var convertedEvent *domain.Event
+	for _, ev := range d.tx.pub.events {
+		if ev.Type == domain.EventTenantConverted {
+			convertedEvent = ev
+			break
+		}
+	}
+	if convertedEvent == nil {
+		t.Fatal("TenantConverted event not found in outbox")
+	}
+	if convertedEvent.Actor != domain.CommercialActorID {
+		t.Fatalf("TenantConverted.Actor = %q, want CommercialActorID %q", convertedEvent.Actor, domain.CommercialActorID)
+	}
+}
+
+// TestRevertConversion_CommercialSystem_RecordsActor verifies that
+// TrialReactivated events emitted via RP-4 carry Actor = CommercialActorID
+// when the caller is the commercial-system principal (CD-19).
+func TestRevertConversion_CommercialSystem_RecordsActor(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	convertedAt := timeNowMinus(1) // 1 hour ago — within 7-day window
+	realm := dedicatedRealm(tenantID, "kc-shard-1")
+	realm.ConvertedAt = &convertedAt
+	d.putRealm(realm)
+	d.keycloak.ListUsersByTenantFn = func(ctx context.Context, realmName string, tid uuid.UUID) ([]uuid.UUID, error) {
+		return []uuid.UUID{}, nil // zero users — keeps the test simple
+	}
+	d.keycloak.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error { return nil }
+	headers := withHeader(commercialHeaders(), "Idempotency-Key", "cd19-actor-rp4-1")
+	rec := doRequest(d.engine(), http.MethodPost, revertPath(tenantID), headers, `{"reason":"fraud"}`)
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("commercial-system must reach RP-4, got 403: %s", rec.Body.String())
+	}
+	// Find the TrialReactivated event and verify its Actor.
+	var reactivatedEvent *domain.Event
+	for _, ev := range d.tx.pub.events {
+		if ev.Type == domain.EventTrialReactivated {
+			reactivatedEvent = ev
+			break
+		}
+	}
+	if reactivatedEvent == nil {
+		t.Fatal("TrialReactivated event not found in outbox")
+	}
+	if reactivatedEvent.Actor != domain.CommercialActorID {
+		t.Fatalf("TrialReactivated.Actor = %q, want CommercialActorID %q", reactivatedEvent.Actor, domain.CommercialActorID)
+	}
+}

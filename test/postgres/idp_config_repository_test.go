@@ -200,6 +200,81 @@ func TestIdpConfigRepository(t *testing.T) {
 		_, err := sysRepo.ListAll(cctx)
 		require.Error(t, err)
 	})
+
+	// ── CountActiveByTenant — CD-20 SSO-downgrade guard ──────────────────
+
+	// A tenant with no IdPs returns 0.
+	t.Run("CountActiveByTenant_NoIdps_ReturnsZero", func(t *testing.T) {
+		t.Parallel()
+		tenantID := uuid.New()
+		tctx := withTenant(ctx, tenantID)
+
+		n, err := repo.CountActiveByTenant(tctx, tenantID)
+		require.NoError(t, err)
+		assert.Equal(t, 0, n)
+	})
+
+	// One active SAML + one active OIDC → count is 2.
+	t.Run("CountActiveByTenant_TwoActiveIdps_ReturnsTwo", func(t *testing.T) {
+		t.Parallel()
+		tenantID := uuid.New()
+		tctx := withTenant(ctx, tenantID)
+
+		saml := newIdpConfig(tenantID, "saml-corp")
+		saml.Status = domain.IdpConfigStatusActive
+		require.NoError(t, repo.Upsert(tctx, saml))
+
+		oidc := newIdpConfig(tenantID, "oidc-google")
+		oidc.Protocol = domain.IdpProtocolOIDC
+		oidc.Status = domain.IdpConfigStatusActive
+		require.NoError(t, repo.Upsert(tctx, oidc))
+
+		n, err := repo.CountActiveByTenant(tctx, tenantID)
+		require.NoError(t, err)
+		assert.Equal(t, 2, n)
+	})
+
+	// One active + one disabled → count is 1 (disabled is excluded).
+	// This is the key assertion proving the SQL WHERE status='active' filter
+	// works correctly for the CD-20 SSO-downgrade guard.
+	t.Run("CountActiveByTenant_DisabledIdpNotCounted", func(t *testing.T) {
+		t.Parallel()
+		tenantID := uuid.New()
+		tctx := withTenant(ctx, tenantID)
+
+		active := newIdpConfig(tenantID, "active-saml")
+		active.Status = domain.IdpConfigStatusActive
+		require.NoError(t, repo.Upsert(tctx, active))
+
+		disabled := newIdpConfig(tenantID, "disabled-oidc")
+		disabled.Protocol = domain.IdpProtocolOIDC
+		disabled.Status = domain.IdpConfigStatusDisabled
+		require.NoError(t, repo.Upsert(tctx, disabled))
+
+		pending := newIdpConfig(tenantID, "pending-saml2")
+		pending.Status = domain.IdpConfigStatusPendingValidation
+		require.NoError(t, repo.Upsert(tctx, pending))
+
+		n, err := repo.CountActiveByTenant(tctx, tenantID)
+		require.NoError(t, err)
+		assert.Equal(t, 1, n,
+			"disabled and pending_validation configs must not appear in idp_count (CD-20 SSO guard correctness)")
+	})
+
+	// RLS scoping: counting tenant A's active configs while the GUC is set
+	// to tenant B must return 0, not tenant A's count.
+	t.Run("CountActiveByTenant_RLSSanity_CrossTenantReturnZero", func(t *testing.T) {
+		t.Parallel()
+		tenantA, tenantB := uuid.New(), uuid.New()
+		ctxA := withTenant(ctx, tenantA)
+		active := newIdpConfig(tenantA, "saml-active")
+		active.Status = domain.IdpConfigStatusActive
+		require.NoError(t, repo.Upsert(ctxA, active))
+
+		n, err := repo.CountActiveByTenant(withTenant(ctx, tenantB), tenantA)
+		require.NoError(t, err)
+		assert.Equal(t, 0, n, "tenant B's GUC must not surface tenant A's IdPs even when tenant A's ID is queried")
+	})
 }
 
 func TestIdpValidationRepository(t *testing.T) {

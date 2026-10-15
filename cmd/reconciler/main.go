@@ -258,7 +258,7 @@ func run() int {
 		BatchLimit:             envInt("RECONCILER_BATCH_LIMIT", 100),
 		TrialGraceDays:         envInt("TRIAL_GRACE_DAYS", 30),
 		CancelledGraceDays:     envInt("CANCELLED_GRACE_DAYS", 30),
-		RetentionDays:          envInt("RETENTION_DAYS", 90),
+		RetentionDays:          envInt("RETENTION_DAYS", 60),
 		OutboxRetentionDays:    envInt("OUTBOX_RETENTION_DAYS", 8),
 		ProcessedEventsTTLDays: envInt("PROCESSED_EVENTS_TTL_DAYS", 8),
 		// ledger-prune retention windows (§15).

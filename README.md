@@ -55,14 +55,14 @@ Every mutating endpoint below marked "required" enforces `RequireIdempotencyKey`
 | RP-1 | `POST /tenants/provision-trial` | required | Create a trial user in the shared `trial` realm, stamp `tenant_id`, trigger `VERIFY_EMAIL`. Emits `TrialTenantProvisioned`. |
 | RP-2 | `POST /tenants/provision-direct` | required | Provision a **dedicated** realm straight away: create realm from template, register OIDC clients, create admin user. Emits `TenantRealmReady` + `DirectPaidSignup` + `TenantConverted{direct_signup:true}`. |
 | RP-3 | `POST /tenants/:id/convert` | required | Trial → dedicated conversion: create dedicated realm, migrate every trial user (`sub`-preserving, TOTP copied, WebAuthn re-enrollment flagged), force-logout the shared realm. Emits `TenantRealmReady` + `TenantConverted{direct_signup:false}`. |
-| RP-4 | `POST /tenants/:id/revert-conversion` | required | Undo Convert within a fixed reversal window: migrate users back, tear down the dedicated realm, and re-mint the tenant's `platform-automation` client back in the shared realm (§2.5 — the dedicated realm's client died with the realm). `409 revert_window_expired` past the window. Emits `TrialReactivated`. |
+| RP-4 | `POST /tenants/:id/revert-conversion` | required | Undo Convert within the 7-day reversal window: migrate users back, tear down the dedicated realm, and re-mint the tenant's `platform-automation` client back in the shared realm (§2.5 — the dedicated realm's client died with the realm). `409 revert_window_expired` past the window. Emits `TrialReactivated`. Named callers: Billing (on fraud/chargeback dispute, CD-10). |
 | RP-5 | `POST /tenants/:id/users` | required | Create an invited user in the tenant's current realm with `required_actions` applied verbatim. No local persistence. |
 | RP-6 | `PUT /tenants/:id/idp` | required | Configure a SAML/OIDC IdP behind the §11.6 region-portability gate. Requires a `dedicated` realm (`409 idp_requires_dedicated_realm` otherwise). |
 | RP-7 | `DELETE /tenants/:id/idp/:alias` | — | Remove an IdP — Keycloak, then the OpenBao secret, then the local row (+ its `TenantIdpConfigChanged` audit entry, same tx). Idempotent. |
 | RP-8 | `PATCH /tenants/:id/realm-config` | — | Apply an allow-listed realm-level setting; on transient Keycloak failure, records a `pending` reconciliation row instead of failing the caller (RP-INV-6, local-intent-first). |
 | RP-9 | `POST /tenants/:id/users/:keycloak_user_id/mfa-reset` | — | Delete every OTP/WebAuthn credential; re-adds `CONFIGURE_TOTP` if the user still holds `requires-mfa`. Fail-closed, no reconciler. |
 | RP-10 | `POST /tenants/:id/reactivate` | required | Re-enable a disabled trial user or a suspended dedicated realm — reverses **both** a billing-lapse and an operator suspension from one endpoint. `409 tenant_offboarded` if terminal. |
-| RP-11 | `GET /tenants/:id/realm` | — | Read-only: current realm name/strategy/shard/status. |
+| RP-11 | `GET /tenants/:id/realm` | — | Read-only: current realm name/strategy/shard/status, and `idp_count` (count of active IdP configurations; CD-20 — Billing reads this as interim SSO-downgrade guard). |
 | RP-12 | `POST /tenants/:id/expire-trial` | required | Idempotent per-tenant trial-expiry effect; called once per row by RP-C1, also directly callable. |
 | RP-15 | `DELETE /tenants/:id/users/:keycloak_user_id` | — | Idempotent Keycloak user delete — deleting an absent user is a success. |
 | RP-16 | `POST /tenants/:id/users/:keycloak_user_id/revoke-sessions` | — | Idempotent, best-effort/fail-open session/token revocation. |
@@ -153,7 +153,7 @@ iam-realm-provisioner/
 │           └── metrics/               # iam_realm_provisioner_* (Tier 3) + platform_* (Tier 1) Prometheus counters/histograms/gauges
 ├── pkg/requestctx/                    # Typed RequestContext{UserID, TenantID, Roles}
 ├── api/
-│   ├── asyncapi.yaml                  # AsyncAPI 3.0 — iam-tenant-events (9 published) + 3 inbound SQS channels
+│   ├── asyncapi.yaml                  # AsyncAPI 3.0 — iam-tenant-events (9 published) + 3 inbound SQS channels + 3 downstream Commercial consumer queue references (CD-26)
 │   └── embed.go                       # //go:embed asyncapi.yaml — served from the compiled binary, no source tree in the image
 ├── deploy/                            # Helm chart, AWS IAM policy, OpenBao policy, Prometheus alerts, Keycloak realm template
 ├── docs/lld/                          # LLD v1.23 (names frozen at v1.0)
@@ -346,7 +346,7 @@ Seven CronJobs, one Helm manifest (`deploy/helm/templates/cronjobs.yaml`), each 
 |---|---|---|
 | `trial-expiry` | `0 2 * * *` | RP-C1: sweep `tenant_realms WHERE strategy='shared' AND status='active' AND trial_ends_at < now()` — **never queries O&M**. Calls RP-12's idempotent effect per tenant. |
 | `trial-hard-delete` | `0 3 * * *` | RP-C2: past `TRIAL_GRACE_DAYS` beyond expiry, hard-delete trial users from Keycloak and scrub the local row. Also atomically deletes `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`, and `pending_audit_entries` via `NewGDPRScrubFn` (`gdpr.go`, BYPASSRLS sysPool tx). |
-| `subscription-lapse` | `0 2 * * *` | RP-C3: `cancelled → suspended → offboarded`, in two phases — suspend polls O&M's I-16 lapse list (skipped with WARN if `ORG_MEMBERSHIP_BASE_URL` unset); offboard always runs, and after deleting the Keycloak realm, calls `NewGDPRScrubFn` to atomically delete the same five PII tables (`keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`, `pending_audit_entries`) — hard-fails and never emits `TenantOffboarded` if `GDPRScrubFn` is nil. |
+| `subscription-lapse` | `0 2 * * *` | RP-C3: `cancelled → suspended → offboarded`, in two phases — suspend polls O&M's I-16 lapse list (skipped with WARN if `ORG_MEMBERSHIP_BASE_URL` unset) and suspends at `cancelled_at + CANCELLED_GRACE_DAYS` (30 days); offboard always runs at `suspended_at + RETENTION_DAYS` (60 days), i.e. 90 days total from `cancelled_at`, and after deleting the Keycloak realm calls `NewGDPRScrubFn` to atomically delete the same five PII tables (`keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`, `pending_audit_entries`) — hard-fails and never emits `TenantOffboarded` if `GDPRScrubFn` is nil. Operator suspensions (`suspension_source='operator'`) are never auto-offboarded (CD-23). |
 | `realm-config-reconcile` | `*/10 * * * *` | RP-C4: retries every `realm_config_reconciliations` row in `status='pending'`; a row past `RECONCILER_MAX_ATTEMPTS` (default 20) moves to a terminal `failed` status instead of retrying forever (poison-pill cap). |
 | `outbox-prune` | `0 4 * * *` | Prunes published `outbox_events` past `OUTBOX_RETENTION_DAYS`. |
 | `processed-events-prune` | `30 4 * * *` | Prunes `processed_events` rows past `PROCESSED_EVENTS_TTL_DAYS`. |
@@ -518,7 +518,7 @@ make docker-up   # Postgres + Floci (4572) + Floci UI (4504) + Keycloak + OpenBa
 | `billing-realm-q` (+ `-dlq`) | SQS queue, filtered `EventType IN [TenantReactivated]` |
 | `tenant-orgm-q` (+ `-dlq`) | SQS queue, **unfiltered** — dev-only fan-out for O&M's LLD §7.4 subscription (all 9 produced events) |
 | `tenant-audit-q` (+ `-dlq`) | SQS queue, **unfiltered** — dev-only fan-out for Audit's LLD §7.4 subscription (all 9 produced events) |
-| `tenant-notif-q` (+ `-dlq`) | SQS queue, dev-only fan-out for Notification's LLD §7.4 subscription, filtered `EventType IN [TenantConverted, DirectPaidSignup, TrialExpired, TenantSuspended, TenantReactivated]` |
+| `tenant-notification-q` (+ `-dlq`) | SQS queue, dev-only fan-out for Notification's LLD §7.4 subscription, filtered `EventType IN [TenantConverted, DirectPaidSignup, TrialExpired, TenantSuspended, TenantReactivated]` |
 | `tenant-authz-q` (+ `-dlq`) | SQS queue, dev-only fan-out for AuthZ Enrichment's LLD §7.4 subscription, filtered `EventType IN [TenantConverted]` |
 | `iam-realm-exports` | S3 bucket (`REALM_EXPORT_BUCKET`, RP-EVT-4 offboarding target) |
 | `iam-tenant-events` | Glue registry, 9 schemas — one per produced event, real `GlueCodec` wire format locally (no `NoopCodec` fallback needed) |
@@ -560,7 +560,7 @@ curl -s -X POST http://localhost:8080/api/v1/internal/tenants/provision-trial \
   -d "{\"tenant_id\":\"$TENANT_ID\",\"tenant_name\":\"Acme\",\"tenant_slug\":\"acme\",\"admin_email\":\"owner@acme.test\",\"admin_name\":\"Owner\",\"plan\":\"trial\"}" | jq .
 ```
 
-A `201` means the row and the `TrialTenantProvisioned` outbox event committed atomically. Per LLD §7.4, `TrialTenantProvisioned` fans out to `tenant-orgm-q` and `tenant-audit-q` (both unfiltered) — expect the message in either within ~500 ms (Step 5). It never reaches `tenant-notif-q`/`tenant-authz-q` (filtered to a different event subset) or any of the three *inbound* queues (`membership-realm-q`/`tenant-realm-q`/`billing-realm-q` filter for entirely different event types this service consumes, not produces).
+A `201` means the row and the `TrialTenantProvisioned` outbox event committed atomically. Per LLD §7.4, `TrialTenantProvisioned` fans out to `tenant-orgm-q` and `tenant-audit-q` (both unfiltered) — expect the message in either within ~500 ms (Step 5). It never reaches `tenant-notification-q`/`tenant-authz-q` (filtered to a different event subset) or any of the three *inbound* queues (`membership-realm-q`/`tenant-realm-q`/`billing-realm-q` filter for entirely different event types this service consumes, not produces).
 
 ### Step 5 — Read messages from SQS
 
@@ -570,7 +570,7 @@ docker compose exec floci aws --region ap-south-1 sqs receive-message \
   --max-number-of-messages 10 | jq '.Messages[].Body | fromjson'
 ```
 
-Swap in `tenant-audit-q` for the same result (both are unfiltered), or `tenant-notif-q`/`tenant-authz-q` to see only the subset of events each actually subscribes to (§7.4) — e.g. converting a trial tenant (RP-3) produces `TenantConverted`, which lands in all four.
+Swap in `tenant-audit-q` for the same result (both are unfiltered), or `tenant-notification-q`/`tenant-authz-q` to see only the subset of events each actually subscribes to (§7.4) — e.g. converting a trial tenant (RP-3) produces `TenantConverted`, which lands in all four.
 
 `receive-message` only hides messages for the visibility timeout — use `delete-message` with the `ReceiptHandle` to remove them permanently.
 
@@ -651,7 +651,7 @@ Coverage is measured over `./cmd/...`, `./internal/...`, `./pkg/...` (`COVER_PKG
 | `ORG_MEMBERSHIP_TIMEOUT_MS` | `5s` | `5s` | O&M HTTP client per-request timeout — Go `time.ParseDuration` string (e.g. `5s`, `30s`); a bare integer parses as an error and silently falls back to the default (`_MS` suffix in the name is legacy) |
 | `TOKEN_SERVICE_BASE_URL` | `http://localhost:8083` | — | **Required outside dev.** Token Service client — TS-1/TS-4 mint/rotate handshake (§2.5), required for every RP-1/RP-2/RP-3/RP-4 call and RP-17; no optional-degrade path (unlike `ORG_MEMBERSHIP_BASE_URL`'s reconciler-only usage) |
 | `REALM_EXPORT_BUCKET` / `REALM_EXPORT_KMS_KEY` | `iam-realm-exports` / — | `iam-realm-exports` / — | Offboarding export target |
-| `TRIAL_GRACE_DAYS` / `CANCELLED_GRACE_DAYS` / `RETENTION_DAYS` | `30` / `30` / `90` | same | Lifecycle timers |
+| `TRIAL_GRACE_DAYS` / `CANCELLED_GRACE_DAYS` / `RETENTION_DAYS` | `30` / `30` / `60` | same | Lifecycle timers — `RETENTION_DAYS` is the suspension-to-offboard window (billing-lapse only); suspend at `cancelled_at + 30 days`; offboard at `suspended_at + 60 days` (90 days total from `cancelled_at`) |
 | `RECONCILER_BATCH_LIMIT` / `RECONCILER_TIMEOUT` / `RECONCILER_MAX_ATTEMPTS` | `100` / `5m` / `20` | same | Reconciler-job tunables — `RECONCILER_MAX_ATTEMPTS` is RP-C4's poison-pill cap |
 | `DOCS_ENABLED` / `DOCS_AUTH_TOKEN` | `true` / — | `true` / — | AsyncAPI viewer gating — always mounted outside production; opt-in via `DOCS_ENABLED` in prod, optionally bearer-gated |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `none` | (unset → `localhost:4317`) | OTLP/gRPC collector for platform-gincommon's `InitTracingWithConfig`. The provider is always installed; **unset is not off** — it falls back to `localhost:4317` and logs failed exports, so local runs without a collector use `none` |
@@ -887,14 +887,17 @@ This service sits on **no synchronous request-path dependency for any other serv
 |---|---|---|---|
 | RP-1 / RP-2 provision | Keycloak Admin API | fail-closed | `502 keycloak_unavailable`; no local commit; retry with the same `Idempotency-Key` |
 | RP-3 / RP-4 convert / revert | Keycloak Admin API | fail-closed | Compensating `DeleteRealmIfExists`; no local dedicated row |
-| RP-1 / RP-2 / RP-3 / RP-4 platform-automation mint | Token Service (TS-4 register, TS-1 issue, §2.5) | fail-closed | `502 token_service_unavailable`/`409` (rotation-in-flight or optimistic-lock); a freshly-minted Keycloak client is best-effort deleted, never a resumed one; no local commit |
+| RP-1 / RP-2 / RP-3 / RP-4 platform-automation mint | Token Service (TS-4 register, TS-1 issue, §2.5) | fail-closed | `502 token_service_unavailable` / `409 rotation_in_flight` / `409 optimistic_lock_conflict` / `409 credential_replay_expired` (TS-D22); a freshly-minted Keycloak client is best-effort deleted on failure, never a resumed one; no local commit |
+| RP-3 Convert — old-credential revoke | Token Service (TS-3 read + TS-2 POST `.../credentials/:version/revoke`) | best-effort, post-commit | Logged and non-fatal; the old shared-realm credential remains active until TS's own rotation sweep; `503 token_service_unavailable` or missing rotating version → skipped with WARN |
+| RP-11 GetRealm — IdP count query | `keycloak_idp_configs` (same Postgres pool) | fail-closed (503, never silent 0) | `503 db_unavailable` or `503 request_timeout` — never silently returns 0 (which would permit an SSO-losing plan downgrade) |
 | Invite (O&M → RP-5) | Keycloak Admin API | fail-closed | `502` → O&M `503`; no invitation |
 | MFA reset (O&M → RP-9) | Keycloak Admin API | fail-closed | `502` → O&M `503`; no `MFAReset` — no reconciler |
 | Realm-config (O&M → RP-8) | Keycloak Admin API | fail-open + durable reconcile | `pending` row, RP-C4 converges (RP-INV-6) |
 | RP-6 / RP-7 IdP | OpenBao KV + Keycloak | fail-closed | No partial `keycloak_idp_configs` row |
+| RP-6 / RP-7 IdP audit entry | Audit Log AL-5 direct-write (`POST /api/v1/internal/audit-entries`) | async, retried from `pending_audit_entries` | Rows accumulate if `AUDIT_LOG_BASE_URL` unset (WARN, drainer off); 429/5xx → backoff retry; other 4xx (`metadata_too_large` is guarded at 8192 bytes before send) → `failed` (permanent park) |
 | Offboarding export | S3 | fail-closed | Tenant stays `suspended`; `realm_export_total{result="fail"}` is critical |
 | Outbox publish | SNS | retried, then DLQ | Local commit already happened — delay, not loss |
-| RP-C3 suspend phase | O&M's I-16 (`SubscriptionLapseReader`) | fail-open, degrade to WARN | Skips the suspend phase only if `ORG_MEMBERSHIP_BASE_URL` is unset; offboard phase still runs |
+| RP-C3 suspend phase | O&M's I-16 (`SubscriptionLapseReader`) | fail-open, degrade to WARN | Skips the suspend phase only if `ORG_MEMBERSHIP_BASE_URL` is unset; offboard phase still runs unconditionally |
 
 Two fail-closed calls that sibling services feel (invite, MFA-reset) stop completing during a Keycloak outage; neither corrupts this service's local state.
 

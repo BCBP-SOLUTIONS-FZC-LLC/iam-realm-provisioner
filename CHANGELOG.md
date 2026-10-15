@@ -4,6 +4,17 @@ All notable changes to this service are documented here. Format follows [Keep a 
 
 This service has never been deployed to any environment — there is no released version yet, so everything lives under `[Unreleased]`. Because of that, this file tracks only what is currently true and what is still outstanding, not a phase-by-phase build history; the full development diary is available via `git log` if it's ever needed.
 
+## [Unreleased — 2026-10-15]
+
+### Changed
+
+- **Dependency audit and bump:** `aws-sdk-go-v2/service/glue` bumped v1.169.1 → **v1.171.0** (patch-level; no API surface change). All other 26 direct dependencies are already at their latest minor/patch versions. `govulncheck ./...` reports **0 reachable vulnerabilities** — one module-level finding (`GO-2026-5932`, `golang.org/x/crypto/openpgp`, unmaintained with no fix available) is unreachable from production code.
+- **Swagger docs regenerated** — `docs/swagger/{docs.go,swagger.json,swagger.yaml}` re-derived from handler annotations. Changes: `idp_count` field added to `GetRealmResult` (CD-20 interim SSO guard), `403 insufficient_role` added to `POST /tenants/:id/convert`, `503 db_unavailable|request_timeout` replaces generic `500` on `GET /tenants/:id/realm`, descriptions updated for RP-3/RP-4/RP-11 with named callers and CD references. AsyncAPI confirmed aligned with `internal/eventschema` (`TestAsyncAPIVsSchemaDrift` green — 9 produced events + 5 consumed messages, no drift).
+- **README Cross-service dependencies table** expanded to reflect current code state: TS-2 `RevokeCredential` row added (RP-3 post-commit, best-effort via TS-3 read + versioned POST), RP-11 IdP-count-query row (fail-closed, never silent 0, `503` not `500` on error), AL-5 direct-write row (async `pending_audit_entries` drainer, 8 192-byte metadata cap guarded before send), typed TS-1 409 codes now list `credential_replay_expired` (TS-D22) alongside `rotation_in_flight`, `optimistic_lock_conflict`, and `credential_replay_revoked`.
+- **LLD §3.1 library version block corrected** — `platform-events/v2` v2.0.0 → v2.1.0, `platform-pgcommon/v2` v2.0.0 → v2.0.1, `aws-sdk-go-v2/service/glue` added. LLD version bumped 1.28 → **1.29**.
+
+---
+
 ## [Unreleased]
 
 ### Fixed

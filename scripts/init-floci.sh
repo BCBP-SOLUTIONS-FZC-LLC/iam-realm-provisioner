@@ -23,7 +23,7 @@
 #                    developer can hand-publish test events to any of them).
 #   4 fan-out SQS  — LLD §7.4's downstream-consumer mapping for this
 #                    service's own 9 produced events: tenant-orgm-q,
-#                    tenant-audit-q (unfiltered — every event), tenant-notif-q
+#                    tenant-audit-q (unfiltered — every event), tenant-notification-q
 #                    (TenantConverted/DirectPaidSignup/TrialExpired/
 #                    TenantSuspended/TenantReactivated), tenant-authz-q
 #                    (TenantConverted only). In production each of these
@@ -144,8 +144,8 @@ TENANT_AUDIT_Q=$(create_queue_with_dlq tenant-audit-q)
 subscribe_queue "$TENANT_TOPIC_ARN" "$TENANT_AUDIT_Q"
 
 # Notification — events that generate a user/admin email.
-TENANT_NOTIF_Q=$(create_queue_with_dlq tenant-notif-q)
-subscribe_queue "$TENANT_TOPIC_ARN" "$TENANT_NOTIF_Q" \
+TENANT_NOTIFICATION_Q=$(create_queue_with_dlq tenant-notification-q)
+subscribe_queue "$TENANT_TOPIC_ARN" "$TENANT_NOTIFICATION_Q" \
   '{"EventType": ["TenantConverted","DirectPaidSignup","TrialExpired","TenantSuspended","TenantReactivated"]}'
 
 # AuthZ Enrichment — TenantConverted only (realm→tenant cache invalidation).
@@ -192,7 +192,7 @@ echo "  SQS_TENANT_REALM_QUEUE_URL=$TENANT_REALM_Q"
 echo "  SQS_BILLING_REALM_QUEUE_URL=$BILLING_REALM_Q"
 echo "  SQS_TENANT_ORGM_QUEUE_URL=$TENANT_ORGM_Q (dev-only fan-out: all 9 produced events)"
 echo "  SQS_TENANT_AUDIT_QUEUE_URL=$TENANT_AUDIT_Q (dev-only fan-out: all 9 produced events)"
-echo "  SQS_TENANT_NOTIF_QUEUE_URL=$TENANT_NOTIF_Q (dev-only fan-out: TenantConverted/DirectPaidSignup/TrialExpired/TenantSuspended/TenantReactivated)"
+echo "  SQS_TENANT_NOTIFICATION_QUEUE_URL=$TENANT_NOTIFICATION_Q (dev-only fan-out: TenantConverted/DirectPaidSignup/TrialExpired/TenantSuspended/TenantReactivated)"
 echo "  SQS_TENANT_AUTHZ_QUEUE_URL=$TENANT_AUTHZ_Q (dev-only fan-out: TenantConverted only)"
 echo "  SQS_TENANT_LIFECYCLE_UP_QUEUE_URL=$TENANT_LIFECYCLE_UP_Q (dev-only fan-out: TenantOffboarded — iam-user-profile ScrubTenant)"
 echo "  REALM_EXPORT_BUCKET=$BUCKET"

@@ -16,7 +16,18 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/pkg/requestctx"
 )
+
+// callerActor returns the caller's UUID string for use in event and audit
+// records. iam-system (uuid.Nil) maps to SystemActorID; any other non-nil
+// UUID (e.g. commercial-system → CommercialActorID) is returned as-is.
+func callerActor(ctx context.Context) string {
+	if rc, ok := requestctx.FromContext(ctx); ok && rc.UserID != uuid.Nil {
+		return rc.UserID.String()
+	}
+	return domain.SystemActorID
+}
 
 // nowPtr returns a pointer to the current UTC time — a small helper since
 // domain.TenantRealm's timestamp fields are *time.Time.
@@ -831,6 +842,7 @@ func (s *ProvisioningService) convertClaimed(ctx context.Context, idempotencyKey
 		return pub.Enqueue(ctx, &domain.Event{
 			Type: domain.EventTenantConverted, TenantID: tenantID,
 			Subject: "tenants/" + tenantID.String(),
+			Actor:   callerActor(ctx),
 			Data: domain.TenantConvertedPayload{
 				TenantID: tenantID, Realm: realmName, Plan: req.Plan,
 				BillingSubscriptionID: billingSubID, UsersMigrated: len(sourceUsers), DirectSignup: false,
@@ -1066,7 +1078,8 @@ func (s *ProvisioningService) RevertConversion(ctx context.Context, idempotencyK
 		}
 		return pub.Enqueue(ctx, &domain.Event{
 			Type: domain.EventTrialReactivated, TenantID: tenantID,
-			Data: domain.TrialReactivatedPayload{TenantID: tenantID, NewTrialEndsAt: newTrialEndsAt.Format(time.RFC3339)},
+			Actor: callerActor(ctx),
+			Data:  domain.TrialReactivatedPayload{TenantID: tenantID, NewTrialEndsAt: newTrialEndsAt.Format(time.RFC3339)},
 		})
 	})
 	if err != nil {

@@ -269,11 +269,11 @@ type idpConfigKey struct {
 
 type fakeIdpConfigRepository struct {
 	rows map[idpConfigKey]*domain.IdpConfig
-	// ListAllFn, when set, overrides ListAll's default in-memory scan — used
-	// to prove a route never reaches the service layer (an unset Fn left in
-	// place would panic if actually invoked) and to inject a generic
-	// repository failure.
+	// ListAllFn, when set, overrides ListAll's default in-memory scan.
 	ListAllFn func(ctx context.Context) ([]*domain.IdpConfig, error)
+	// CountActiveByTenantFn, when set, overrides CountActiveByTenant —
+	// use this to inject a repository error into RP-11 tests.
+	CountActiveByTenantFn func(ctx context.Context, tenantID uuid.UUID) (int, error)
 }
 
 var _ port.IdpConfigRepository = (*fakeIdpConfigRepository)(nil)
@@ -312,6 +312,18 @@ func (m *fakeIdpConfigRepository) ListAll(ctx context.Context) ([]*domain.IdpCon
 		out = append(out, r)
 	}
 	return out, nil
+}
+func (m *fakeIdpConfigRepository) CountActiveByTenant(ctx context.Context, tenantID uuid.UUID) (int, error) {
+	if m.CountActiveByTenantFn != nil {
+		return m.CountActiveByTenantFn(ctx, tenantID)
+	}
+	n := 0
+	for k, r := range m.rows {
+		if k.tenantID == tenantID && r.Status == domain.IdpConfigStatusActive {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // ── fakeIdpValidationRepository — append-only, in-memory. ───────────────────

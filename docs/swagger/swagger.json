@@ -197,7 +197,7 @@
                         "IdempotencyKey": []
                     }
                 ],
-                "description": "Migrates users from the shared trial realm to a new dedicated realm, preserving Keycloak sub UUIDs. TOTP credentials are copied; WebAuthn requires re-enrolment. Idempotent on Idempotency-Key reuse.",
+                "description": "Migrates users from the shared trial realm to a new dedicated realm, preserving Keycloak sub UUIDs. TOTP credentials are copied; WebAuthn requires re-enrolment. Idempotent on Idempotency-Key reuse. Named callers: Billing (commercial-system principal, CD-19 allow-list — drives the conversion saga after Stripe confirms payment), Signup BFF (iam-system). Audit actor: the caller's principal is logged (commercial-system or iam-system).",
                 "consumes": [
                     "application/json"
                 ],
@@ -236,6 +236,12 @@
                     },
                     "400": {
                         "description": "invalid_request OR missing_idempotency_key",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "insufficient_role (caller not in CD-19 allow-list)",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -566,14 +572,14 @@
                         "TenantID": []
                     }
                 ],
-                "description": "Returns the current realm record for the tenant: realm name, strategy (shared/dedicated), lifecycle status, Keycloak shard, and key timestamps. Read-only; no side effects.",
+                "description": "Returns the tenant's current realm record: realm name, strategy (shared/dedicated), lifecycle status, Keycloak shard, record_version, and idp_count. idp_count is the number of active (status=active) SAML/OIDC IdP configurations — excludes disabled and pending_validation. idp_count is always 0 for shared-strategy (trial) tenants (RP-6 blocks IdP configuration there). On IdP repository failure the endpoint returns 503 db_unavailable or 503 request_timeout — never a silent 0 that could permit an SSO-losing plan downgrade (CD-20). Named callers: Core (iam-org-membership, iam-system principal, I-18 plan-change-check — reads idp_count to block an SSO-losing plan downgrade, CD-20), Billing (commercial-system principal, CD-19 allow-list — interim SSO guard), Signup BFF, Org \u0026 Membership (both iam-system). CD-19 NetworkPolicy and mesh AuthorizationPolicy (billing namespace → this route) are implemented in deploy/helm/templates/. Read-only; no side effects.",
                 "produces": [
                     "application/json"
                 ],
                 "tags": [
                     "Lifecycle"
                 ],
-                "summary": "RP-11 — Get realm info",
+                "summary": "RP-11 — Get realm info including active IdP count",
                 "parameters": [
                     {
                         "type": "string",
@@ -603,8 +609,8 @@
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
                     },
-                    "500": {
-                        "description": "Internal Server Error",
+                    "503": {
+                        "description": "db_unavailable or request_timeout (IdP count query failed — never returns silent zero)",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
@@ -699,7 +705,7 @@
                         "IdempotencyKey": []
                     }
                 ],
-                "description": "Rolls back a conversion within the allowed revert window (7 days trial grace, 14 days post-conversion). Migrates users back to the shared trial realm and deletes the dedicated realm. Body is optional; reason is informational only.",
+                "description": "Rolls back a conversion within the 7-day revert window. Migrates users back to the shared trial realm and deletes the dedicated realm. Named callers: Billing (commercial-system principal, CD-19 allow-list — on fraud/chargeback dispute; which Stripe signal triggers the call is a Billing-side decision, CD-10). 7-day window is enforced for ALL callers including commercial-system (409 revert_window_expired). Audit actor: the caller's principal is logged. Body is optional; reason is informational only.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1485,6 +1491,10 @@
         "service.GetRealmResult": {
             "type": "object",
             "properties": {
+                "idp_count": {
+                    "description": "IdpCount is the number of active SAML/OIDC IdP configurations for the\ntenant (status='active' only; disabled and pending_validation excluded).\nAlways 0 for shared-strategy (trial) tenants — RP-6 blocks IdP\nconfiguration on the shared realm (409 idp_requires_dedicated_realm).",
+                    "type": "integer"
+                },
                 "keycloak_shard": {
                     "type": "string"
                 },

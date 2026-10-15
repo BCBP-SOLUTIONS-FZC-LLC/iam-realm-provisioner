@@ -1,0 +1,48 @@
+# Production environment overrides for iam-realm-provisioner.
+# Usage: helm upgrade ... -f deploy/helm/values.yaml -f deploy/helm/values-prod.yaml
+#
+# Only keys that differ from values.yaml appear here.
+# APP_ENV defaults to "prod" in values.yaml — no override needed.
+
+# CD-19: Billing commercial caller access + Istio ALLOW policy.
+commercialCallers:
+  enabled: true
+  istio:
+    # Render the Istio AuthorizationPolicy. Set false if Istio CRDs are absent.
+    enabled: true
+    # Namespaces that already have L4 NetworkPolicy ingress access to the API
+    # port (excluding billing, which gets its own path-restricted rule).
+    # An Istio ALLOW policy denies every request that matches no rule, so every
+    # namespace listed here gets a blanket ALLOW on all paths — same scope the
+    # NetworkPolicy already grants at L4.
+    #
+    #   iam                  — Core / iam-org-membership (same-namespace rule)
+    #   envoy-gateway-system — Envoy Gateway proxy (ingressControllerNamespaceSelector)
+    #   gateway              — Signup BFF pod-to-pod via Istio mesh (see NetworkPolicy
+    #                          additionalIngressRules below; IAM HLD §10.8)
+    #   monitoring           — Prometheus scraping port 9090; Istio sidecar intercepts
+    #                          all inbound ports so /metrics traffic would be denied
+    #                          without this entry even though the NetworkPolicy admits
+    #                          monitoring only on port 9090
+    existingCallerNamespaces:
+      - iam
+      - envoy-gateway-system
+      - gateway
+      - monitoring
+
+# CD-19: admit the Signup BFF (gateway namespace) at L4 for direct pod-to-pod
+# Istio-mesh calls. The ingressControllerNamespaceSelector rule covers the Envoy
+# proxy (envoy-gateway-system) for externally-routed traffic; Signup BFF calls
+# to RP-2 and the trial-signup endpoint travel pod-to-pod over the mesh, so the
+# NetworkPolicy source is "gateway", not "envoy-gateway-system".
+# monitoring is admitted on port 9090 via networkPolicy.metricsIngress — no
+# additional rule needed here.
+networkPolicy:
+  additionalIngressRules:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gateway
+      ports:
+        - port: 8080
+          protocol: TCP
