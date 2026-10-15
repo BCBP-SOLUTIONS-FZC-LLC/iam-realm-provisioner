@@ -335,11 +335,11 @@ func (r *mockTxRunner) RunInTx(ctx context.Context, fn func(ctx context.Context)
 // mockKeycloakAdmin: unset fields panic if called. ───────────────────────
 
 type mockIdpConfigRepository struct {
-	FindByAliasFn        func(ctx context.Context, tenantID uuid.UUID, alias string) (*domain.IdpConfig, error)
-	ListByTenantFn       func(ctx context.Context, tenantID uuid.UUID) ([]*domain.IdpConfig, error)
-	UpsertFn             func(ctx context.Context, cfg *domain.IdpConfig) error
-	DeleteFn             func(ctx context.Context, tenantID uuid.UUID, alias string) error
-	ListAllFn            func(ctx context.Context) ([]*domain.IdpConfig, error)
+	FindByAliasFn         func(ctx context.Context, tenantID uuid.UUID, alias string) (*domain.IdpConfig, error)
+	ListByTenantFn        func(ctx context.Context, tenantID uuid.UUID) ([]*domain.IdpConfig, error)
+	UpsertFn              func(ctx context.Context, cfg *domain.IdpConfig) error
+	DeleteFn              func(ctx context.Context, tenantID uuid.UUID, alias string) error
+	ListAllFn             func(ctx context.Context) ([]*domain.IdpConfig, error)
 	CountActiveByTenantFn func(ctx context.Context, tenantID uuid.UUID) (int, error)
 }
 
