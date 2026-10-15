@@ -14,6 +14,15 @@ const Source = "iam-realm-provisioner"
 // TrialExpired, TenantSuspended (lapse sweep), TenantOffboarded.
 const SystemActorID = "00000000-0000-0000-0000-0000000000a1"
 
+// CommercialActorID is the reserved sentinel for the commercial-system
+// principal (CD-19) — the identity Billing presents when calling RP-3/RP-4
+// (conversion saga) and RP-11 (realm info / SSO-downgrade guard). This value
+// is canonical across all IAM services (iam-org-membership, iam-realm-provisioner,
+// iam-catalog-admin) — every service MUST use exactly this UUID so audit-log
+// entries from any side share a consistent actor ID. Verified against Core's
+// CommercialSystemUUID (pkg/requestctx/principals.go).
+const CommercialActorID = "00000000-0000-0000-0000-0000000000c1"
+
 // The 9 frozen published event type names (§25, §7.5) — the values of the
 // envelope `type` field, and the Glue schema names registered in the shared
 // `iam-tenant-events` registry.

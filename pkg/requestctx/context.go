@@ -50,3 +50,12 @@ func (rc *RequestContext) IsOperator() bool {
 func (rc *RequestContext) IsSystem() bool {
 	return rc.HasRole("iam-system")
 }
+
+// IsCommercial reports whether the caller is the reserved commercial-system
+// principal (CD-19: x-user-id=…00a2) — the identity Billing presents on
+// RP-3 (convert), RP-4 (revert-conversion) and RP-11 (realm / idp_count).
+// Admitted only on those three routes via RequireSystemOrCommercial; every
+// other /internal/* route remains gated by RequireSystemRole (iam-system only).
+func (rc *RequestContext) IsCommercial() bool {
+	return rc.HasRole("commercial-system")
+}

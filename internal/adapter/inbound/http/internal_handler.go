@@ -171,7 +171,7 @@ type convertRequest struct {
 // Convert handles RP-3 (POST /tenants/:id/convert).
 //
 // @Summary      RP-3 — Convert trial tenant to dedicated realm
-// @Description  Migrates users from the shared trial realm to a new dedicated realm, preserving Keycloak sub UUIDs. TOTP credentials are copied; WebAuthn requires re-enrolment. Idempotent on Idempotency-Key reuse.
+// @Description  Migrates users from the shared trial realm to a new dedicated realm, preserving Keycloak sub UUIDs. TOTP credentials are copied; WebAuthn requires re-enrolment. Idempotent on Idempotency-Key reuse. Named callers: Billing (commercial-system principal, CD-19 allow-list — drives the conversion saga after Stripe confirms payment), Signup BFF (iam-system). Audit actor: the caller's principal is logged (commercial-system or iam-system).
 // @Tags         Provisioning
 // @Accept       json
 // @Produce      json
@@ -179,6 +179,7 @@ type convertRequest struct {
 // @Param        request  body      convertRequest  true  "Conversion payload"
 // @Success      200      {object}  service.ConvertResult
 // @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
+// @Failure      403      {object}  ErrorResponse  "insufficient_role (caller not in CD-19 allow-list)"
 // @Failure      404      {object}  ErrorResponse  "tenant_realm_not_found"
 // @Failure      409      {object}  ErrorResponse  "operation_in_progress OR realm_already_dedicated OR tenant_offboarded OR optimistic_lock_conflict OR credential_replay_expired"
 // @Failure      502      {object}  ErrorResponse  "conversion_failed"
@@ -222,7 +223,7 @@ type revertConversionRequest struct {
 // RevertConversion handles RP-4 (POST /tenants/:id/revert-conversion).
 //
 // @Summary      RP-4 — Revert trial-to-dedicated conversion
-// @Description  Rolls back a conversion within the allowed revert window (7 days trial grace, 14 days post-conversion). Migrates users back to the shared trial realm and deletes the dedicated realm. Body is optional; reason is informational only.
+// @Description  Rolls back a conversion within the 7-day revert window. Migrates users back to the shared trial realm and deletes the dedicated realm. Named callers: Billing (commercial-system principal, CD-19 allow-list — on fraud/chargeback dispute; which Stripe signal triggers the call is a Billing-side decision, CD-10). 7-day window is enforced for ALL callers including commercial-system (409 revert_window_expired). Audit actor: the caller's principal is logged. Body is optional; reason is informational only.
 // @Tags         Provisioning
 // @Accept       json
 // @Produce      json

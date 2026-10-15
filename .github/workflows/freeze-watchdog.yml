@@ -64,6 +64,9 @@ permissions:
   actions: read   # required to query environment variables via GitHub API
   contents: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   check-freeze:
     name: Schema Freeze Watchdog

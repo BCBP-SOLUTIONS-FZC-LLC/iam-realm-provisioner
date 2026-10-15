@@ -39,6 +39,11 @@ type IdpConfigRepository interface {
 	// operator-only whole-estate portability audit). Callers must use a
 	// BYPASSRLS pool since this is deliberately cross-tenant.
 	ListAll(ctx context.Context) ([]*domain.IdpConfig, error)
+	// CountActiveByTenant returns the number of IdP configurations for
+	// tenantID whose status is domain.IdpConfigStatusActive. Used by RP-11
+	// to populate idp_count for Core's plan-change-check SSO-downgrade guard
+	// (CD-20). Excludes disabled and pending_validation configs.
+	CountActiveByTenant(ctx context.Context, tenantID uuid.UUID) (int, error)
 }
 
 // IdpValidationRepository persists `keycloak_idp_config_validations` (§4.3)

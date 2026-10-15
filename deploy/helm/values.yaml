@@ -203,7 +203,7 @@ env:
   # ConfigMap in a future iteration).
   TRIAL_GRACE_DAYS: "30"
   CANCELLED_GRACE_DAYS: "30"
-  RETENTION_DAYS: "90"
+  RETENTION_DAYS: "60"
   RECONCILER_BATCH_LIMIT: "100"
   RECONCILER_TIMEOUT: "5m"
   RECONCILER_MAX_ATTEMPTS: "20"      # RP-C4 poison-pill cap (§8.10)
@@ -351,6 +351,50 @@ readinessProbe:
   # response could ever return, flapping the pod out of the Service under
   # exactly the latency this probe exists to detect cleanly.
   timeoutSeconds: 10
+
+# Commercial callers (CD-19) — Billing's access to RP-3/RP-4/RP-11.
+# When enabled this block renders:
+#   - An extra NetworkPolicy ingress rule from the billing namespace
+#     (ServiceAccount: commercial-billing) on the HTTP API port.
+# When enabled AND istio.enabled, it additionally renders:
+#   - An Istio AuthorizationPolicy restricting Billing to exactly the three
+#     Commercial-allowed paths (RP-3/RP-4/RP-11) while admitting all existing
+#     callers (namespaces listed in istio.existingCallerNamespaces) on every path.
+#   authorizationpolicy.yaml is NOT rendered when istio.enabled is false so that
+#   clusters without Istio CRDs do not fail on an unknown resource kind.
+# The "commercial" namespace (Entitlements, Usage & Metering) does NOT call RP
+# directly and therefore is NOT admitted here.
+# Set enabled: true in environment-specific values for staging and prod once
+# the Billing service is deployed and the commercial-billing ServiceAccount exists.
+# Set istio.enabled: true only in clusters where Istio is installed.
+commercialCallers:
+  enabled: false
+  # Kubernetes namespace for the Billing service.
+  billingNamespace: billing
+  # Kubernetes ServiceAccount name used by the Billing service pod.
+  billingServiceAccount: commercial-billing
+
+  # Istio mesh-policy settings (CD-19 alignment rule 2/3).
+  istio:
+    # enabled: render an Istio AuthorizationPolicy. Set true ONLY in clusters
+    # where Istio CRDs are present; false (the default) prevents the
+    # AuthorizationPolicy from being applied on non-Istio clusters, which
+    # would fail helm install/upgrade with "no matches for kind AuthorizationPolicy".
+    enabled: false
+    # trustDomain is prepended to principal strings in the ALLOW rules:
+    #   "{{ trustDomain }}/ns/<namespace>/sa/<serviceaccount>"
+    # Default is cluster.local — override if your cluster uses a custom domain.
+    trustDomain: cluster.local
+    # existingCallerNamespaces lists every namespace that already has L4 access
+    # to the API port via the NetworkPolicy ingress rules (excluding billing,
+    # which gets a path-restricted rule below). An Istio ALLOW policy denies
+    # every request that matches no rule, so without this list the existing
+    # callers (Core/O&M in iam, Signup BFF via envoy-gateway-system) would
+    # lose access the moment the AuthorizationPolicy is rendered.
+    # Typical values (set per environment):
+    #   - iam               (Core / iam-org-membership, same-namespace rule)
+    #   - envoy-gateway-system (Signup BFF / gateway, ingressControllerNamespaceSelector)
+    existingCallerNamespaces: []
 
 # NetworkPolicy — enabled by default (§13). Public API traffic (RP-1..RP-16)
 # reaches the "http" port via the gateway/mesh. :9090/metrics is restricted

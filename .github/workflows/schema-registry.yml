@@ -112,7 +112,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 2    # HEAD~1 needed for Pass 3 enum semantic drift check
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
@@ -377,7 +377,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.event.release.tag_name || github.ref }}
           fetch-depth: 2
@@ -617,7 +617,7 @@ jobs:
     environment: staging
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 2
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}

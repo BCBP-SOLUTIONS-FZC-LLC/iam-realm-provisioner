@@ -19,6 +19,22 @@ info:
       tenant-realm-q       ← iam.tenant.events (O&M)       — trial timer record
       billing-realm-q      ← billing.events (Billing)      — reactivation
 
+    Downstream consumers of iam.tenant.events (Commercial domain, CD-26):
+    These queues are subscribed to the shared iam-tenant-events SNS topic by
+    Commercial domain services — they are NOT consumed by this service. Listed
+    here for cross-team visibility (CD-24, CD-6, CD-26):
+      tenant-billing-q     → Billing      — filter: TenantSuspended, TenantReactivated
+                             Billing monitors operator suspensions (CD-24) and
+                             operator un-suspends to decide subscription handling.
+      tenant-entitlements-q → Entitlements — filter: TenantConverted, TenantSuspended,
+                             TenantReactivated, TenantOffboarded, TrialExpired (CD-6)
+                             Entitlements recomputes effective entitlement state on
+                             every tenant-lifecycle change.
+      tenant-usage-q       → Usage & Metering — filter: TenantConverted,
+                             TenantSuspended, TenantOffboarded
+                             Usage & Metering starts a fresh period, stops rendering
+                             limits, and purges raw usage on the respective events.
+
     Wire format: each SNS message body is prefixed with an 18-byte AWS Glue
     Schema Registry header before the EventEnvelope JSON:
       byte 0     : header version (0x03)
@@ -93,6 +109,49 @@ servers:
       Queue: billing-realm-q  |  DLQ: billing-realm-q-dlq  (maxReceiveCount=5)
       SNS subscription filter: EventType IN [TenantReactivated]
       Source topic: billing.events (Billing Service).
+
+  # ── Downstream Commercial consumers of iam.tenant.events (CD-26) ─────────
+  # These queues are owned by Commercial domain services and subscribe to the
+  # shared iam-tenant-events SNS topic produced by this service. They are
+  # documented here for cross-team visibility; this service does NOT consume them.
+
+  sqsTenantBilling:
+    host: "sqs.ap-south-1.amazonaws.com"
+    protocol: sqs
+    description: |
+      Queue: tenant-billing-q  |  DLQ: tenant-billing-q-dlq  (maxReceiveCount=5)
+      SNS subscription filter: EventType IN [TenantSuspended, TenantReactivated]
+      Source topic: iam.tenant.events (this service).
+      Owner: Billing Service (commercial namespace).
+      Purpose (CD-24): Billing monitors operator suspensions (RP-14, source=operator)
+      and operator un-suspends (RP-10, source=operator) to decide subscription state
+      handling — previously these were invisible to Billing (CD-24).
+
+  sqsTenantEntitlements:
+    host: "sqs.ap-south-1.amazonaws.com"
+    protocol: sqs
+    description: |
+      Queue: tenant-entitlements-q  |  DLQ: tenant-entitlements-q-dlq  (maxReceiveCount=5)
+      SNS subscription filter: EventType IN [TenantConverted, TenantSuspended,
+        TenantReactivated, TenantOffboarded, TrialExpired]
+      Source topic: iam.tenant.events (this service).
+      Owner: Entitlements Service (commercial namespace).
+      Purpose: Entitlements invalidates its cached effective entitlement set on every
+      tenant-lifecycle transition. TrialExpired is included per CD-6 so Entitlements
+      reflects the suspended entitlement state when a trial expires.
+
+  sqsTenantUsage:
+    host: "sqs.ap-south-1.amazonaws.com"
+    protocol: sqs
+    description: |
+      Queue: tenant-usage-q  |  DLQ: tenant-usage-q-dlq  (maxReceiveCount=5)
+      SNS subscription filter: EventType IN [TenantConverted, TenantSuspended,
+        TenantOffboarded]
+      Source topic: iam.tenant.events (this service).
+      Owner: Usage & Metering Service (commercial namespace).
+      Purpose: Usage & Metering starts a fresh billing period on TenantConverted,
+      stops rendering limits for a suspended tenant on TenantSuspended, and purges
+      raw usage (keeping period totals) on TenantOffboarded.
 
 channels:
   iamTenantEvents:

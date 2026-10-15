@@ -209,10 +209,21 @@ func TestDeleteUser_TenantNotFound(t *testing.T) {
 	require.Error(t, err)
 }
 
-// ── RP-11: GetRealm ───────────────────────────────────────────────────────
+// ── RP-11: GetRealm — idp_count hardening (CD-20) ────────────────────────
+
+// newIdpRepo returns a mockIdpConfigRepository whose CountActiveByTenant
+// returns n unconditionally (success path).
+func newIdpRepo(n int) *mockIdpConfigRepository {
+	return &mockIdpConfigRepository{
+		CountActiveByTenantFn: func(ctx context.Context, tenantID uuid.UUID) (int, error) {
+			return n, nil
+		},
+	}
+}
 
 func TestGetRealm_Success(t *testing.T) {
 	svc, _, realms, _ := newLifecycleTestService()
+	svc.WithIdpConfigs(newIdpRepo(0))
 	tenantID := uuid.New()
 	shard := "kc-shard-1"
 	realms.rows[tenantID] = &domain.TenantRealm{
@@ -232,11 +243,110 @@ func TestGetRealm_Success(t *testing.T) {
 
 func TestGetRealm_NotFound(t *testing.T) {
 	svc, _, _, _ := newLifecycleTestService()
+	svc.WithIdpConfigs(newIdpRepo(0))
 	_, err := svc.GetRealm(context.Background(), uuid.New())
 	require.Error(t, err)
 	de, ok := err.(*domain.Error)
 	require.True(t, ok)
 	assert.Equal(t, domain.ErrTenantRealmNotFound, de.Code)
+}
+
+// CD-20: dedicated tenant with no active IdPs → idp_count 0 (not an error).
+func TestGetRealm_DedicatedTenant_ZeroActiveIdps(t *testing.T) {
+	svc, _, realms, _ := newLifecycleTestService()
+	svc.WithIdpConfigs(newIdpRepo(0))
+	tenantID := uuid.New()
+	realms.rows[tenantID] = &domain.TenantRealm{
+		TenantID: tenantID, RealmName: "tenant-x", Strategy: domain.RealmStrategyDedicated, Status: domain.RealmStatusActive,
+	}
+
+	result, err := svc.GetRealm(context.Background(), tenantID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.IdpCount)
+}
+
+// CD-20: dedicated tenant with 1 active SAML + 1 active OIDC → idp_count 2.
+func TestGetRealm_DedicatedTenant_TwoActiveIdps(t *testing.T) {
+	svc, _, realms, _ := newLifecycleTestService()
+	svc.WithIdpConfigs(newIdpRepo(2))
+	tenantID := uuid.New()
+	realms.rows[tenantID] = &domain.TenantRealm{
+		TenantID: tenantID, RealmName: "tenant-x", Strategy: domain.RealmStrategyDedicated, Status: domain.RealmStatusActive,
+	}
+
+	result, err := svc.GetRealm(context.Background(), tenantID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, result.IdpCount)
+}
+
+// CD-20: disabled configs must not appear in idp_count.
+// The service calls CountActiveByTenant which filters at the SQL level
+// (WHERE status = 'active'); the mock implements the same logic so this
+// test proves the service passes the tenant correctly and trusts the
+// repository's count without adding its own offset.
+func TestGetRealm_DedicatedTenant_DisabledIdpNotCounted(t *testing.T) {
+	callCount := 0
+	idpRepo := &mockIdpConfigRepository{
+		CountActiveByTenantFn: func(ctx context.Context, tenantID uuid.UUID) (int, error) {
+			callCount++
+			return 1, nil // one active; caller should NOT add the disabled one
+		},
+	}
+	svc, _, realms, _ := newLifecycleTestService()
+	svc.WithIdpConfigs(idpRepo)
+	tenantID := uuid.New()
+	realms.rows[tenantID] = &domain.TenantRealm{
+		TenantID: tenantID, RealmName: "tenant-x", Strategy: domain.RealmStrategyDedicated, Status: domain.RealmStatusActive,
+	}
+
+	result, err := svc.GetRealm(context.Background(), tenantID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.IdpCount, "disabled IdP must not be counted")
+	assert.Equal(t, 1, callCount, "repository must be called exactly once")
+}
+
+// CD-20: trial tenant (shared realm) → idp_count always 0, no DB query.
+// RP-6 blocks IdP configuration on the shared realm, so the count is
+// definitionally 0. The repository must NOT be called (verified by panic Fn).
+func TestGetRealm_TrialTenant_ZeroIdpCount_NoDBQuery(t *testing.T) {
+	idpRepo := &mockIdpConfigRepository{
+		CountActiveByTenantFn: func(ctx context.Context, tenantID uuid.UUID) (int, error) {
+			panic("CountActiveByTenant must not be called for a shared-strategy tenant")
+		},
+	}
+	svc, _, realms, _ := newLifecycleTestService()
+	svc.WithIdpConfigs(idpRepo)
+	tenantID := uuid.New()
+	realms.rows[tenantID] = &domain.TenantRealm{
+		TenantID: tenantID, RealmName: "trial", Strategy: domain.RealmStrategyShared, Status: domain.RealmStatusActive,
+	}
+
+	result, err := svc.GetRealm(context.Background(), tenantID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.IdpCount)
+	assert.Equal(t, "shared", result.Strategy)
+}
+
+// CD-20: IdP repository error must propagate as an error — never return
+// idp_count=0 silently (which would allow a harmful SSO-losing downgrade).
+func TestGetRealm_IdpRepoError_Propagates(t *testing.T) {
+	idpRepo := &mockIdpConfigRepository{
+		CountActiveByTenantFn: func(ctx context.Context, tenantID uuid.UUID) (int, error) {
+			return 0, domain.NewError(domain.ErrDBUnavailable, "database unavailable")
+		},
+	}
+	svc, _, realms, _ := newLifecycleTestService()
+	svc.WithIdpConfigs(idpRepo)
+	tenantID := uuid.New()
+	realms.rows[tenantID] = &domain.TenantRealm{
+		TenantID: tenantID, RealmName: "tenant-x", Strategy: domain.RealmStrategyDedicated, Status: domain.RealmStatusActive,
+	}
+
+	_, err := svc.GetRealm(context.Background(), tenantID)
+	require.Error(t, err, "a repository failure must not be swallowed")
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrDBUnavailable, de.Code)
 }
 
 // ── RP-16: RevokeSessions ────────────────────────────────────────────────

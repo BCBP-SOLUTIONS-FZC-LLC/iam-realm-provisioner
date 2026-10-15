@@ -1,0 +1,68 @@
+# Reusable workflow — Helm chart validation gate (CD-19).
+# helm lint + helm template × 4 values combos + kubeconform.
+# Called by ci.yml on every PR and push. Does NOT gate coverage, trivy,
+# or smoke — those are pure Go/image concerns. DOES gate push (a broken
+# chart must not reach a deploy).
+#
+# Values combinations exercised:
+#   base only | base+values-dev.yaml | base+values-staging.yaml | base+values-prod.yaml
+#
+# kubeconform validates standard K8s resources (K8s 1.31.0 schemas).
+# CRD kinds (ServiceMonitor, PrometheusRule, HTTPRoute, SecurityPolicy,
+# AuthorizationPolicy) are skipped via -ignore-missing-schemas — see
+# .github/scripts/helm-check.sh for the full rationale.
+name: Validate / Helm
+
+"on":
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to check out (leave empty to use the caller ref)'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  helm:
+    name: helm
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      # Go is required for `go install helm` and `go install kubeconform` in
+      # helm-check.sh (same pattern as arch-lint.sh using go install go-arch-lint).
+      # Private module credentials are NOT needed — helm and kubeconform are
+      # public modules; this job never runs go mod download for the service itself.
+      - name: Set up Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            go.mod
+
+      # Cache the compiled helm and kubeconform binaries across runs. The cache
+      # key pins both tool versions so a version bump busts the cache exactly once.
+      # Mirrors the go-arch-lint binary cache in validate-test.yml.
+      - name: Cache helm + kubeconform binaries
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/go/bin
+          key: helm-check-tools-${{ runner.os }}-helm3.16.3-kubeconform0.6.7
+
+      # Lint, render all four values combinations, and validate rendered
+      # manifests with kubeconform. The script exits non-zero if any step fails.
+      - name: Helm lint + template + kubeconform
+        run: bash .github/scripts/helm-check.sh

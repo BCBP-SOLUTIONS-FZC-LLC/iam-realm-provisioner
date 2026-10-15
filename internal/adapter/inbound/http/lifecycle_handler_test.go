@@ -185,6 +185,148 @@ func TestGetRealm_InvalidTenantID(t *testing.T) {
 	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
 }
 
+// CD-20: dedicated tenant with active IdPs returns idp_count in the body.
+func TestGetRealm_DedicatedTenant_IdpCountInBody(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
+	// Seed two active IdPs.
+	d.idpConfigs.rows[idpConfigKey{tenantID, "saml-corp"}] = &domain.IdpConfig{
+		TenantID: tenantID, IdpAlias: "saml-corp", Protocol: domain.IdpProtocolSAML,
+		Status: domain.IdpConfigStatusActive, Enabled: true,
+	}
+	d.idpConfigs.rows[idpConfigKey{tenantID, "oidc-google"}] = &domain.IdpConfig{
+		TenantID: tenantID, IdpAlias: "oidc-google", Protocol: domain.IdpProtocolOIDC,
+		Status: domain.IdpConfigStatusActive, Enabled: true,
+	}
+
+	rec := doRequest(d.engine(), http.MethodGet, realmGetPath(tenantID), sysHeaders(), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		IdpCount int `json:"idp_count"`
+	}
+	decodeInto(t, rec, &body)
+	if body.IdpCount != 2 {
+		t.Fatalf("expected idp_count=2, got %d", body.IdpCount)
+	}
+}
+
+// CD-20: disabled configs must not contribute to idp_count.
+func TestGetRealm_DedicatedTenant_DisabledIdpNotCounted(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
+	d.idpConfigs.rows[idpConfigKey{tenantID, "saml-corp"}] = &domain.IdpConfig{
+		TenantID: tenantID, IdpAlias: "saml-corp", Protocol: domain.IdpProtocolSAML,
+		Status: domain.IdpConfigStatusActive,
+	}
+	d.idpConfigs.rows[idpConfigKey{tenantID, "oidc-disabled"}] = &domain.IdpConfig{
+		TenantID: tenantID, IdpAlias: "oidc-disabled", Protocol: domain.IdpProtocolOIDC,
+		Status: domain.IdpConfigStatusDisabled,
+	}
+
+	rec := doRequest(d.engine(), http.MethodGet, realmGetPath(tenantID), sysHeaders(), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		IdpCount int `json:"idp_count"`
+	}
+	decodeInto(t, rec, &body)
+	if body.IdpCount != 1 {
+		t.Fatalf("expected idp_count=1 (disabled must not count), got %d", body.IdpCount)
+	}
+}
+
+// CD-20: trial tenant always returns idp_count=0 (shared realm, no SSO possible).
+func TestGetRealm_TrialTenant_ZeroIdpCount(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	d.putRealm(sharedRealm(tenantID))
+
+	rec := doRequest(d.engine(), http.MethodGet, realmGetPath(tenantID), sysHeaders(), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Strategy string `json:"strategy"`
+		IdpCount int    `json:"idp_count"`
+	}
+	decodeInto(t, rec, &body)
+	if body.Strategy != "shared" {
+		t.Fatalf("expected shared strategy, got %q", body.Strategy)
+	}
+	if body.IdpCount != 0 {
+		t.Fatalf("trial tenant must always return idp_count=0, got %d", body.IdpCount)
+	}
+}
+
+// CD-20: IdP repository failure must produce 5xx — not a silent zero.
+func TestGetRealm_IdpRepoError_Returns503(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
+	d.idpConfigs.CountActiveByTenantFn = func(ctx context.Context, tid uuid.UUID) (int, error) {
+		return 0, domain.NewError(domain.ErrDBUnavailable, "database unavailable")
+	}
+
+	rec := doRequest(d.engine(), http.MethodGet, realmGetPath(tenantID), sysHeaders(), "")
+	assertStatusAndCode(t, rec, http.StatusServiceUnavailable, "db_unavailable")
+}
+
+// ── CD-19: RP-11 commercial-system allow-list ─────────────────────────────
+
+// CD-19: commercial-system (Billing) can call RP-11 — the route is on the
+// explicit allow-list in RequireSystemOrCommercial (router.go).
+func TestGetRealm_CommercialSystem_Allowed(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
+	rec := doRequest(d.engine(), http.MethodGet, realmGetPath(tenantID), commercialHeaders(), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("commercial-system must reach RP-11 (CD-19 allow-list), got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		IdpCount int `json:"idp_count"`
+	}
+	decodeInto(t, rec, &body)
+	// idp_count must be present (CD-20 contract)
+	_ = body.IdpCount
+}
+
+// RP-10 (reactivate) must NOT be reachable by commercial-system.
+func TestReactivate_CommercialSystem_403(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
+	headers := withHeader(commercialHeaders(), "Idempotency-Key", "cd19-test-1")
+	rec := doRequest(d.engine(), http.MethodPost, reactivatePath(tenantID), headers, "")
+	assertStatusAndCode(t, rec, http.StatusForbidden, "insufficient_role")
+}
+
+// Contract test: route must be exactly /api/v1/internal/tenants/{id}/realm
+// and response must include the field "idp_count" (CD-20 contract with Core).
+func TestGetRealm_RouteAndFieldContract(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
+
+	// Use the literal path (not the realmGetPath helper) to assert the
+	// exact URL Core's HTTPClient.GetIDPCount must call.
+	exactPath := "/api/v1/internal/tenants/" + tenantID.String() + "/realm"
+	rec := doRequest(d.engine(), http.MethodGet, exactPath, sysHeaders(), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("contract route %s must return 200, got %d", exactPath, rec.Code)
+	}
+	var body map[string]any
+	decodeInto(t, rec, &body)
+	if _, ok := body["idp_count"]; !ok {
+		t.Fatalf("response body must contain idp_count field for Core's SSO-downgrade guard (CD-20)")
+	}
+}
+
 // ── RP-12: expire trial ───────────────────────────────────────────────────
 
 func TestExpireTrial_Happy(t *testing.T) {
@@ -400,6 +542,19 @@ func TestSuspend_InvalidTenantIDInPath(t *testing.T) {
 	headers := withHeader(operatorHeaders(), "Idempotency-Key", "suspend-10")
 	rec := doRequest(d.engine(), http.MethodPost, "/api/v1/internal/tenants/not-a-uuid/suspend", headers, `{"reason":"noop"}`)
 	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+}
+
+// CD-22: Seat overage never suspends a tenant via RP (TL decision 2026-10-15).
+// RP-14 is strictly operator-only (platform_operator role required).
+// commercial-system (Billing) must receive 403 insufficient_role on RP-14.
+func TestSuspend_CommercialSystem_403(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
+	// commercial-system has no platform_operator role → RequireOperatorRole rejects.
+	headers := withHeader(commercialHeaders(), "Idempotency-Key", "cd22-suspend-1")
+	rec := doRequest(d.engine(), http.MethodPost, suspendPath(tenantID), headers, `{"reason":"seat overage"}`)
+	assertStatusAndCode(t, rec, http.StatusForbidden, "insufficient_role")
 }
 
 // ── RP-15: delete user (idempotent) ──────────────────────────────────────

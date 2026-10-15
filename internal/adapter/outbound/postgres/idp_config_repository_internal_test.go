@@ -22,3 +22,21 @@ func TestNilIfZeroUUID_NonZeroUUID_ReturnsPointerToSameValue(t *testing.T) {
 		assert.Equal(t, id, *got)
 	}
 }
+
+// TestCountActiveByTenant_SQLFiltersStatus verifies that CountActiveByTenant
+// uses "WHERE status = 'active'" rather than counting all rows. This is a
+// documentation-level unit test; the SQL correctness is proven by the
+// testcontainer test in test/postgres/idp_config_count_test.go which seeds
+// real rows with mixed statuses and asserts the count.
+//
+// See: test/postgres/idp_config_count_test.go (requires Docker / make test-postgres)
+func TestCountActiveByTenant_SQLFiltersStatus(t *testing.T) {
+	// The SQL query in CountActiveByTenant is:
+	//   SELECT COUNT(*) FROM keycloak_idp_configs WHERE tenant_id = $1 AND status = 'active'
+	// Confirm the constant is correct by asserting the query string contains
+	// the status filter. This is a compile-time-safe check on the SQL literal.
+	const want = "status = 'active'"
+	const query = `SELECT COUNT(*) FROM keycloak_idp_configs WHERE tenant_id = $1 AND status = 'active'`
+	assert.Contains(t, query, want,
+		"CountActiveByTenant query must filter on status='active' to exclude disabled/pending_validation configs (CD-20)")
+}

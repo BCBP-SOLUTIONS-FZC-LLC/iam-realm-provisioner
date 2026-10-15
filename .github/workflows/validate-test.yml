@@ -50,14 +50,14 @@ jobs:
       pct: ${{ steps.gate.outputs.pct }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
 
       - name: Set up Go
-        uses: actions/setup-go@v6.5.0
+        uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
           cache-dependency-path: |
@@ -123,7 +123,7 @@ jobs:
       # only from cmd/server and cmd/reconciler. Also enforces RP-INV-1
       # (single Keycloak writer) and RLS-6 (no session-scoped tenant GUC).
       - name: Cache go-arch-lint binary
-        uses: actions/cache@v6.0.0
+        uses: actions/cache@v6.1.0
         with:
           path: ~/go/bin
           key: go-arch-lint-${{ runner.os }}-v1.15.0
@@ -138,6 +138,35 @@ jobs:
       # metric_status: proposed.
       - name: Metrics registry compliance lint
         run: bash .github/scripts/metrics-registry-lint.sh
+
+      # Regenerates docs/swagger/{docs.go,swagger.json,swagger.yaml} from
+      # the current handler annotations and fails if that produces a diff —
+      # ensures committed Swagger docs stay in sync with the code.
+      - name: Swagger staleness check
+        run: bash .github/scripts/check-swagger-stale.sh
+
+      - name: Set up Python (schema-gov)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      # platform-schemagov is installed from source, not pulled from GHCR:
+      # the ghcr.io package's Actions-access allow-list doesn't include this
+      # repo. GO_PRIVATE_TOKEN authorizes the git clone. Same as schema-registry.yml.
+      - name: Install schema-gov (platform-schemagov v0.4.0)
+        run: |
+          pip install --no-cache-dir "git+https://x-access-token:${{ secrets.GO_PRIVATE_TOKEN }}@github.com/BCBP-SOLUTIONS-FZC-LLC/platform-schemagov.git@v0.4.0"
+
+      # Verifies that the JSON schemas embedded in internal/eventschema/
+      # match what api/asyncapi.yaml declares — the CI-enforceable counterpart
+      # of the asyncapi_drift_test.go Go test. Fails if any schema file is
+      # missing, extra, or out of sync with the AsyncAPI channel messages.
+      - name: Event schema sync check
+        run: |
+          schema-gov extract \
+            --asyncapi   api/asyncapi.yaml \
+            --schema-dir internal/eventschema \
+            --check
 
       # Pull the two images up front so their download time is not charged
       # against the suite's container-start waits (Keycloak's is 120s).

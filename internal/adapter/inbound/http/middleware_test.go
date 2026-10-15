@@ -59,21 +59,36 @@ func doRequest(r http.Handler, method, path string, headers map[string]string, b
 	return rec
 }
 
+// TestCommercialActorIDLiteralValue asserts the exact canonical UUID value of
+// domain.CommercialActorID so that any accidental drift (e.g. a merge that
+// reverts the a2→c1 change) is caught immediately. CD-19 alignment rule 1.
+func TestCommercialActorIDLiteralValue(t *testing.T) {
+	const want = "00000000-0000-0000-0000-0000000000c1"
+	if domain.CommercialActorID != want {
+		t.Fatalf("CommercialActorID = %q, want %q (CD-19 canonical Core value)", domain.CommercialActorID, want)
+	}
+}
+
 func TestParseBridgedIdentity(t *testing.T) {
 	validTenant := uuid.New().String()
 	validUser := uuid.New().String()
+	commercialUUID := uuid.MustParse(domain.CommercialActorID)
 
 	tests := []struct {
-		name    string
-		in      bridgedIdentity
-		wantErr bool
-		wantSys bool
+		name       string
+		in         bridgedIdentity
+		wantErr    bool
+		wantUserID *uuid.UUID // nil = not checked; &uuid.Nil = must be nil; &commercialUUID = exact match
 	}{
-		{"valid user and tenant", bridgedIdentity{UserIDStr: validUser, TenantIDStr: validTenant}, false, false},
-		{"system principal literal", bridgedIdentity{UserIDStr: "iam-system", TenantIDStr: validTenant}, false, true},
-		{"system principal reserved uuid", bridgedIdentity{UserIDStr: domain.SystemActorID, TenantIDStr: validTenant}, false, true},
-		{"invalid user id", bridgedIdentity{UserIDStr: "not-a-uuid", TenantIDStr: validTenant}, true, false},
-		{"invalid tenant id", bridgedIdentity{UserIDStr: validUser, TenantIDStr: "not-a-uuid"}, true, false},
+		{"valid user and tenant", bridgedIdentity{UserIDStr: validUser, TenantIDStr: validTenant}, false, nil},
+		// iam-system → uuid.Nil (§18.3)
+		{"iam-system literal", bridgedIdentity{UserIDStr: "iam-system", TenantIDStr: validTenant}, false, func() *uuid.UUID { n := uuid.Nil; return &n }()},
+		{"iam-system reserved uuid", bridgedIdentity{UserIDStr: domain.SystemActorID, TenantIDStr: validTenant}, false, func() *uuid.UUID { n := uuid.Nil; return &n }()},
+		// CD-19: commercial-system → CommercialActorID (NOT uuid.Nil — unlike iam-system)
+		{"commercial-system literal", bridgedIdentity{UserIDStr: "commercial-system", TenantIDStr: validTenant}, false, &commercialUUID},
+		{"commercial-system reserved uuid", bridgedIdentity{UserIDStr: domain.CommercialActorID, TenantIDStr: validTenant}, false, &commercialUUID},
+		{"invalid user id", bridgedIdentity{UserIDStr: "not-a-uuid", TenantIDStr: validTenant}, true, nil},
+		{"invalid tenant id", bridgedIdentity{UserIDStr: validUser, TenantIDStr: "not-a-uuid"}, true, nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -93,10 +108,106 @@ func TestParseBridgedIdentity(t *testing.T) {
 			if rc == nil {
 				t.Fatal("expected non-nil RequestContext")
 			}
-			if tc.wantSys && rc.UserID != uuid.Nil {
-				t.Fatalf("expected system principal to map to uuid.Nil, got %s", rc.UserID)
+			if tc.wantUserID != nil && rc.UserID != *tc.wantUserID {
+				t.Fatalf("UserID = %s, want %s", rc.UserID, *tc.wantUserID)
 			}
 		})
+	}
+}
+
+// TestGUCBridgeMiddleware_CommercialSystem_SetsActorUUID verifies that the
+// GUCBridgeMiddleware populates requestctx.UserID with the canonical
+// CommercialActorID UUID (not uuid.Nil) when the x-user-id header carries
+// the commercial-system principal. This is the CD-19 audit-actor fix: audit
+// entries and log lines reading rc.UserID will see the correct actor.
+func TestGUCBridgeMiddleware_CommercialSystem_SetsActorUUID(t *testing.T) {
+	commercialUUID := uuid.MustParse(domain.CommercialActorID)
+	tenantID := uuid.New()
+	var gotRC *requestctx.RequestContext
+	r := gin.New()
+	r.Use(gincommon.ProtectedMiddlewares(testGinConfig)...)
+	r.Use(GUCBridgeMiddleware())
+	r.GET("/probe", func(c *gin.Context) {
+		rc, _ := requestctx.FromContext(c.Request.Context())
+		gotRC = rc
+		c.Status(http.StatusOK)
+	})
+	// Use the canonical UUID form (as the gateway sends it once it resolves
+	// the principal — either form is accepted by parseBridgedIdentity).
+	rec := doRequest(r, http.MethodGet, "/probe", map[string]string{
+		"x-user-id": domain.CommercialActorID, "x-tenant-id": tenantID.String(), "x-tenant-roles": "commercial-system",
+	}, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if gotRC == nil {
+		t.Fatal("requestctx not populated")
+	}
+	if gotRC.UserID != commercialUUID {
+		t.Fatalf("UserID = %s, want CommercialActorID %s (CD-19 audit actor must not be uuid.Nil)", gotRC.UserID, commercialUUID)
+	}
+	if gotRC.UserID == uuid.Nil {
+		t.Fatal("UserID must not be uuid.Nil for commercial-system (iam-system stays nil; commercial-system gets its canonical UUID)")
+	}
+}
+
+// ── RequireSystemOrCommercial — CD-19 allow-list ─────────────────────────
+
+// TestRequireSystemOrCommercial_AllowedPrincipals verifies that iam-system
+// AND commercial-system both pass the CD-19 allow-list middleware.
+func TestRequireSystemOrCommercial_AllowedPrincipals(t *testing.T) {
+	newEngine := func() *gin.Engine {
+		r := gin.New()
+		r.Use(gincommon.ProtectedMiddlewares(testGinConfig)...)
+		r.Use(GUCBridgeMiddleware())
+		r.GET("/probe", RequireSystemOrCommercial(), func(c *gin.Context) {
+			c.Status(http.StatusOK)
+		})
+		return r
+	}
+	for _, tc := range []struct {
+		name   string
+		userID string
+		roles  string
+	}{
+		{"iam-system", domain.SystemActorID, "iam-system"},
+		{"commercial-system literal userID", "commercial-system", "commercial-system"},
+		{"commercial-system uuid userID", domain.CommercialActorID, "commercial-system"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tenantID := uuid.New()
+			rec := doRequest(newEngine(), http.MethodGet, "/probe", map[string]string{
+				"x-user-id": tc.userID, "x-tenant-id": tenantID.String(), "x-tenant-roles": tc.roles,
+			}, "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestRequireSystemOrCommercial_RejectsOtherCallers verifies that an unknown
+// role gets 403.
+func TestRequireSystemOrCommercial_RejectsOtherCallers(t *testing.T) {
+	r := gin.New()
+	r.Use(gincommon.ProtectedMiddlewares(testGinConfig)...)
+	r.Use(GUCBridgeMiddleware())
+	r.GET("/probe", RequireSystemOrCommercial(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+	tenantID := uuid.New()
+	rec := doRequest(r, http.MethodGet, "/probe", map[string]string{
+		"x-user-id": uuid.New().String(), "x-tenant-id": tenantID.String(), "x-tenant-roles": "tenant_owner",
+	}, "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	_ = json.NewDecoder(rec.Body).Decode(&body)
+	if body.Error != "insufficient_role" {
+		t.Fatalf("expected error=insufficient_role, got %q", body.Error)
 	}
 }
 

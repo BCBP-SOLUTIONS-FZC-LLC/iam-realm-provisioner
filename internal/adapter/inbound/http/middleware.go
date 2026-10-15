@@ -27,9 +27,19 @@ type bridgedIdentity struct {
 // honored specially (§18.3).
 func parseBridgedIdentity(in bridgedIdentity) (rc *requestctx.RequestContext, errMsg string) {
 	var userID uuid.UUID
-	if in.UserIDStr == domain.SystemActorID || in.UserIDStr == "iam-system" {
+	switch in.UserIDStr {
+	case domain.SystemActorID, "iam-system":
+		// iam-system sentinel (…00a1) → uuid.Nil (§18.3). Role in x-tenant-roles
+		// (IsSystem) is the authoritative discriminator for per-route enforcement.
 		userID = uuid.Nil
-	} else {
+	case domain.CommercialActorID, "commercial-system":
+		// commercial-system (CD-19, …00c1) → canonical CommercialActorID UUID.
+		// Unlike iam-system, commercial-system maps to its actual UUID so that
+		// audit entries and structured logs record the correct actor (not uuid.Nil).
+		// IsCommercial() checks the role in x-tenant-roles, not the UUID, so this
+		// change does not affect route-level allow-list enforcement.
+		userID = uuid.MustParse(domain.CommercialActorID)
+	default:
 		id, err := uuid.Parse(in.UserIDStr)
 		if err != nil {
 			return nil, "x-user-id header is not a valid UUID"
@@ -112,11 +122,38 @@ func RequireJSONContentType() gin.HandlerFunc {
 // RequireSystemRole gates /api/v1/internal/* to the reserved iam-system
 // principal. NetworkPolicy + mTLS is the primary defense; this middleware
 // is defense-in-depth (§10.3, §10.6).
+// All routes use this except RP-3/RP-4/RP-11 which use RequireSystemOrCommercial.
 func RequireSystemRole() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rc, ok := requestctx.FromContext(c.Request.Context())
 		if !ok || !rc.IsSystem() {
 			er := newErrorResponse(c, "insufficient_role", map[string]any{"reason": "internal route requires iam-system role"})
+			er.Status = http.StatusForbidden
+			c.AbortWithStatusJSON(http.StatusForbidden, er)
+			return
+		}
+		c.Next()
+	}
+}
+
+// RequireSystemOrCommercial gates the three Commercial-caller routes (CD-19):
+//
+//	POST /api/v1/internal/tenants/:id/convert            (RP-3)
+//	POST /api/v1/internal/tenants/:id/revert-conversion  (RP-4)
+//	GET  /api/v1/internal/tenants/:id/realm              (RP-11)
+//
+// It accepts iam-system (existing callers) OR commercial-system (Billing,
+// CD-19). All other /internal/* routes remain gated by RequireSystemRole
+// (iam-system only) — commercial-system callers hitting those routes receive
+// 403 insufficient_role. NetworkPolicy + mesh AuthorizationPolicy are the
+// primary enforcement layer; this middleware is defense-in-depth.
+func RequireSystemOrCommercial() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		rc, ok := requestctx.FromContext(c.Request.Context())
+		if !ok || (!rc.IsSystem() && !rc.IsCommercial()) {
+			er := newErrorResponse(c, "insufficient_role", map[string]any{
+				"reason": "route requires iam-system or commercial-system role (CD-19 allow-list: RP-3, RP-4, RP-11)",
+			})
 			er.Status = http.StatusForbidden
 			c.AbortWithStatusJSON(http.StatusForbidden, er)
 			return

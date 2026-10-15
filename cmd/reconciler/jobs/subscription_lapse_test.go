@@ -761,3 +761,157 @@ func TestSubscriptionLapse_ListSuspendedPastRetentionFails_Propagates(t *testing
 	_, err := SubscriptionLapse(context.Background(), jctx)
 	require.Error(t, err)
 }
+
+// ── CD-23: RETENTION_DAYS boundary tests (offboard phase, TL decision 2026-10-15) ──
+//
+// RETENTION_DAYS = 60 (suspended → offboarded); total from cancellation is
+// 90 days (CANCELLED_GRACE_DAYS 30 + RETENTION_DAYS 60).
+//
+// The actual SQL predicate (disabled_at < now() - retentionDays AND
+// suspension_source='billing_lapse') is exercised in the postgres integration
+// suite; these unit tests pin the contract that RetentionDays is forwarded
+// correctly to ListSuspendedPastRetention, and that the phase acts on
+// whatever the query returns.
+
+// At day 59, the SQL query returns no rows (tenant is still within the 60-day
+// window) — the offboard phase must attempt nothing.
+func TestSubscriptionLapse_RetentionBoundary_Day59_NotOffboarded(t *testing.T) {
+	jctx, kc, _, _, _, _ := newTestContext()
+	jctx.RetentionDays = 60
+	jctx.SubscriptionLapses = nil // suspend phase skipped; offboard phase is the focus
+	var gotRetention int
+	// Simulate SQL returning no rows: the tenant was disabled 59 days ago,
+	// which is within the 60-day retention window (disabled_at >= now() - 60d).
+	jctx.TenantRealms.(*mockTenantRealmRepository).ListSuspendedPastRetentionFn =
+		func(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error) {
+			gotRetention = retentionDays
+			return nil, nil
+		}
+	kc.ExportRealmFn = func(ctx context.Context, realmName string) ([]byte, error) {
+		t.Fatal("ExportRealm must not be called when no candidates are past retention")
+		return nil, nil
+	}
+
+	res, err := SubscriptionLapse(context.Background(), jctx)
+	require.NoError(t, err)
+	assert.Equal(t, Result{}, res, "tenant disabled 59 days ago is within RETENTION_DAYS=60 — nothing to offboard")
+	assert.Equal(t, 60, gotRetention, "RetentionDays=60 (CD-23 TL decision) must be passed to ListSuspendedPastRetention")
+}
+
+// At day 60 the SQL query returns the tenant (disabled_at < now() - 60d) and
+// the offboard phase must process it.
+func TestSubscriptionLapse_RetentionBoundary_Day60_Offboarded(t *testing.T) {
+	jctx, kc, realms, _, pub, _ := newTestContext()
+	jctx.RetentionDays = 60
+	jctx.SubscriptionLapses = nil
+	tenantID := uuid.New()
+	past := time.Now().UTC().Add(-60 * 24 * time.Hour)
+	source := domain.SuspensionSourceBillingLapse
+	row := &domain.TenantRealm{
+		TenantID: tenantID, RealmName: "tenant-x", Strategy: domain.RealmStrategyDedicated,
+		Status: domain.RealmStatusSuspended, DisabledAt: &past, SuspensionSource: &source,
+	}
+	// SQL: disabled_at < now() - 60d → this row qualifies.
+	realms.ListSuspendedPastRetentionFn = func(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error) {
+		assert.Equal(t, 60, retentionDays)
+		return []*domain.TenantRealm{row}, nil
+	}
+	kc.ExportRealmFn = func(ctx context.Context, realmName string) ([]byte, error) { return []byte("x"), nil }
+	jctx.ObjectStore = &mockObjectStore{PutRealmExportFn: func(ctx context.Context, key string, data []byte) error { return nil }}
+	kc.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error { return nil }
+
+	res, err := SubscriptionLapse(context.Background(), jctx)
+	require.NoError(t, err)
+	assert.Equal(t, Result{Attempted: 1, Succeeded: 1}, res, "tenant disabled 60 days ago is past RETENTION_DAYS=60 and must be offboarded")
+	assert.Equal(t, domain.RealmStatusDeleted, row.Status)
+	require.Len(t, pub.events, 1)
+	assert.Equal(t, domain.EventTenantOffboarded, pub.events[0].Type)
+}
+
+// ── CD-23: CANCELLED_GRACE_DAYS boundary tests (suspend phase) ──────────────
+//
+// O&M owns the 30-day cancelled grace period (§8.8) — RP defers entirely to
+// O&M's I-16 list and never re-derives the threshold. These tests document the
+// integration contract: O&M must not report a tenant before CANCELLED_GRACE_DAYS
+// have elapsed, and RP must act only on what O&M reports.
+
+// At cancelled_at + 29 days O&M's I-16 correctly returns an empty list.
+// RP must not suspend anything.
+func TestSubscriptionLapse_CancelledGrace_Day29_NotSuspended(t *testing.T) {
+	jctx, kc, _, _, _, _ := newTestContext()
+	// O&M: at day 29 the tenant is still within the 30-day cancelled grace.
+	jctx.SubscriptionLapses = &mockSubscriptionLapseReader{
+		ListLapsedSubscriptionsFn: func(ctx context.Context) ([]port.LapsedSubscription, error) {
+			return nil, nil
+		},
+	}
+	kc.DisableRealmFn = func(ctx context.Context, realmName string) error {
+		t.Fatal("DisableRealm must not be called when O&M reports no lapsed subscriptions")
+		return nil
+	}
+	noOffboardCandidates(jctx)
+
+	res, err := SubscriptionLapse(context.Background(), jctx)
+	require.NoError(t, err)
+	assert.Equal(t, Result{}, res, "O&M returns nothing at day 29 — RP must not suspend")
+}
+
+// At cancelled_at + 30 days O&M's I-16 returns the tenant (past the 30-day
+// grace). RP must disable the dedicated realm and emit TenantSuspended.
+func TestSubscriptionLapse_CancelledGrace_Day30_Suspended(t *testing.T) {
+	jctx, kc, realms, _, pub, _ := newTestContext()
+	tenantID := uuid.New()
+	cancelledAt := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	// O&M: at day 30 the tenant is past the cancelled grace period.
+	jctx.SubscriptionLapses = &mockSubscriptionLapseReader{
+		ListLapsedSubscriptionsFn: func(ctx context.Context) ([]port.LapsedSubscription, error) {
+			return []port.LapsedSubscription{{
+				TenantID:    tenantID,
+				RealmID:     "kc-" + tenantID.String(),
+				RealmType:   "dedicated",
+				CancelledAt: cancelledAt,
+			}}, nil
+		},
+	}
+	realms.FindByTenantIDFn = func(ctx context.Context, tid uuid.UUID) (*domain.TenantRealm, error) {
+		return newActiveDedicatedRealm(tenantID, "tenant-x"), nil
+	}
+	var disableRealmCalled bool
+	kc.DisableRealmFn = func(ctx context.Context, realmName string) error { disableRealmCalled = true; return nil }
+	noOffboardCandidates(jctx)
+
+	res, err := SubscriptionLapse(context.Background(), jctx)
+	require.NoError(t, err)
+	assert.Equal(t, Result{Attempted: 1, Succeeded: 1}, res, "O&M reports tenant as lapsed at day 30 — RP must suspend")
+	assert.True(t, disableRealmCalled, "realm must be disabled when O&M confirms the tenant is past cancelled grace")
+	require.Len(t, pub.events, 1)
+	payload := pub.events[0].Data.(domain.TenantSuspendedPayload)
+	assert.Equal(t, domain.SuspensionSourceBillingLapse, payload.Source)
+}
+
+// ── CD-23: Operator-suspended tenants must never be auto-offboarded ──────────
+//
+// The SQL partial index on tenant_realms (WHERE suspension_source='billing_lapse')
+// makes this a structural guarantee — an operator-suspended row never matches
+// ListSuspendedPastRetention's predicate regardless of elapsed time.
+// This test documents that structural guarantee by having the mock (which
+// correctly simulates the SQL filter) return no candidates.
+func TestSubscriptionLapse_OperatorSuspension_NeverAutoOffboarded(t *testing.T) {
+	jctx, kc, _, _, _, _ := newTestContext()
+	jctx.RetentionDays = 60
+	jctx.SubscriptionLapses = nil
+	// SQL partial index (suspension_source='billing_lapse') excludes the
+	// operator-suspended tenant — ListSuspendedPastRetention returns empty.
+	jctx.TenantRealms.(*mockTenantRealmRepository).ListSuspendedPastRetentionFn =
+		func(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error) {
+			return nil, nil
+		}
+	kc.ExportRealmFn = func(ctx context.Context, realmName string) ([]byte, error) {
+		t.Fatal("ExportRealm must never be called for an operator-suspended tenant — excluded by the SQL index predicate (suspension_source='billing_lapse')")
+		return nil, nil
+	}
+
+	res, err := SubscriptionLapse(context.Background(), jctx)
+	require.NoError(t, err)
+	assert.Equal(t, Result{}, res, "operator-suspended tenants are excluded from the billing-lapse offboard sweep")
+}

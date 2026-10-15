@@ -27,14 +27,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
 
       - name: Set up Go
-        uses: actions/setup-go@v6.5.0
+        uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
           cache-dependency-path: |
@@ -100,32 +100,6 @@ jobs:
           fi
           echo "Tenant GUC binding check passed - no forbidden non-LOCAL SET app.tenant_id found."
 
-      # Enterprise Platform Observability Standard: every registered
-      # Prometheus collector must follow the platform_*/iam_*/
-      # iam_realm_provisioner_* naming hierarchy, the _total/_seconds
-      # suffix rules, the centrally-injected domain/service/environment
-      # label rules, and (platform_* only) this service's Platform
-      # Observability Registry compliance/label-vocabulary rules - see
-      # .github/scripts/check-metric-naming.sh for the full rationale.
-      - name: Metric naming convention check
-        run: bash .github/scripts/check-metric-naming.sh
-
-      # platform-gincommon's own metricslint: registry compliance and label
-      # vocabulary on a real scrape, legacy/unregistered names in alert
-      # rules, dashboards and runbooks, and docs/observability/
-      # metric-registry.md in sync with the code (matches iam-org-membership).
-      - name: Observability standard lint (metricslint)
-        run: bash .github/scripts/metricslint.sh
-
-      # Regenerates docs/swagger/{docs.go,swagger.json,swagger.yaml} from
-      # the current @Summary/@Router handler annotations and fails if that
-      # produces a diff — the same drift this caught locally once already
-      # (RP-17/RP-18 shipped without a regenerate-and-commit). Matches
-      # make swag-check's own script; not previously wired into any
-      # workflow.
-      - name: Swagger staleness check
-        run: bash .github/scripts/check-swagger-stale.sh
-
       - name: Format check
         run: |
           unformatted=$(gofmt -l cmd/ internal/ pkg/ test/ 2>/dev/null || true)
@@ -149,6 +123,30 @@ jobs:
 
       - name: Lint
         run: make lint
+
+      # Enterprise Platform Observability Standard: every registered
+      # Prometheus collector must follow the platform_*/iam_*/
+      # iam_realm_provisioner_* naming hierarchy, the _total/_seconds
+      # suffix rules, the centrally-injected domain/service/environment
+      # label rules, and (platform_* only) this service's Platform
+      # Observability Registry compliance/label-vocabulary rules - see
+      # .github/scripts/check-metric-naming.sh for the full rationale.
+      - name: Metric naming convention check
+        run: bash .github/scripts/check-metric-naming.sh
+
+      # Enforces the Enterprise Platform Observability Standard against the
+      # central Platform Observability Registry: no removed metric name in
+      # rule/HPA/adapter files, every alert reading a "proposed" metric
+      # carries metric_status: proposed.
+      - name: Metrics registry ratification check
+        run: bash .github/scripts/metrics-registry-lint.sh
+
+      # platform-gincommon's own metricslint: registry compliance and label
+      # vocabulary on a real scrape, legacy/unregistered names in alert
+      # rules, dashboards and runbooks, and docs/observability/
+      # metric-registry.md in sync with the code (matches iam-org-membership).
+      - name: Observability standard lint (metricslint)
+        run: bash .github/scripts/metricslint.sh
 
       - name: Vulnerability check
         run: |

@@ -72,7 +72,7 @@ func newServiceDeps() *serviceDeps {
 func (d *serviceDeps) handler() Handlers {
 	return NewInternalHandler(
 		service.NewProvisioningService(d.realms, d.idempotency, d.keycloak, d.tokenService, d.tx, "trial", []string{"kc-shard-1"}),
-		service.NewLifecycleService(d.realms, d.idempotency, d.keycloak, d.tx, "trial"),
+		service.NewLifecycleService(d.realms, d.idempotency, d.keycloak, d.tx, "trial").WithIdpConfigs(d.idpConfigs),
 		service.NewMfaService(d.realms, d.keycloak, d.orgMembership),
 		service.NewIdpService(d.realms, d.idpConfigs, d.idpValidations, d.idempotency, d.openbao, d.keycloak, d.tx, &fakePendingAuditEntryRepository{}),
 		service.NewRealmConfigService(d.realms, d.reconciliations, d.keycloak),
@@ -113,6 +113,18 @@ func operatorHeaders() map[string]string {
 	h := sysHeaders()
 	h["x-tenant-roles"] = "iam-system,platform_operator"
 	return h
+}
+
+// commercialHeaders simulates a commercial-system caller (Billing service,
+// CD-19 allow-list). Admitted ONLY on RP-3, RP-4, and RP-11; all other
+// /internal/* routes return 403 insufficient_role.
+func commercialHeaders() map[string]string {
+	return map[string]string{
+		"x-user-id":      domain.CommercialActorID,
+		"x-tenant-id":    targetTenant,
+		"x-tenant-roles": "commercial-system",
+		"Content-Type":   "application/json",
+	}
 }
 
 func withHeader(h map[string]string, key, value string) map[string]string {

@@ -15,6 +15,7 @@ import (
 // RP-16, and the RP-C1/RP-C3 reconciler effects (§8.4, §8.7-8.9, §8.11-8.13).
 type LifecycleService struct {
 	realms      port.TenantRealmRepository
+	idpCfg      port.IdpConfigRepository
 	idempotency port.IdempotencyStore
 	keycloak    port.KeycloakAdmin
 	tx          port.TxRunner
@@ -35,6 +36,13 @@ func NewLifecycleService(
 		sharedRealm = "trial"
 	}
 	return &LifecycleService{realms: realms, idempotency: idempotency, keycloak: keycloak, tx: tx, sharedRealm: sharedRealm, revertDays: 7}
+}
+
+// WithIdpConfigs attaches the IdP-config repository so RP-11 can include
+// idp_count in its response (CD-20: interim idp_count guard for plan-change-check).
+func (s *LifecycleService) WithIdpConfigs(idpCfg port.IdpConfigRepository) *LifecycleService {
+	s.idpCfg = idpCfg
+	return s
 }
 
 // WithLogger attaches a logger and returns s for chaining.
@@ -65,7 +73,15 @@ func (s *LifecycleService) completeIdempotency(ctx context.Context, idempotencyK
 
 // ── RP-11: GET realm (read-only) ─────────────────────────────────────────
 
-// GetRealmResult is the RP-11 response body (§5.1).
+// GetRealmResult is the RP-11 response body (§5.1, CD-20).
+// idp_count is the number of active (status='active') SAML/OIDC IdP
+// configurations for the tenant. Callers: Core (I-18 plan-change-check
+// SSO-downgrade guard, CD-20), Billing (interim guard, CD-20; network
+// CD-19 NetworkPolicy + mesh AuthorizationPolicy implemented in deploy/helm/templates/),
+// Signup BFF, Org & Membership (both iam-system).
+//
+// A non-zero idp_count signals active federated SSO. Core uses it to block a
+// plan downgrade that would revoke SSO access for active federated users.
 type GetRealmResult struct {
 	TenantID      uuid.UUID `json:"tenant_id"`
 	RealmName     string    `json:"realm_name"`
@@ -73,18 +89,47 @@ type GetRealmResult struct {
 	KeycloakShard *string   `json:"keycloak_shard,omitempty"`
 	Status        string    `json:"status"`
 	RecordVersion int64     `json:"record_version"`
+	// IdpCount is the number of active SAML/OIDC IdP configurations for the
+	// tenant (status='active' only; disabled and pending_validation excluded).
+	// Always 0 for shared-strategy (trial) tenants — RP-6 blocks IdP
+	// configuration on the shared realm (409 idp_requires_dedicated_realm).
+	IdpCount int `json:"idp_count"`
 }
 
-// GetRealm implements RP-11: returns tenantID's current realm state.
+// GetRealm implements RP-11: returns tenantID's current realm state including
+// the count of active IdP configurations (CD-20 SSO-downgrade guard).
+//
+// Error behavior:
+//   - Unknown tenant                   → 404 tenant_realm_not_found
+//   - Trial (shared) tenant            → 200 idp_count=0 (no DB query — trial
+//     tenants cannot configure SSO; RP-6 returns 409 idp_requires_dedicated_realm)
+//   - IdP count query fails            → propagate; DB outage → 503, timeout → 503
+//   - idpCfg not wired (misconfigured) → 500 internal_error
 func (s *LifecycleService) GetRealm(ctx context.Context, tenantID uuid.UUID) (*GetRealmResult, error) {
 	row, err := s.realms.FindByTenantID(ctx, tenantID)
 	if err != nil {
 		return nil, err
 	}
-	return &GetRealmResult{
+	res := &GetRealmResult{
 		TenantID: row.TenantID, RealmName: row.RealmName, Strategy: string(row.Strategy),
 		KeycloakShard: row.KeycloakShard, Status: string(row.Status), RecordVersion: row.RecordVersion,
-	}, nil
+	}
+	// Trial tenants on the shared realm cannot configure SSO (RP-6 returns
+	// 409 idp_requires_dedicated_realm), so idp_count is definitionally 0.
+	// Skip the DB round-trip and return immediately.
+	if row.Strategy == domain.RealmStrategyShared {
+		return res, nil
+	}
+	if s.idpCfg == nil {
+		return nil, domain.NewError(domain.ErrDBUnavailable,
+			"idp_count repository not wired — WithIdpConfigs required for dedicated-realm tenants")
+	}
+	n, err := s.idpCfg.CountActiveByTenant(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	res.IdpCount = n
+	return res, nil
 }
 
 // ── RP-10: reactivate ─────────────────────────────────────────────────────

@@ -307,7 +307,7 @@ func main() {
 	).WithLogger(log).WithConvertTimeout(envDuration("CONVERT_TIMEOUT", service.DefaultConvertTimeout))
 	lifecycleSvc := service.NewLifecycleService(
 		tenantRealmRepo, idempotencyRepo, keycloakAdmin, txRunner, sharedRealm,
-	).WithLogger(log)
+	).WithLogger(log).WithIdpConfigs(idpConfigRepo)
 	mfaSvc := service.NewMfaService(tenantRealmRepo, keycloakAdmin, orgMembershipClient).WithLogger(log)
 	idpSvc := service.NewIdpService(tenantRealmRepo, idpConfigRepo, idpValidationRepo, idempotencyRepo, openbaoClient, keycloakAdmin, txRunner, pendingAuditRepo).WithLogger(log)
 	realmConfigSvc := service.NewRealmConfigService(tenantRealmRepo, reconRepo, keycloakAdmin).WithLogger(log)

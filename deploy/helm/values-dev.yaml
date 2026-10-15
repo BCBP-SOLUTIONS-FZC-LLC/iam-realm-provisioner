@@ -1,0 +1,32 @@
+# Dev environment overrides for iam-realm-provisioner.
+# Merge with base values.yaml: helm upgrade ... -f values.yaml -f values-dev.yaml
+
+env:
+  APP_ENV: "dev"
+  LOG_LEVEL: "debug"
+  OTEL_TRACES_SAMPLER_RATIO: "1.0"   # full sampling in dev
+  DOCS_ENABLED: "true"
+
+# CD-19: Commercial domain callers admitted in dev for integration testing.
+# Istio is not deployed in dev; NetworkPolicy is the sole L3/L4 enforcement.
+commercialCallers:
+  enabled: true
+  istio:
+    enabled: false   # no Istio CRDs in dev — AuthorizationPolicy is not rendered
+    existingCallerNamespaces:
+      - iam                    # Core / iam-org-membership (same-namespace rule)
+      - envoy-gateway-system   # Envoy Gateway proxy (ingressControllerNamespaceSelector)
+      - gateway                # Signup BFF pod-to-pod (IAM HLD §10.8, see additionalIngressRules)
+      - monitoring             # Prometheus scrape port 9090 (metricsIngress rule)
+
+# Admit the Signup BFF (gateway ns) at L4 in dev so local integration tests
+# can exercise the RP-2 / trial-signup path from a Signup BFF pod directly.
+networkPolicy:
+  additionalIngressRules:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gateway
+      ports:
+        - port: 8080
+          protocol: TCP

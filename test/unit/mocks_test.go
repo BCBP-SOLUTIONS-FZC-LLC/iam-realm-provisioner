@@ -335,11 +335,12 @@ func (r *mockTxRunner) RunInTx(ctx context.Context, fn func(ctx context.Context)
 // mockKeycloakAdmin: unset fields panic if called. ───────────────────────
 
 type mockIdpConfigRepository struct {
-	FindByAliasFn  func(ctx context.Context, tenantID uuid.UUID, alias string) (*domain.IdpConfig, error)
-	ListByTenantFn func(ctx context.Context, tenantID uuid.UUID) ([]*domain.IdpConfig, error)
-	UpsertFn       func(ctx context.Context, cfg *domain.IdpConfig) error
-	DeleteFn       func(ctx context.Context, tenantID uuid.UUID, alias string) error
-	ListAllFn      func(ctx context.Context) ([]*domain.IdpConfig, error)
+	FindByAliasFn         func(ctx context.Context, tenantID uuid.UUID, alias string) (*domain.IdpConfig, error)
+	ListByTenantFn        func(ctx context.Context, tenantID uuid.UUID) ([]*domain.IdpConfig, error)
+	UpsertFn              func(ctx context.Context, cfg *domain.IdpConfig) error
+	DeleteFn              func(ctx context.Context, tenantID uuid.UUID, alias string) error
+	ListAllFn             func(ctx context.Context) ([]*domain.IdpConfig, error)
+	CountActiveByTenantFn func(ctx context.Context, tenantID uuid.UUID) (int, error)
 }
 
 var _ port.IdpConfigRepository = (*mockIdpConfigRepository)(nil)
@@ -358,6 +359,9 @@ func (m *mockIdpConfigRepository) Delete(ctx context.Context, tenantID uuid.UUID
 }
 func (m *mockIdpConfigRepository) ListAll(ctx context.Context) ([]*domain.IdpConfig, error) {
 	return m.ListAllFn(ctx)
+}
+func (m *mockIdpConfigRepository) CountActiveByTenant(ctx context.Context, tenantID uuid.UUID) (int, error) {
+	return m.CountActiveByTenantFn(ctx, tenantID)
 }
 
 // ── mockIdpValidationRepository — functional mock. ───────────────────────

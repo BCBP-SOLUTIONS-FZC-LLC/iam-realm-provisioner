@@ -1,6 +1,6 @@
 # CI for https://github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner
 #
-# Parallel flow (matches iam-org-membership):
+# Parallel flow (matches iam-tender-acl):
 #
 #   validate-test ──────┐
 #   build-image ────────┤──► trivy ──────┐
@@ -78,7 +78,7 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
 
@@ -101,14 +101,14 @@ jobs:
 
       # Log in so registry cache reads (and writes on non-fork runs) are authenticated.
       - name: Log in to GHCR
-        uses: docker/login-action@v4.4.0
+        uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.1.0
+        uses: docker/setup-buildx-action@v4.2.0
 
       # Build and write all layers to GHA + registry cache (no local load needed here).
       - name: Build image → cache
@@ -144,12 +144,12 @@ jobs:
       actions: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.1.0
+        uses: docker/setup-buildx-action@v4.2.0
 
       # Restore from GHA cache (all layers cached → near-instant rebuild).
       - name: Load image from cache
@@ -167,7 +167,7 @@ jobs:
             go_private_token=${{ secrets.GO_PRIVATE_TOKEN }}
 
       - name: Cache Trivy DB
-        uses: actions/cache@v6.0.0
+        uses: actions/cache@v6.1.0
         with:
           path: /tmp/trivy-cache
           key: trivy-db-${{ runner.os }}
@@ -197,7 +197,7 @@ jobs:
           cache-dir: /tmp/trivy-cache
 
       - name: Upload SARIF to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v4.37.0
+        uses: github/codeql-action/upload-sarif@v4.37.4
         continue-on-error: true
         with:
           sarif_file: trivy-results.sarif
@@ -232,12 +232,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.1.0
+        uses: docker/setup-buildx-action@v4.2.0
 
       # Restore from GHA cache (all layers cached → near-instant rebuild).
       - name: Load image from cache
@@ -288,12 +288,12 @@ jobs:
       pull-requests: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
 
       - name: Post or update summary comment
-        uses: actions/github-script@v7.1.0
+        uses: actions/github-script@v9.0.0
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         with:
@@ -319,7 +319,7 @@ jobs:
       id-token: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
 
@@ -328,7 +328,7 @@ jobs:
         run: bash .github/scripts/set-source-date-epoch.sh
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4.4.0
+        uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -336,7 +336,7 @@ jobs:
 
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v6.1.0
+        uses: docker/metadata-action@v6.2.0
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
@@ -344,7 +344,7 @@ jobs:
             type=sha,prefix=sha-,format=short
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.1.0
+        uses: docker/setup-buildx-action@v4.2.0
 
       - name: Build and push
         id: pushed

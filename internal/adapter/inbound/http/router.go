@@ -222,23 +222,23 @@ func registerInternalRoutes(r *gin.Engine, cfg RouterConfig) {
 		GUCBridgeMiddleware(),
 		RequireJSONContentType(),
 	)
-	// Every route in this service lives under /api/v1/internal — there is
-	// almost no public surface (§5.1, §5.4). RequireSystemRole is
-	// defense-in-depth; the mesh mTLS + internal-route guard is primary.
-	internal := r.Group("/api/v1/internal", append(protected, RequireSystemRole())...)
 
 	idem := RequireIdempotencyKey()
 	// tm: the path tenant must be the caller's x-tenant-id (RequireTenantMatch).
 	tm := RequireTenantMatch()
 
-	internal.POST("/tenants/provision-trial", idem, h.ProvisionTrial)             // RP-1
-	internal.POST("/tenants/provision-direct", idem, h.ProvisionDirect)           // RP-2
-	internal.POST("/tenants/:id/convert", tm, idem, h.Convert)                    // RP-3
-	internal.POST("/tenants/:id/revert-conversion", tm, idem, h.RevertConversion) // RP-4
-	internal.POST("/tenants/:id/users", tm, idem, h.CreateInvitedUser)            // RP-5
-	internal.PUT("/tenants/:id/idp", tm, idem, h.ConfigureIdp)                    // RP-6
-	internal.DELETE("/tenants/:id/idp/:alias", tm, h.RemoveIdp)                   // RP-7
-	internal.PATCH("/tenants/:id/realm-config", tm, h.ApplyRealmConfig)           // RP-8
+	// ── iam-system-only routes (RequireSystemRole) ────────────────────────
+	// Every route in this service except RP-3/RP-4/RP-11 lives here.
+	// RequireSystemRole is defense-in-depth; mesh mTLS + NetworkPolicy is primary.
+	// commercial-system callers are explicitly excluded from this group.
+	internal := r.Group("/api/v1/internal", append(protected, RequireSystemRole())...)
+
+	internal.POST("/tenants/provision-trial", idem, h.ProvisionTrial)   // RP-1
+	internal.POST("/tenants/provision-direct", idem, h.ProvisionDirect) // RP-2
+	internal.POST("/tenants/:id/users", tm, idem, h.CreateInvitedUser)  // RP-5
+	internal.PUT("/tenants/:id/idp", tm, idem, h.ConfigureIdp)          // RP-6
+	internal.DELETE("/tenants/:id/idp/:alias", tm, h.RemoveIdp)         // RP-7
+	internal.PATCH("/tenants/:id/realm-config", tm, h.ApplyRealmConfig) // RP-8
 	// RP-9's frozen §25 path spells the segment ":uid"; Gin requires one
 	// wildcard name per path position across sibling routes sharing this
 	// prefix (RP-15/16 use :keycloak_user_id here) — the capture name is
@@ -247,7 +247,6 @@ func registerInternalRoutes(r *gin.Engine, cfg RouterConfig) {
 	// non-breaking rename.
 	internal.POST("/tenants/:id/users/:keycloak_user_id/mfa-reset", tm, h.ResetMFA)             // RP-9
 	internal.POST("/tenants/:id/reactivate", tm, idem, h.Reactivate)                            // RP-10
-	internal.GET("/tenants/:id/realm", tm, h.GetRealm)                                          // RP-11
 	internal.POST("/tenants/:id/expire-trial", tm, idem, h.ExpireTrial)                         // RP-12
 	internal.POST("/tenants/:id/suspend", tm, idem, RequireOperatorRole(), h.Suspend)           // RP-14
 	internal.DELETE("/tenants/:id/users/:keycloak_user_id", tm, h.DeleteUser)                   // RP-15
@@ -256,4 +255,20 @@ func registerInternalRoutes(r *gin.Engine, cfg RouterConfig) {
 
 	// Operator-only, whole-estate scan — not tenant-scoped (§5.1).
 	internal.POST("/audit/idp-region-portability", RequireOperatorRole(), h.PortabilityAudit) // RP-13
+
+	// ── Commercial-caller routes (RequireSystemOrCommercial, CD-19) ──────
+	// RP-3, RP-4, RP-11 are the explicit allow-list for commercial-system.
+	// Billing (commercial-billing ServiceAccount, billing namespace) calls:
+	//   RP-3 to drive the conversion saga
+	//   RP-4 to revert on fraud/chargeback (CD-10)
+	//   RP-11 to read idp_count as the interim SSO-downgrade guard (CD-20)
+	// iam-system callers are also accepted (unchanged behavior for O&M etc.).
+	// Every other /internal/* route still requires iam-system (see group above).
+	// NetworkPolicy + mesh AuthorizationPolicy enforce at the network layer;
+	// this middleware is defense-in-depth (§10.3).
+	commercialInternal := r.Group("/api/v1/internal", append(protected, RequireSystemOrCommercial())...)
+
+	commercialInternal.POST("/tenants/:id/convert", tm, idem, h.Convert)                    // RP-3
+	commercialInternal.POST("/tenants/:id/revert-conversion", tm, idem, h.RevertConversion) // RP-4
+	commercialInternal.GET("/tenants/:id/realm", tm, h.GetRealm)                            // RP-11
 }
