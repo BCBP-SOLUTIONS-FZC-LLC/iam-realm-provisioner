@@ -7,8 +7,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/gincommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/problem"
 )
 
 // InternalHandler implements Handlers (RP-1..RP-17) by delegating to the
@@ -61,10 +62,10 @@ type provisionTrialRequest struct {
 // @Produce      json
 // @Param        request  body      provisionTrialRequest        true  "Trial provisioning payload"
 // @Success      201      {object}  service.ProvisionTrialResult
-// @Failure      400      {object}  ErrorResponse                "invalid_request OR missing_idempotency_key"
-// @Failure      409      {object}  ErrorResponse                "operation_in_progress OR realm_already_dedicated OR tenant_offboarded"
-// @Failure      500      {object}  ErrorResponse
-// @Failure      503      {object}  ErrorResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
+// @Failure      400      {object}  ProblemResponse                "invalid_request OR missing_idempotency_key"
+// @Failure      409      {object}  ProblemResponse                "operation_in_progress OR realm_already_dedicated OR tenant_offboarded"
+// @Failure      500      {object}  ProblemResponse
+// @Failure      503      {object}  ProblemResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
 // @Security     SystemRole
 // @Security     IdempotencyKey
 // @Router       /tenants/provision-trial [post]
@@ -74,12 +75,12 @@ func (h *InternalHandler) ProvisionTrial(c *gin.Context) {
 		return
 	}
 	var req provisionTrialRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		HandleError(c, domain.NewError(domain.ErrInvalidRequest, err.Error()))
+	if err := gincommon.ShouldBindJSON(c, &req); err != nil {
+		gincommon.AbortWithProblem(c, err)
 		return
 	}
 	if !validTenantSlug(req.TenantSlug) {
-		HandleError(c, domain.NewError(domain.ErrInvalidRequest, "tenant_slug must not contain '/', whitespace, or control characters"))
+		gincommon.AbortWithProblem(c, problem.NewError(realmInvalidRequest, "tenant_slug must not contain '/', whitespace, or control characters"))
 		return
 	}
 	if !tenantMatchesCaller(c, req.TenantID) {
@@ -91,7 +92,7 @@ func (h *InternalHandler) ProvisionTrial(c *gin.Context) {
 		HashedPasswordSeed: req.HashedPasswordSeed, Plan: req.Plan,
 	})
 	if err != nil {
-		HandleError(c, err)
+		gincommon.AbortWithProblem(c, domainErrToProblem(err))
 		return
 	}
 	c.JSON(http.StatusCreated, result)
@@ -119,10 +120,10 @@ type provisionDirectRequest struct {
 // @Produce      json
 // @Param        request  body      provisionDirectRequest        true  "Direct provisioning payload"
 // @Success      201      {object}  service.ProvisionDirectResult
-// @Failure      400      {object}  ErrorResponse                 "invalid_request OR missing_idempotency_key"
-// @Failure      409      {object}  ErrorResponse                 "operation_in_progress OR realm_already_dedicated OR tenant_offboarded"
-// @Failure      500      {object}  ErrorResponse
-// @Failure      503      {object}  ErrorResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
+// @Failure      400      {object}  ProblemResponse                 "invalid_request OR missing_idempotency_key"
+// @Failure      409      {object}  ProblemResponse                 "operation_in_progress OR realm_already_dedicated OR tenant_offboarded"
+// @Failure      500      {object}  ProblemResponse
+// @Failure      503      {object}  ProblemResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
 // @Security     SystemRole
 // @Security     IdempotencyKey
 // @Router       /tenants/provision-direct [post]
@@ -132,19 +133,19 @@ func (h *InternalHandler) ProvisionDirect(c *gin.Context) {
 		return
 	}
 	var req provisionDirectRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		HandleError(c, domain.NewError(domain.ErrInvalidRequest, err.Error()))
+	if err := gincommon.ShouldBindJSON(c, &req); err != nil {
+		gincommon.AbortWithProblem(c, err)
 		return
 	}
 	if !validTenantSlug(req.TenantSlug) {
-		HandleError(c, domain.NewError(domain.ErrInvalidRequest, "tenant_slug must not contain '/', whitespace, or control characters"))
+		gincommon.AbortWithProblem(c, problem.NewError(realmInvalidRequest, "tenant_slug must not contain '/', whitespace, or control characters"))
 		return
 	}
 	if !tenantMatchesCaller(c, req.TenantID) {
 		return
 	}
 	if !validPlan(req.Plan) {
-		HandleError(c, domain.NewError(domain.ErrInvalidRequest, "plan must be one of: starter, pro, enterprise"))
+		gincommon.AbortWithProblem(c, problem.NewError(realmInvalidRequest, "plan must be one of: starter, pro, enterprise"))
 		return
 	}
 	result, err := h.Provisioning.ProvisionDirect(c.Request.Context(), idempotencyKey(c), service.ProvisionDirectRequest{
@@ -154,7 +155,7 @@ func (h *InternalHandler) ProvisionDirect(c *gin.Context) {
 		BillingSubscriptionID: req.BillingSubscriptionID,
 	})
 	if err != nil {
-		HandleError(c, err)
+		gincommon.AbortWithProblem(c, domainErrToProblem(err))
 		return
 	}
 	c.JSON(http.StatusCreated, result)
@@ -178,13 +179,13 @@ type convertRequest struct {
 // @Param        id       path      string          true  "Tenant UUID"  format(uuid)
 // @Param        request  body      convertRequest  true  "Conversion payload"
 // @Success      200      {object}  service.ConvertResult
-// @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
-// @Failure      403      {object}  ErrorResponse  "insufficient_role (caller not in CD-19 allow-list)"
-// @Failure      404      {object}  ErrorResponse  "tenant_realm_not_found"
-// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR realm_already_dedicated OR tenant_offboarded OR optimistic_lock_conflict OR credential_replay_expired"
-// @Failure      502      {object}  ErrorResponse  "conversion_failed"
-// @Failure      503      {object}  ErrorResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
-// @Failure      500      {object}  ErrorResponse
+// @Failure      400      {object}  ProblemResponse  "invalid_request OR missing_idempotency_key"
+// @Failure      403      {object}  ProblemResponse  "insufficient_role (caller not in CD-19 allow-list)"
+// @Failure      404      {object}  ProblemResponse  "tenant_realm_not_found"
+// @Failure      409      {object}  ProblemResponse  "operation_in_progress OR realm_already_dedicated OR tenant_offboarded OR optimistic_lock_conflict OR credential_replay_expired"
+// @Failure      502      {object}  ProblemResponse  "conversion_failed"
+// @Failure      503      {object}  ProblemResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
+// @Failure      500      {object}  ProblemResponse
 // @Security     SystemRole
 // @Security     TenantID
 // @Security     IdempotencyKey
@@ -196,19 +197,19 @@ func (h *InternalHandler) Convert(c *gin.Context) {
 	}
 	tenantID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		HandleError(c, domain.NewError(domain.ErrInvalidRequest, "invalid tenant id"))
+		gincommon.AbortWithProblem(c, problem.NewError(realmInvalidRequest, "invalid tenant id"))
 		return
 	}
 	var req convertRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		HandleError(c, domain.NewError(domain.ErrInvalidRequest, err.Error()))
+	if err := gincommon.ShouldBindJSON(c, &req); err != nil {
+		gincommon.AbortWithProblem(c, err)
 		return
 	}
 	result, err := h.Provisioning.Convert(c.Request.Context(), idempotencyKey(c), tenantID, service.ConvertRequest{
 		Plan: req.Plan, BillingSubscriptionID: req.BillingSubscriptionID,
 	})
 	if err != nil {
-		HandleError(c, err)
+		gincommon.AbortWithProblem(c, domainErrToProblem(err))
 		return
 	}
 	c.JSON(http.StatusOK, result)
@@ -230,11 +231,11 @@ type revertConversionRequest struct {
 // @Param        id       path      string                  false  "Tenant UUID"  format(uuid)
 // @Param        request  body      revertConversionRequest false  "Optional revert reason"
 // @Success      200      {object}  service.RevertConversionResult
-// @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
-// @Failure      404      {object}  ErrorResponse  "tenant_realm_not_found"
-// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR revert_window_expired"
-// @Failure      500      {object}  ErrorResponse
-// @Failure      503      {object}  ErrorResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
+// @Failure      400      {object}  ProblemResponse  "invalid_request OR missing_idempotency_key"
+// @Failure      404      {object}  ProblemResponse  "tenant_realm_not_found"
+// @Failure      409      {object}  ProblemResponse  "operation_in_progress OR revert_window_expired"
+// @Failure      500      {object}  ProblemResponse
+// @Failure      503      {object}  ProblemResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
 // @Security     SystemRole
 // @Security     TenantID
 // @Security     IdempotencyKey
@@ -244,16 +245,16 @@ func (h *InternalHandler) RevertConversion(c *gin.Context) {
 		h.fallback.RevertConversion(c)
 		return
 	}
-	tenantID, err := parseTenantID(c)
-	if err != nil {
-		HandleError(c, err)
+	tenantID, perr := parseTenantID(c)
+	if perr != nil {
+		gincommon.AbortWithProblem(c, perr)
 		return
 	}
 	var req revertConversionRequest
 	_ = c.ShouldBindJSON(&req) //nolint:errcheck // body is optional (reason only) — a missing/empty body just leaves req zero-valued
 	result, err := h.Provisioning.RevertConversion(c.Request.Context(), idempotencyKey(c), tenantID, truncateReason(req.Reason, 500), 7, 14)
 	if err != nil {
-		HandleError(c, err)
+		gincommon.AbortWithProblem(c, domainErrToProblem(err))
 		return
 	}
 	c.JSON(http.StatusOK, result)
@@ -277,11 +278,11 @@ type createInvitedUserRequest struct {
 // @Param        id       path      string                    true  "Tenant UUID"  format(uuid)
 // @Param        request  body      createInvitedUserRequest  true  "Invited user payload"
 // @Success      201      {object}  service.CreateInvitedUserResult
-// @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
-// @Failure      404      {object}  ErrorResponse  "tenant_realm_not_found"
-// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR user_email_conflict"
-// @Failure      500      {object}  ErrorResponse
-// @Failure      503      {object}  ErrorResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
+// @Failure      400      {object}  ProblemResponse  "invalid_request OR missing_idempotency_key"
+// @Failure      404      {object}  ProblemResponse  "tenant_realm_not_found"
+// @Failure      409      {object}  ProblemResponse  "operation_in_progress OR user_email_conflict"
+// @Failure      500      {object}  ProblemResponse
+// @Failure      503      {object}  ProblemResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
 // @Security     SystemRole
 // @Security     TenantID
 // @Security     IdempotencyKey
@@ -291,21 +292,21 @@ func (h *InternalHandler) CreateInvitedUser(c *gin.Context) {
 		h.fallback.CreateInvitedUser(c)
 		return
 	}
-	tenantID, err := parseTenantID(c)
-	if err != nil {
-		HandleError(c, err)
+	tenantID, perr := parseTenantID(c)
+	if perr != nil {
+		gincommon.AbortWithProblem(c, perr)
 		return
 	}
 	var req createInvitedUserRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		HandleError(c, domain.NewError(domain.ErrInvalidRequest, err.Error()))
+	if err := gincommon.ShouldBindJSON(c, &req); err != nil {
+		gincommon.AbortWithProblem(c, err)
 		return
 	}
 	result, err := h.Provisioning.CreateInvitedUser(c.Request.Context(), idempotencyKey(c), tenantID, service.CreateInvitedUserRequest{
 		Email: req.Email, FullName: req.FullName, RequiredActions: req.RequiredActions,
 	})
 	if err != nil {
-		HandleError(c, err)
+		gincommon.AbortWithProblem(c, domainErrToProblem(err))
 		return
 	}
 	c.JSON(http.StatusCreated, result)
@@ -322,10 +323,10 @@ func (h *InternalHandler) CreateInvitedUser(c *gin.Context) {
 // @Param        id                path  string  true  "Tenant UUID"        format(uuid)
 // @Param        keycloak_user_id  path  string  true  "Keycloak user UUID"  format(uuid)
 // @Success      204               "No Content"
-// @Failure      400               {object}  ErrorResponse  "invalid_request"
-// @Failure      404               {object}  ErrorResponse  "tenant_realm_not_found OR keycloak_user_not_found"
-// @Failure      500               {object}  ErrorResponse
-// @Failure      503               {object}  ErrorResponse  "db_unavailable OR keycloak_unavailable"
+// @Failure      400               {object}  ProblemResponse  "invalid_request"
+// @Failure      404               {object}  ProblemResponse  "tenant_realm_not_found OR keycloak_user_not_found"
+// @Failure      500               {object}  ProblemResponse
+// @Failure      503               {object}  ProblemResponse  "db_unavailable OR keycloak_unavailable"
 // @Security     SystemRole
 // @Security     TenantID
 // @Router       /tenants/{id}/users/{keycloak_user_id}/mfa-reset [post]
@@ -334,18 +335,18 @@ func (h *InternalHandler) ResetMFA(c *gin.Context) {
 		h.fallback.ResetMFA(c)
 		return
 	}
-	tenantID, err := parseTenantID(c)
-	if err != nil {
-		HandleError(c, err)
+	tenantID, perr := parseTenantID(c)
+	if perr != nil {
+		gincommon.AbortWithProblem(c, perr)
 		return
 	}
 	keycloakUserID, err := uuid.Parse(c.Param("keycloak_user_id"))
 	if err != nil {
-		HandleError(c, domain.NewError(domain.ErrInvalidRequest, "invalid keycloak_user_id"))
+		gincommon.AbortWithProblem(c, problem.NewError(realmInvalidRequest, "invalid keycloak_user_id"))
 		return
 	}
 	if err := h.Mfa.ResetMFA(c.Request.Context(), tenantID, keycloakUserID); err != nil {
-		HandleError(c, err)
+		gincommon.AbortWithProblem(c, domainErrToProblem(err))
 		return
 	}
 	c.Status(http.StatusNoContent)
@@ -367,9 +368,9 @@ func (h *InternalHandler) ResetMFA(c *gin.Context) {
 // @Produce      json
 // @Param        id  path  string  true  "Tenant UUID"  format(uuid)
 // @Success      204 "No Content"
-// @Failure      404 {object}  ErrorResponse  "tenant_realm_not_found"
-// @Failure      422 {object}  ErrorResponse  "service_account_not_provisioned"
-// @Failure      502 {object}  ErrorResponse  "keycloak_unavailable"
+// @Failure      404 {object}  ProblemResponse  "tenant_realm_not_found"
+// @Failure      422 {object}  ProblemResponse  "service_account_not_provisioned"
+// @Failure      502 {object}  ProblemResponse  "keycloak_unavailable"
 // @Security     SystemRole
 // @Security     TenantID
 // @Router       /tenants/{id}/service-account/keys/refresh [post]
@@ -378,13 +379,13 @@ func (h *InternalHandler) RefreshServiceAccountKeys(c *gin.Context) {
 		h.fallback.RefreshServiceAccountKeys(c)
 		return
 	}
-	tenantID, err := parseTenantID(c)
-	if err != nil {
-		HandleError(c, err)
+	tenantID, perr := parseTenantID(c)
+	if perr != nil {
+		gincommon.AbortWithProblem(c, perr)
 		return
 	}
 	if err := h.Provisioning.RefreshServiceAccountKeys(c.Request.Context(), tenantID); err != nil {
-		HandleError(c, err)
+		gincommon.AbortWithProblem(c, domainErrToProblem(err))
 		return
 	}
 	c.Status(http.StatusNoContent)
@@ -431,10 +432,10 @@ var validPlans = map[string]bool{"starter": true, "pro": true, "enterprise": tru
 
 func validPlan(plan string) bool { return validPlans[plan] }
 
-func parseTenantID(c *gin.Context) (uuid.UUID, error) {
+func parseTenantID(c *gin.Context) (id uuid.UUID, perr *problem.Error) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		return uuid.Nil, domain.NewError(domain.ErrInvalidRequest, "invalid tenant id")
+		return uuid.Nil, problem.NewError(realmInvalidRequest, "invalid tenant id")
 	}
 	return id, nil
 }

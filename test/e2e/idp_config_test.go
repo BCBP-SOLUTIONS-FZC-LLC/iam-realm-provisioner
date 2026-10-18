@@ -70,7 +70,7 @@ func TestConfigureIdp_RegionPinnedURL_Blocked(t *testing.T) {
 	resp, er := decodeErrorBody(t, http.MethodPut, "/api/v1/internal/tenants/"+tenantID.String()+"/idp",
 		withHeader(sysHeaders(tenantID), "Idempotency-Key", newIdempotencyKey()), body)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	require.Equal(t, "idp_region_portability_failed", er.Error)
+	require.Equal(t, "IDP_REGION_PORTABILITY_FAILED", er.ErrorCode)
 
 	// Never reaches Keycloak: no identity provider was created.
 	client, tok, err := rawKeycloakClient(ctx)

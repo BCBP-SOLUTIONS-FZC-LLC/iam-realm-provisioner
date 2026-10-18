@@ -59,7 +59,7 @@ func TestResetMFA_Happy_NoLongerRequiresMFA(t *testing.T) {
 func TestResetMFA_TenantRealmNotFound(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodPost, mfaResetPath(uuid.New(), uuid.New()), sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
+	assertStatusAndCode(t, rec, http.StatusNotFound, "TENANT_REALM_NOT_FOUND")
 }
 
 func TestResetMFA_InvalidKeycloakUserID(t *testing.T) {
@@ -67,13 +67,13 @@ func TestResetMFA_InvalidKeycloakUserID(t *testing.T) {
 	tenantID := uuid.New()
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
 	rec := doRequest(d.engine(), http.MethodPost, "/api/v1/internal/tenants/"+tenantID.String()+"/users/not-a-uuid/mfa-reset", sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 func TestResetMFA_InvalidTenantID(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodPost, "/api/v1/internal/tenants/not-a-uuid/users/"+uuid.New().String()+"/mfa-reset", sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 func TestResetMFA_HasRequiresMFAFails_KeycloakUnavailable(t *testing.T) {
@@ -84,7 +84,7 @@ func TestResetMFA_HasRequiresMFAFails_KeycloakUnavailable(t *testing.T) {
 		return false, domain.NewError(domain.ErrKeycloakUnavailable, "down")
 	}
 	rec := doRequest(d.engine(), http.MethodPost, mfaResetPath(tenantID, kcUserID), sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 }
 
 func TestResetMFA_ResetFails_KeycloakUnavailable(t *testing.T) {
@@ -96,5 +96,5 @@ func TestResetMFA_ResetFails_KeycloakUnavailable(t *testing.T) {
 		return domain.NewError(domain.ErrKeycloakUnavailable, "down")
 	}
 	rec := doRequest(d.engine(), http.MethodPost, mfaResetPath(tenantID, kcUserID), sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 }

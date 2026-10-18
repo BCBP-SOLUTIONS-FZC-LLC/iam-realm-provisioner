@@ -14,7 +14,7 @@ import (
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/pkg/requestctx"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/gincommon"
 	pgdomain "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 )
@@ -203,11 +203,11 @@ func TestRequireSystemOrCommercial_RejectsOtherCallers(t *testing.T) {
 		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
 	}
 	var body struct {
-		Error string `json:"error"`
+		ErrorCode string `json:"errorCode"`
 	}
 	_ = json.NewDecoder(rec.Body).Decode(&body)
-	if body.Error != "insufficient_role" {
-		t.Fatalf("expected error=insufficient_role, got %q", body.Error)
+	if body.ErrorCode != "INSUFFICIENT_ROLE" {
+		t.Fatalf("expected errorCode=INSUFFICIENT_ROLE, got %q", body.ErrorCode)
 	}
 }
 

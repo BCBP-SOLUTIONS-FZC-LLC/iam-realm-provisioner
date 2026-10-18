@@ -71,5 +71,5 @@ func TestProvisionTrial_MissingIdempotencyKey_Rejected(t *testing.T) {
 	}
 	resp, er := decodeErrorBody(t, http.MethodPost, "/api/v1/internal/tenants/provision-trial", sysHeaders(tenantID), req)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	require.Equal(t, "missing_idempotency_key", er.Error)
+	require.Equal(t, "MISSING_IDEMPOTENCY_KEY", er.ErrorCode)
 }

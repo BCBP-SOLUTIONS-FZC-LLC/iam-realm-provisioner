@@ -157,11 +157,11 @@ func decodeInto(t *testing.T, rec *httptest.ResponseRecorder, v any) {
 	}
 }
 
-func decodeError(t *testing.T, rec *httptest.ResponseRecorder) ErrorResponse {
+func decodeError(t *testing.T, rec *httptest.ResponseRecorder) ProblemResponse {
 	t.Helper()
-	var er ErrorResponse
-	decodeInto(t, rec, &er)
-	return er
+	var p ProblemResponse
+	decodeInto(t, rec, &p)
+	return p
 }
 
 func assertStatusAndCode(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int, wantCode string) {
@@ -172,8 +172,8 @@ func assertStatusAndCode(t *testing.T, rec *httptest.ResponseRecorder, wantStatu
 	if wantCode == "" {
 		return
 	}
-	er := decodeError(t, rec)
-	if er.Error != wantCode {
-		t.Fatalf("expected error code %q, got %q (body=%s)", wantCode, er.Error, rec.Body.String())
+	p := decodeError(t, rec)
+	if p.ErrorCode != wantCode {
+		t.Fatalf("expected errorCode %q, got %q (body=%s)", wantCode, p.ErrorCode, rec.Body.String())
 	}
 }

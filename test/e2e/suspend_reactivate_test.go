@@ -55,7 +55,7 @@ func TestSuspendThenReactivate(t *testing.T) {
 		withHeader(sysHeaders(tenantID), "Idempotency-Key", newIdempotencyKey()),
 		suspendBody{Reason: "should be rejected"})
 	require.Equal(t, http.StatusForbidden, resp2.StatusCode)
-	require.Equal(t, "insufficient_role", er.Error)
+	require.Equal(t, "INSUFFICIENT_ROLE", er.ErrorCode)
 
 	// ── RP-10: reactivate ────────────────────────────────────────────────
 	var reactivateResult service.ReactivateResult

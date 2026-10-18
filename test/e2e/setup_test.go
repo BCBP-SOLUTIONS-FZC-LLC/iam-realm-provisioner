@@ -53,7 +53,7 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/test/dbseed"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/outbox"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/gincommon"
 	pgmigrate "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/migrate"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 )
@@ -491,13 +491,13 @@ func doJSON(t *testing.T, method, path string, headers map[string]string, reqBod
 	return resp
 }
 
-// decodeErrorBody decodes body as httpadapter.ErrorResponse for assertions
+// decodeErrorBody decodes body as an RFC 9457 problem response for assertions
 // on the §17 error shape.
-func decodeErrorBody(t *testing.T, method, path string, headers map[string]string, reqBody any) (*http.Response, httpadapter.ErrorResponse) {
+func decodeErrorBody(t *testing.T, method, path string, headers map[string]string, reqBody any) (*http.Response, httpadapter.ProblemResponse) {
 	t.Helper()
-	var er httpadapter.ErrorResponse
-	resp := doJSON(t, method, path, headers, reqBody, &er)
-	return resp, er
+	var p httpadapter.ProblemResponse
+	resp := doJSON(t, method, path, headers, reqBody, &p)
+	return resp, p
 }
 
 func newIdempotencyKey() string { return uuid.NewString() }

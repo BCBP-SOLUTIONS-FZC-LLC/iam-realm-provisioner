@@ -83,35 +83,46 @@ RP-13 and RP-14 additionally require `RequireOperatorRole()` — `platform_opera
 
 ## Input validation
 
-Unlike a collect-all-errors service, this service is **fail-fast, single-error**: Gin's `ShouldBindJSON` stops at the first failing `binding` tag, and a bind failure is wrapped into one `400 invalid_request` response — never a field-level array. Business-rule failures (invalid enum values, allow-list misses, the §11.6 IdP checklist) are raised as a single named `domain.Error` from `internal/core/domain/errors.go`, each mapped to a frozen HTTP status via `Error.Status()`:
+All error responses are **`Content-Type: application/problem+json`** (RFC 9457 Problem Details), emitted by `platform-gincommon/v2`'s `gincommon.AbortWithProblem`. The wire shape is:
 
 ```json
 {
-  "error": "invalid_idp_protocol",
+  "type": "https://errors.company.com/realm/invalid-idp-protocol",
+  "title": "Invalid IdP Protocol",
   "status": 400,
-  "trace_id": "a3f1b2c8d4e5f60718293a4b5c6d7e8f",
-  "request_id": "01H8XYZ...",
-  "details": { "reason": "..." }
+  "detail": "protocol must be saml or oidc",
+  "instance": "/api/v1/internal/tenants/f0e1d2c3-.../idp",
+  "traceId": "a3f1b2c8d4e5f60718293a4b5c6d7e8f",
+  "errorCode": "INVALID_IDP_PROTOCOL",
+  "tenantId": "f0e1d2c3-...",
+  "timestamp": "2026-10-18T10:45:22Z"
 }
 ```
 
-`internal/adapter/inbound/http/errors.go`'s `HandleError` does the mapping; anything not a `*domain.Error` falls back to `500 internal_error` and is logged so no error path is silent.
+**Two distinct 400 shapes:**
+
+| Trigger | `errorCode` | Extra field |
+|---|---|---|
+| Struct binding validation (missing required field, invalid email format, malformed JSON body) | `VALIDATION_FAILED` | `validationErrors: [{field, message}]` per invalid field |
+| Business-rule validation (invalid protocol, invalid slug, unknown plan, invalid path UUID) | `INVALID_REQUEST` / named code | none |
+
+The mapping lives in `internal/adapter/inbound/http/errors.go` (`domainErrToProblem`): every `*domain.Error` maps via `domainCodeTypes` to a registered `problem.Type`; leaked `pgconn` errors are classified before the `500 INTERNAL_ERROR` fallback so they never surface as unclassified 500s. No error path is silent.
 
 ### Notable validation rules
 
-| Field | Rule (as implemented) | Error / code |
+| Field | Rule (as implemented) | `errorCode` |
 |---|---|---|
-| `tenant_id` | `binding:"required"`, parsed as `uuid.UUID` — a malformed UUID fails Gin binding | `400 invalid_request` |
-| `tenant_name` | `binding:"required"` (string, no further format check in this repo) | `400 invalid_request` |
-| `tenant_slug` | `binding:"required"` — no server-side charset/length validator exists in this codebase; an invalid Keycloak realm name is rejected by Keycloak itself at `CreateRealmFromTemplate` | `400 invalid_request` (missing) / `502 keycloak_unavailable` (Keycloak rejects the name) |
-| `admin_email` | `binding:"required,email"` (Gin/go-playground validator's `email` tag) | `400 invalid_request` |
-| `plan` | `binding:"required"` (string, no enum check in this repo) | `400 invalid_request` |
-| `reason` | `binding:"required"` on RP-14 (`suspendRequest`) only; optional/free-text elsewhere (RP-4 `revertConversionRequest`, RP-10 `reactivateRequest`) | `400 invalid_request` (RP-14 only) |
-| `idp_alias` (RP-6 body / RP-7 path param) | `binding:"required"` at the HTTP layer, then `IdpService` enforces `^[a-zA-Z0-9_-]{1,64}$` before any OpenBao/Keycloak call — no dot permitted at all, closing a path-traversal risk since `openbao.Client.idpPath` interpolates this value directly into the KV path | `400 invalid_request` |
-| `protocol` | `binding:"required"`; must be `saml` or `oidc` (`domain.IdpProtocol`), checked in `IdpService` | `400 invalid_request` (missing) / `400 invalid_idp_protocol` (bad value) |
-| `setting_key` | Checked against `domain.IsAllowedSettingKey` — an exact match in `AllowedRealmSettingKeys` (`local_accounts_enabled`) or an `idp:<alias>` federation-toggle prefix | `400 unsupported_realm_setting` |
-| `Idempotency-Key` (header) | Non-empty, ≤ 256 chars, enforced by `RequireIdempotencyKey` on every route so marked above | `400 missing_idempotency_key` |
-| `Content-Type` (header) | Must be `application/json` on a non-empty POST/PUT/PATCH body, enforced by `RequireJSONContentType` | `415 unsupported_media_type` |
+| `tenant_id` | `binding:"required"`, parsed as `uuid.UUID` — a malformed UUID fails Gin binding | `VALIDATION_FAILED` (binding) |
+| `tenant_name` | `binding:"required"` (string, no further format check in this repo) | `VALIDATION_FAILED` (binding) |
+| `tenant_slug` | `binding:"required"`, then `validTenantSlug` rejects `/`, whitespace, or control chars — no Keycloak-side charset limit is enforced here | `VALIDATION_FAILED` (missing) / `INVALID_REQUEST` (unsafe chars) / `KEYCLOAK_UNAVAILABLE` (Keycloak rejects the name) |
+| `admin_email` | `binding:"required,email"` (Gin/go-playground validator's `email` tag) | `VALIDATION_FAILED` |
+| `plan` | `binding:"required"` (string); additionally allow-listed (`starter`\|`pro`\|`enterprise`) on RP-2 | `VALIDATION_FAILED` (missing) / `INVALID_REQUEST` (unknown value) |
+| `reason` | `binding:"required"` on RP-14 (`suspendRequest`) only; optional/free-text elsewhere (RP-4, RP-10) | `VALIDATION_FAILED` (RP-14 only) |
+| `idp_alias` (RP-6 body / RP-7 path param) | `binding:"required"` at the HTTP layer, then `IdpService` enforces `^[a-zA-Z0-9_-]{1,64}$` before any OpenBao/Keycloak call — no dot permitted, closing a path-traversal risk | `VALIDATION_FAILED` (missing) / `INVALID_REQUEST` (bad format) |
+| `protocol` | `binding:"required"`; must be `saml` or `oidc` (`domain.IdpProtocol`), checked in the handler | `VALIDATION_FAILED` (missing) / `INVALID_IDP_PROTOCOL` (bad value) |
+| `setting_key` | Checked against `domain.IsAllowedSettingKey` — an exact match in `AllowedRealmSettingKeys` (`local_accounts_enabled`) or an `idp:<alias>` federation-toggle prefix | `UNSUPPORTED_REALM_SETTING` |
+| `Idempotency-Key` (header) | Non-empty, ≤ 256 chars, enforced by `RequireIdempotencyKey` on every route so marked above | `MISSING_IDEMPOTENCY_KEY` |
+| `Content-Type` (header) | Must be `application/json` on a non-empty POST/PUT/PATCH body, enforced by `RequireJSONContentType` | `UNSUPPORTED_MEDIA_TYPE` |
 
 The §11.6 Region-Agnostic IdP Configuration Checklist (`internal/core/service/idp_validator.go`) is a separate, business-level validation pass on RP-6: CRITICAL checks (region-pinned SSO/SLO URLs, missing signing cert, non-neutral ACS/issuer/redirect/audience) **block** with `400 idp_region_portability_failed`; WARN checks (weak `NameIDFormat`, region-bearing attribute-mapper URNs, a signature algorithm below `RSA-SHA256`, missing OIDC PKCE `S256`) require a recorded acknowledgement or return `422 idp_warnings_unacknowledged`. Every run — pass or fail — is recorded in the append-only `keycloak_idp_config_validations` table.
 
@@ -197,9 +208,9 @@ RLS-6 (no non-`SET LOCAL` write to `app.tenant_id`) is checked separately, inlin
 
 | Library | Version | Purpose |
 |---|---|---|
-| `platform-gincommon` | v1.6.0 | HTTP middleware (incl. `RequestTimeout`), Zap logging, OTel tracing (`InitTracingWithConfig`, `NewSpanTracer`), Prometheus metrics (`MetricsHandler`, Observability Standard identity) |
+| `platform-gincommon/v2` | v2.0.0 | HTTP middleware (incl. `RequestTimeout`), RFC 9457 Problem Details (`pkg/problem`, `gincommon.AbortWithProblem`), Zap logging, OTel tracing (`InitTracingWithConfig`, `NewSpanTracer`), Prometheus metrics (`MetricsHandler`, Observability Standard identity) |
 | `platform-events/v2` | v2.1.0 | Transactional outbox (`eventcfg.LoadOutbox`), SNS publisher, SQS consumers (`eventcfg.LoadSQS`, DLQ forwarding), `pkg/inbox` dedup |
-| `platform-pgcommon/v2` | v2.0.1 | pgx/v5 pool, RLS GUC injection, per-tx statement timeout, migrations, error classifiers (`IsConnectionException`/`IsInsufficientResources`/`IsOperatorIntervention`/`IsSystemError`/`IsPoolClosed`) |
+| `platform-pgcommon/v2` | v2.0.2 | pgx/v5 pool, RLS GUC injection, per-tx statement timeout, migrations, error classifiers (`IsConnectionException`/`IsInsufficientResources`/`IsOperatorIntervention`/`IsSystemError`/`IsPoolClosed`) |
 | `Nerzal/gocloak/v13` | v13.9.0 | Keycloak Admin API client — used **only** inside `internal/adapter/outbound/keycloak/` (RP-INV-1) |
 
 ---
@@ -296,37 +307,41 @@ This service publishes to **`iam-tenant-events`** via a transactional outbox —
 
 ### 8. Handling errors
 
-Every non-2xx response is the flat `ErrorResponse` shape (`internal/adapter/inbound/http/errors.go`) — `{error, status, trace_id, request_id, details?}`. There is no separate field-level validation-error shape; a bind failure is `400 invalid_request` with the same flat envelope.
+Every non-2xx response is **`Content-Type: application/problem+json`** (RFC 9457). Branch on `status` and `errorCode` — never on `title` or `detail` (those are human-readable and may change). Use `platform-gincommon/v2/pkg/problem`'s `FromResponse` to parse:
 
 ```go
-var errResp struct {
-    Error     string         `json:"error"`
-    Status    int            `json:"status"`
-    TraceID   string         `json:"trace_id"`
-    RequestID string         `json:"request_id"`
-    Details   map[string]any `json:"details"`
+import "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/problem"
+
+resp, err := http.DefaultClient.Do(req)
+if resp.StatusCode >= 400 {
+    p, _ := problem.FromResponse(resp)
+    // p.ErrorCode — branch on this (e.g. "TENANT_REALM_NOT_FOUND")
+    // p.TraceID   — links to the distributed trace
+    // p.Status    — HTTP status code
+    // p.ValidationErrors — []FieldError{Field, Message} on VALIDATION_FAILED
 }
-_ = json.NewDecoder(resp.Body).Decode(&errResp)
-// errResp.TraceID links to the distributed trace
 ```
 
-| Code | Status | Trigger |
+| `errorCode` | Status | Trigger |
 |---|---|---|
-| `invalid_request` | 400 | Malformed JSON / failed binding validation (additive, not in the frozen §17 list) |
-| `invalid_realm_strategy` / `invalid_idp_protocol` / `unsupported_realm_setting` / `missing_idempotency_key` | 400 | Named business-rule failure |
-| `idp_region_portability_failed` | 400 | RP-6 — one or more §11.6 CRITICAL checks failed |
-| `idp_warnings_unacknowledged` | 422 | RP-6 — WARN check(s) lack a recorded acknowledgement |
-| `tenant_realm_not_found` / `idp_config_not_found` | 404 | Resource missing (RP-15/RP-16 treat a missing Keycloak user as **204**, not 404) |
-| `keycloak_user_not_found` | 404 | Additive — internal-only signal from `FindUserByEmail`, absorbed before reaching a caller (§9.2) |
-| `idp_requires_dedicated_realm` / `realm_already_dedicated` / `revert_window_expired` / `tenant_offboarded` / `operation_in_progress` / `optimistic_lock_conflict` | 409 | State-machine / idempotency conflict — `optimistic_lock_conflict` also surfaces from Token Service TS-1's disambiguated 409 (§2.5) |
-| `user_email_conflict` | 409 | Additive — RP-1/RP-2/RP-5 create-user 409 that couldn't be resolved as the caller's own lost-response retry (§9.2) |
-| `service_account_rotation_in_flight` | 409 | Additive — Token Service TS-1 rejected a concurrent issue/rotate for the same `platform-automation` principal (§2.5); also the safe default for any other/unparseable TS-1 409 body |
-| `credential_replay_revoked` | 409 | Additive — Token Service TS-1 (TS-D13) rejected a replayed `rotation_id` whose credential has since been revoked — distinct from `service_account_rotation_in_flight` so callers can tell a live rotation race from a stale `rotation_id` |
-| `service_account_not_provisioned` | 422 | Additive — RP-17 called before the tenant's `platform-automation` principal was ever minted |
-| `keycloak_unavailable` / `conversion_failed` | 502 | Keycloak transport failure or partial-migration failure — retryable, no local commit |
-| `tenant_mismatch` | 403 | The request's tenant (`/tenants/:id` or the provision body's `tenant_id`) is not the caller's `x-tenant-id` — rejected before any Keycloak call |
-| `request_timeout` | 503 | Postgres statement or lock timeout — retry with the same `Idempotency-Key` |
-| `org_membership_unavailable` / `object_store_unavailable` / `db_unavailable` / `token_service_unavailable` | 503 | O&M I-8 check, S3 export, Postgres, or Token Service (§2.5) unreachable |
+| `VALIDATION_FAILED` | 400 | Struct-binding failure (missing required field, invalid email, malformed JSON) — includes `validationErrors[]` with per-field detail |
+| `INVALID_REQUEST` | 400 | Malformed path UUID / unsafe tenant slug / generic bad-request (business-rule, additive) |
+| `INVALID_REALM_STRATEGY` / `INVALID_IDP_PROTOCOL` / `UNSUPPORTED_REALM_SETTING` / `MISSING_IDEMPOTENCY_KEY` | 400 | Named business-rule failure |
+| `IDP_REGION_PORTABILITY_FAILED` | 400 | RP-6 — one or more §11.6 CRITICAL checks failed |
+| `IDP_WARNINGS_UNACKNOWLEDGED` | 422 | RP-6 — WARN check(s) lack a recorded acknowledgement |
+| `TENANT_REALM_NOT_FOUND` / `IDP_CONFIG_NOT_FOUND` | 404 | Resource missing (RP-15/RP-16 treat a missing Keycloak user as **204**, not 404) |
+| `KEYCLOAK_USER_NOT_FOUND` | 404 | Internal signal from `FindUserByEmail`, absorbed before reaching a caller (§9.2) |
+| `IDP_REQUIRES_DEDICATED_REALM` / `REALM_ALREADY_DEDICATED` / `REVERT_WINDOW_EXPIRED` / `TENANT_OFFBOARDED` / `OPERATION_IN_PROGRESS` / `OPTIMISTIC_LOCK_CONFLICT` | 409 | State-machine / idempotency conflict |
+| `USER_EMAIL_CONFLICT` | 409 | RP-1/RP-2/RP-5 create-user 409 that couldn't be resolved as the caller's own lost-response retry (§9.2) |
+| `SERVICE_ACCOUNT_ROTATION_IN_FLIGHT` | 409 | Token Service TS-1 rejected a concurrent issue/rotate for the same `platform-automation` principal (§2.5); also the safe default for any unparseable TS-1 409 body |
+| `CREDENTIAL_REPLAY_REVOKED` | 409 | Token Service TS-1 (TS-D13) — replayed `rotation_id` whose credential has since been revoked |
+| `CREDENTIAL_REPLAY_EXPIRED` | 409 | Token Service TS-1 (TS-D22) — replayed `rotation_id` past `ROTATION_REPLAY_WINDOW` |
+| `SERVICE_ACCOUNT_NOT_PROVISIONED` | 422 | RP-17 called before the tenant's `platform-automation` principal was ever minted |
+| `KEYCLOAK_UNAVAILABLE` / `CONVERSION_FAILED` | 502 | Keycloak transport failure or partial-migration failure — retryable, no local commit |
+| `TENANT_MISMATCH` | 403 | The request's tenant (`/tenants/:id` or the provision body's `tenant_id`) does not match `x-tenant-id` — rejected before any Keycloak call |
+| `INSUFFICIENT_ROLE` | 403 | Caller lacks the required role (`iam-system`, `commercial-system`, or `platform_operator`) |
+| `REQUEST_TIMEOUT` | 503 | Postgres statement or lock timeout — retry with the same `Idempotency-Key` |
+| `ORG_MEMBERSHIP_UNAVAILABLE` / `OBJECT_STORE_UNAVAILABLE` / `DB_UNAVAILABLE` / `TOKEN_SERVICE_UNAVAILABLE` | 503 | O&M I-8 check, S3 export, Postgres, or Token Service (§2.5) unreachable |
 
 ### 9. Optimistic locking
 

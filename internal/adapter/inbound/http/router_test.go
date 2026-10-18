@@ -276,5 +276,5 @@ func TestRequireSystemRole_GatesInternalRoutes(t *testing.T) {
 	headers := sysHeaders()
 	headers["x-tenant-roles"] = "some-other-role"
 	rec := doRequest(r, http.MethodGet, "/api/v1/internal/tenants/"+"11111111-1111-1111-1111-111111111111"+"/realm", headers, "")
-	assertStatusAndCode(t, rec, http.StatusForbidden, "insufficient_role")
+	assertStatusAndCode(t, rec, http.StatusForbidden, "INSUFFICIENT_ROLE")
 }

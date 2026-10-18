@@ -42,13 +42,13 @@ func TestRefreshServiceAccountKeys_Happy(t *testing.T) {
 func TestRefreshServiceAccountKeys_InvalidTenantIDInPath(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequestJSON(t, d.engine(), http.MethodPost, "/api/v1/internal/tenants/not-a-uuid/service-account/keys/refresh", sysHeaders(), nil)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 func TestRefreshServiceAccountKeys_TenantRealmNotFound(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequestJSON(t, d.engine(), http.MethodPost, refreshKeysPath(uuid.New()), sysHeaders(), nil)
-	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
+	assertStatusAndCode(t, rec, http.StatusNotFound, "TENANT_REALM_NOT_FOUND")
 }
 
 func TestRefreshServiceAccountKeys_NeverMinted(t *testing.T) {
@@ -57,7 +57,7 @@ func TestRefreshServiceAccountKeys_NeverMinted(t *testing.T) {
 	d.putRealm(sharedRealm(tenantID))
 
 	rec := doRequestJSON(t, d.engine(), http.MethodPost, refreshKeysPath(tenantID), sysHeaders(), nil)
-	assertStatusAndCode(t, rec, http.StatusUnprocessableEntity, "service_account_not_provisioned")
+	assertStatusAndCode(t, rec, http.StatusUnprocessableEntity, "SERVICE_ACCOUNT_NOT_PROVISIONED")
 }
 
 func TestRefreshServiceAccountKeys_KeycloakUnavailable(t *testing.T) {
@@ -72,5 +72,5 @@ func TestRefreshServiceAccountKeys_KeycloakUnavailable(t *testing.T) {
 	}
 
 	rec := doRequestJSON(t, d.engine(), http.MethodPost, refreshKeysPath(tenantID), sysHeaders(), nil)
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 }

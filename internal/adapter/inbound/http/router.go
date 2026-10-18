@@ -16,7 +16,8 @@ import (
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/gincommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/problem"
 )
 
 // Pinger is satisfied by any dependency /readyz must check.
@@ -62,8 +63,6 @@ func (r *Router) Handler() http.Handler { return r.engine }
 // unauthenticated infra probes, the docs surface, and the mesh-only
 // /api/v1/internal/* provisioning API (RP-1..RP-17).
 func NewRouter(cfg RouterConfig) *Router {
-	errorLogger = cfg.GinConfig.Logger
-
 	r := gin.New()
 	r.HandleMethodNotAllowed = true
 
@@ -190,7 +189,7 @@ func registerDocsRoutes(r *gin.Engine, cfg RouterConfig) {
 			// mismatch, so no separate length check is needed first.
 			got := []byte(c.GetHeader("Authorization"))
 			if subtle.ConstantTimeCompare(got, expected) != 1 {
-				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+				gincommon.AbortWithProblem(c, problem.NewUnauthorizedError("invalid or missing Authorization header"))
 				return
 			}
 			c.Next()

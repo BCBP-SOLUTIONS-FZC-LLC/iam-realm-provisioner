@@ -92,14 +92,14 @@ func TestReactivate_TenantOffboarded(t *testing.T) {
 	d.putRealm(offboardedRealm(tenantID))
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "react-4")
 	rec := doRequest(d.engine(), http.MethodPost, reactivatePath(tenantID), headers, "")
-	assertStatusAndCode(t, rec, http.StatusConflict, "tenant_offboarded")
+	assertStatusAndCode(t, rec, http.StatusConflict, "TENANT_OFFBOARDED")
 }
 
 func TestReactivate_TenantRealmNotFound(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "react-5")
 	rec := doRequest(d.engine(), http.MethodPost, reactivatePath(uuid.New()), headers, "")
-	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
+	assertStatusAndCode(t, rec, http.StatusNotFound, "TENANT_REALM_NOT_FOUND")
 }
 
 func TestReactivate_KeycloakUnavailable(t *testing.T) {
@@ -113,7 +113,7 @@ func TestReactivate_KeycloakUnavailable(t *testing.T) {
 	}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "react-6")
 	rec := doRequest(d.engine(), http.MethodPost, reactivatePath(tenantID), headers, "")
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 }
 
 func TestReactivate_OptimisticLockConflict(t *testing.T) {
@@ -128,7 +128,7 @@ func TestReactivate_OptimisticLockConflict(t *testing.T) {
 	}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "react-7")
 	rec := doRequest(d.engine(), http.MethodPost, reactivatePath(tenantID), headers, "")
-	assertStatusAndCode(t, rec, http.StatusConflict, "optimistic_lock_conflict")
+	assertStatusAndCode(t, rec, http.StatusConflict, "OPTIMISTIC_LOCK_CONFLICT")
 }
 
 func TestReactivate_OperationInProgress(t *testing.T) {
@@ -137,20 +137,20 @@ func TestReactivate_OperationInProgress(t *testing.T) {
 	d.idempotency.rows["react-8"] = &domain.ProvisioningOperation{IdempotencyKey: "react-8", TenantID: tenantID, Status: domain.OpStatusInProgress}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "react-8")
 	rec := doRequest(d.engine(), http.MethodPost, reactivatePath(tenantID), headers, "")
-	assertStatusAndCode(t, rec, http.StatusConflict, "operation_in_progress")
+	assertStatusAndCode(t, rec, http.StatusConflict, "OPERATION_IN_PROGRESS")
 }
 
 func TestReactivate_MissingIdempotencyKey(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodPost, reactivatePath(uuid.New()), sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "missing_idempotency_key")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY")
 }
 
 func TestReactivate_InvalidTenantIDInPath(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "react-9")
 	rec := doRequest(d.engine(), http.MethodPost, "/api/v1/internal/tenants/not-a-uuid/reactivate", headers, "")
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 // ── RP-11: get realm (read-only) ─────────────────────────────────────────
@@ -176,13 +176,13 @@ func TestGetRealm_Happy(t *testing.T) {
 func TestGetRealm_TenantRealmNotFound(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodGet, realmGetPath(uuid.New()), sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
+	assertStatusAndCode(t, rec, http.StatusNotFound, "TENANT_REALM_NOT_FOUND")
 }
 
 func TestGetRealm_InvalidTenantID(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodGet, "/api/v1/internal/tenants/not-a-uuid/realm", sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 // CD-20: dedicated tenant with active IdPs returns idp_count in the body.
@@ -273,7 +273,7 @@ func TestGetRealm_IdpRepoError_Returns503(t *testing.T) {
 	}
 
 	rec := doRequest(d.engine(), http.MethodGet, realmGetPath(tenantID), sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusServiceUnavailable, "db_unavailable")
+	assertStatusAndCode(t, rec, http.StatusServiceUnavailable, "DB_UNAVAILABLE")
 }
 
 // ── CD-19: RP-11 commercial-system allow-list ─────────────────────────────
@@ -303,7 +303,7 @@ func TestReactivate_CommercialSystem_403(t *testing.T) {
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
 	headers := withHeader(commercialHeaders(), "Idempotency-Key", "cd19-test-1")
 	rec := doRequest(d.engine(), http.MethodPost, reactivatePath(tenantID), headers, "")
-	assertStatusAndCode(t, rec, http.StatusForbidden, "insufficient_role")
+	assertStatusAndCode(t, rec, http.StatusForbidden, "INSUFFICIENT_ROLE")
 }
 
 // Contract test: route must be exactly /api/v1/internal/tenants/{id}/realm
@@ -350,14 +350,14 @@ func TestExpireTrial_DedicatedStrategy_RealmAlreadyDedicated(t *testing.T) {
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "expire-2")
 	rec := doRequest(d.engine(), http.MethodPost, expireTrialPath(tenantID), headers, "")
-	assertStatusAndCode(t, rec, http.StatusConflict, "realm_already_dedicated")
+	assertStatusAndCode(t, rec, http.StatusConflict, "REALM_ALREADY_DEDICATED")
 }
 
 func TestExpireTrial_TenantRealmNotFound(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "expire-3")
 	rec := doRequest(d.engine(), http.MethodPost, expireTrialPath(uuid.New()), headers, "")
-	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
+	assertStatusAndCode(t, rec, http.StatusNotFound, "TENANT_REALM_NOT_FOUND")
 }
 
 func TestExpireTrial_KeycloakUnavailable(t *testing.T) {
@@ -369,7 +369,7 @@ func TestExpireTrial_KeycloakUnavailable(t *testing.T) {
 	}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "expire-4")
 	rec := doRequest(d.engine(), http.MethodPost, expireTrialPath(tenantID), headers, "")
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 }
 
 func TestExpireTrial_OperationInProgress(t *testing.T) {
@@ -378,7 +378,7 @@ func TestExpireTrial_OperationInProgress(t *testing.T) {
 	d.idempotency.rows["expire-5"] = &domain.ProvisioningOperation{IdempotencyKey: "expire-5", TenantID: tenantID, Status: domain.OpStatusInProgress}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "expire-5")
 	rec := doRequest(d.engine(), http.MethodPost, expireTrialPath(tenantID), headers, "")
-	assertStatusAndCode(t, rec, http.StatusConflict, "operation_in_progress")
+	assertStatusAndCode(t, rec, http.StatusConflict, "OPERATION_IN_PROGRESS")
 }
 
 // TestExpireTrial_FailedIdempotencyKey_IsRetried pins the fix for a real bug:
@@ -395,20 +395,20 @@ func TestExpireTrial_FailedIdempotencyKey_IsRetried(t *testing.T) {
 	d.idempotency.rows["expire-5"] = &domain.ProvisioningOperation{IdempotencyKey: "expire-5", TenantID: tenantID, Status: domain.OpStatusFailed}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "expire-5")
 	rec := doRequest(d.engine(), http.MethodPost, expireTrialPath(tenantID), headers, "")
-	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
+	assertStatusAndCode(t, rec, http.StatusNotFound, "TENANT_REALM_NOT_FOUND")
 }
 
 func TestExpireTrial_MissingIdempotencyKey(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodPost, expireTrialPath(uuid.New()), sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "missing_idempotency_key")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY")
 }
 
 func TestExpireTrial_InvalidTenantIDInPath(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "expire-6")
 	rec := doRequest(d.engine(), http.MethodPost, "/api/v1/internal/tenants/not-a-uuid/expire-trial", headers, "")
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 // ── RP-14: emergency operator suspension ─────────────────────────────────
@@ -478,14 +478,14 @@ func TestSuspend_TenantOffboarded(t *testing.T) {
 	d.putRealm(offboardedRealm(tenantID))
 	headers := withHeader(operatorHeaders(), "Idempotency-Key", "suspend-4")
 	rec := doRequest(d.engine(), http.MethodPost, suspendPath(tenantID), headers, `{"reason":"noop"}`)
-	assertStatusAndCode(t, rec, http.StatusConflict, "tenant_offboarded")
+	assertStatusAndCode(t, rec, http.StatusConflict, "TENANT_OFFBOARDED")
 }
 
 func TestSuspend_TenantRealmNotFound(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(operatorHeaders(), "Idempotency-Key", "suspend-5")
 	rec := doRequest(d.engine(), http.MethodPost, suspendPath(uuid.New()), headers, `{"reason":"noop"}`)
-	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
+	assertStatusAndCode(t, rec, http.StatusNotFound, "TENANT_REALM_NOT_FOUND")
 }
 
 func TestSuspend_InvalidRequest_MissingReason(t *testing.T) {
@@ -494,7 +494,8 @@ func TestSuspend_InvalidRequest_MissingReason(t *testing.T) {
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
 	headers := withHeader(operatorHeaders(), "Idempotency-Key", "suspend-6")
 	rec := doRequest(d.engine(), http.MethodPost, suspendPath(tenantID), headers, `{}`)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	// Missing required reason field → gincommon.ShouldBindJSON → VALIDATION_FAILED per RFC 9457.
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "VALIDATION_FAILED")
 }
 
 func TestSuspend_KeycloakUnavailable(t *testing.T) {
@@ -506,7 +507,7 @@ func TestSuspend_KeycloakUnavailable(t *testing.T) {
 	}
 	headers := withHeader(operatorHeaders(), "Idempotency-Key", "suspend-7")
 	rec := doRequest(d.engine(), http.MethodPost, suspendPath(tenantID), headers, `{"reason":"down"}`)
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 }
 
 func TestSuspend_OperationInProgress(t *testing.T) {
@@ -515,7 +516,7 @@ func TestSuspend_OperationInProgress(t *testing.T) {
 	d.idempotency.rows["suspend-8"] = &domain.ProvisioningOperation{IdempotencyKey: "suspend-8", TenantID: tenantID, Status: domain.OpStatusInProgress}
 	headers := withHeader(operatorHeaders(), "Idempotency-Key", "suspend-8")
 	rec := doRequest(d.engine(), http.MethodPost, suspendPath(tenantID), headers, `{"reason":"noop"}`)
-	assertStatusAndCode(t, rec, http.StatusConflict, "operation_in_progress")
+	assertStatusAndCode(t, rec, http.StatusConflict, "OPERATION_IN_PROGRESS")
 }
 
 func TestSuspend_MissingIdempotencyKeyCheckedBeforeOperatorRole(t *testing.T) {
@@ -524,7 +525,7 @@ func TestSuspend_MissingIdempotencyKeyCheckedBeforeOperatorRole(t *testing.T) {
 	// gating and before any dependency is touched.
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodPost, suspendPath(uuid.New()), operatorHeaders(), `{"reason":"noop"}`)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "missing_idempotency_key")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY")
 }
 
 func TestSuspend_RequiresOperatorRole(t *testing.T) {
@@ -534,14 +535,14 @@ func TestSuspend_RequiresOperatorRole(t *testing.T) {
 	// DisableRealmFn/DisableUsersInRealmFn left nil — a bypass would panic.
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "suspend-9") // iam-system only, no platform_operator
 	rec := doRequest(d.engine(), http.MethodPost, suspendPath(tenantID), headers, `{"reason":"noop"}`)
-	assertStatusAndCode(t, rec, http.StatusForbidden, "insufficient_role")
+	assertStatusAndCode(t, rec, http.StatusForbidden, "INSUFFICIENT_ROLE")
 }
 
 func TestSuspend_InvalidTenantIDInPath(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(operatorHeaders(), "Idempotency-Key", "suspend-10")
 	rec := doRequest(d.engine(), http.MethodPost, "/api/v1/internal/tenants/not-a-uuid/suspend", headers, `{"reason":"noop"}`)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 // CD-22: Seat overage never suspends a tenant via RP (TL decision 2026-10-15).
@@ -554,7 +555,7 @@ func TestSuspend_CommercialSystem_403(t *testing.T) {
 	// commercial-system has no platform_operator role → RequireOperatorRole rejects.
 	headers := withHeader(commercialHeaders(), "Idempotency-Key", "cd22-suspend-1")
 	rec := doRequest(d.engine(), http.MethodPost, suspendPath(tenantID), headers, `{"reason":"seat overage"}`)
-	assertStatusAndCode(t, rec, http.StatusForbidden, "insufficient_role")
+	assertStatusAndCode(t, rec, http.StatusForbidden, "INSUFFICIENT_ROLE")
 }
 
 // ── RP-15: delete user (idempotent) ──────────────────────────────────────
@@ -573,7 +574,7 @@ func TestDeleteUser_Happy(t *testing.T) {
 func TestDeleteUser_TenantRealmNotFound(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodDelete, deleteUserPath(uuid.New(), uuid.New()), sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
+	assertStatusAndCode(t, rec, http.StatusNotFound, "TENANT_REALM_NOT_FOUND")
 }
 
 func TestDeleteUser_InvalidKeycloakUserID(t *testing.T) {
@@ -581,7 +582,7 @@ func TestDeleteUser_InvalidKeycloakUserID(t *testing.T) {
 	tenantID := uuid.New()
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
 	rec := doRequest(d.engine(), http.MethodDelete, "/api/v1/internal/tenants/"+tenantID.String()+"/users/not-a-uuid", sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 func TestDeleteUser_KeycloakUnavailable(t *testing.T) {
@@ -592,13 +593,13 @@ func TestDeleteUser_KeycloakUnavailable(t *testing.T) {
 		return domain.NewError(domain.ErrKeycloakUnavailable, "down")
 	}
 	rec := doRequest(d.engine(), http.MethodDelete, deleteUserPath(tenantID, kcUserID), sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 }
 
 func TestDeleteUser_InvalidTenantIDInPath(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodDelete, "/api/v1/internal/tenants/not-a-uuid/users/"+uuid.New().String(), sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 // ── RP-16: revoke sessions (idempotent, best-effort/fail-open) ──────────
@@ -617,7 +618,7 @@ func TestRevokeSessions_Happy(t *testing.T) {
 func TestRevokeSessions_TenantRealmNotFound(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodPost, revokeSessionsPath(uuid.New(), uuid.New()), sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
+	assertStatusAndCode(t, rec, http.StatusNotFound, "TENANT_REALM_NOT_FOUND")
 }
 
 func TestRevokeSessions_InvalidKeycloakUserID(t *testing.T) {
@@ -625,7 +626,7 @@ func TestRevokeSessions_InvalidKeycloakUserID(t *testing.T) {
 	tenantID := uuid.New()
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
 	rec := doRequest(d.engine(), http.MethodPost, "/api/v1/internal/tenants/"+tenantID.String()+"/users/not-a-uuid/revoke-sessions", sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 func TestRevokeSessions_KeycloakUnavailable(t *testing.T) {
@@ -636,11 +637,11 @@ func TestRevokeSessions_KeycloakUnavailable(t *testing.T) {
 		return domain.NewError(domain.ErrKeycloakUnavailable, "down")
 	}
 	rec := doRequest(d.engine(), http.MethodPost, revokeSessionsPath(tenantID, kcUserID), sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 }
 
 func TestRevokeSessions_InvalidTenantIDInPath(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodPost, "/api/v1/internal/tenants/not-a-uuid/users/"+uuid.New().String()+"/revoke-sessions", sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }

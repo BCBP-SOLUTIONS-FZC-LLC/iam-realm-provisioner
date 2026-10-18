@@ -5,7 +5,8 @@ import (
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/pkg/requestctx"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/gincommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/problem"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -77,9 +78,7 @@ func GUCBridgeMiddleware() gin.HandlerFunc {
 			UserAgent:   c.Request.Header.Get("User-Agent"),
 		})
 		if errMsg != "" {
-			er := newErrorResponse(c, "missing_identity_headers", map[string]any{"reason": errMsg})
-			er.Status = http.StatusUnauthorized
-			c.AbortWithStatusJSON(http.StatusUnauthorized, er)
+			gincommon.AbortWithProblem(c, problem.NewError(realmMissingIdentityHeaders, errMsg))
 			return
 		}
 		ctx := requestctx.WithContext(c.Request.Context(), rc)
@@ -110,9 +109,7 @@ func RequireJSONContentType() gin.HandlerFunc {
 			return
 		}
 		if c.ContentType() != "application/json" {
-			er := newErrorResponse(c, "unsupported_media_type", nil)
-			er.Status = http.StatusUnsupportedMediaType
-			c.AbortWithStatusJSON(http.StatusUnsupportedMediaType, er)
+			gincommon.AbortWithProblem(c, problem.NewError(problem.TypeUnsupportedMediaType, "request Content-Type must be application/json"))
 			return
 		}
 		c.Next()
@@ -127,9 +124,7 @@ func RequireSystemRole() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rc, ok := requestctx.FromContext(c.Request.Context())
 		if !ok || !rc.IsSystem() {
-			er := newErrorResponse(c, "insufficient_role", map[string]any{"reason": "internal route requires iam-system role"})
-			er.Status = http.StatusForbidden
-			c.AbortWithStatusJSON(http.StatusForbidden, er)
+			gincommon.AbortWithProblem(c, problem.NewError(realmInsufficientRole, "internal route requires iam-system role"))
 			return
 		}
 		c.Next()
@@ -151,11 +146,7 @@ func RequireSystemOrCommercial() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rc, ok := requestctx.FromContext(c.Request.Context())
 		if !ok || (!rc.IsSystem() && !rc.IsCommercial()) {
-			er := newErrorResponse(c, "insufficient_role", map[string]any{
-				"reason": "route requires iam-system or commercial-system role (CD-19 allow-list: RP-3, RP-4, RP-11)",
-			})
-			er.Status = http.StatusForbidden
-			c.AbortWithStatusJSON(http.StatusForbidden, er)
+			gincommon.AbortWithProblem(c, problem.NewError(realmInsufficientRole, "route requires iam-system or commercial-system role (CD-19 allow-list: RP-3, RP-4, RP-11)"))
 			return
 		}
 		c.Next()
@@ -193,9 +184,7 @@ func tenantMatchesCaller(c *gin.Context, tenantID uuid.UUID) bool {
 	if ok && rc.TenantID == tenantID {
 		return true
 	}
-	er := newErrorResponse(c, "tenant_mismatch", map[string]any{"reason": "the request's tenant must match x-tenant-id (RLS-5)"})
-	er.Status = http.StatusForbidden
-	c.AbortWithStatusJSON(http.StatusForbidden, er)
+	gincommon.AbortWithProblem(c, problem.NewError(realmTenantMismatch, "the request's tenant must match x-tenant-id (RLS-5)"))
 	return false
 }
 
@@ -205,9 +194,7 @@ func RequireOperatorRole() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rc, ok := requestctx.FromContext(c.Request.Context())
 		if !ok || !rc.IsOperator() {
-			er := newErrorResponse(c, "insufficient_role", map[string]any{"reason": "operator route requires platform_operator role"})
-			er.Status = http.StatusForbidden
-			c.AbortWithStatusJSON(http.StatusForbidden, er)
+			gincommon.AbortWithProblem(c, problem.NewError(realmInsufficientRole, "operator route requires platform_operator role"))
 			return
 		}
 		c.Next()
@@ -220,9 +207,7 @@ func RequireIdempotencyKey() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		key := c.GetHeader("Idempotency-Key")
 		if key == "" || len(key) > 256 {
-			er := newErrorResponse(c, "missing_idempotency_key", nil)
-			er.Status = http.StatusBadRequest
-			c.AbortWithStatusJSON(http.StatusBadRequest, er)
+			gincommon.AbortWithProblem(c, problem.NewError(realmMissingIdempotencyKey, "Idempotency-Key header is missing or exceeds 256 characters"))
 			return
 		}
 		c.Next()

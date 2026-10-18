@@ -55,14 +55,15 @@ func TestProvisionTrial_Happy(t *testing.T) {
 func TestProvisionTrial_MissingIdempotencyKey(t *testing.T) {
 	d := newServiceDeps() // keycloak.CreateTrialUserFn left nil — a bypass would panic
 	rec := doRequest(d.engine(), http.MethodPost, provisionTrialPath, sysHeaders(), trialBody(uuid.New()))
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "missing_idempotency_key")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY")
 }
 
 func TestProvisionTrial_InvalidRequest(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "trial-2")
 	rec := doRequest(d.engine(), http.MethodPost, provisionTrialPath, headers, `{"tenant_id":"`+uuid.New().String()+`"}`)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	// Missing required struct fields → gincommon.ShouldBindJSON returns VALIDATION_FAILED per RFC 9457.
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "VALIDATION_FAILED")
 }
 
 func TestProvisionTrial_UnsafeTenantSlug_Rejected(t *testing.T) {
@@ -71,7 +72,7 @@ func TestProvisionTrial_UnsafeTenantSlug_Rejected(t *testing.T) {
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "trial-slug-1")
 	body := `{"tenant_id":"` + tenantID.String() + `","tenant_name":"Acme","tenant_slug":"acme/evil","admin_email":"a@example.com","admin_name":"Admin","plan":"starter"}`
 	rec := doRequest(d.engine(), http.MethodPost, provisionTrialPath, headers, body)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 func TestProvisionTrial_KeycloakUnavailable(t *testing.T) {
@@ -81,7 +82,7 @@ func TestProvisionTrial_KeycloakUnavailable(t *testing.T) {
 	}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "trial-3")
 	rec := doRequest(d.engine(), http.MethodPost, provisionTrialPath, headers, trialBody(uuid.New()))
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 }
 
 func TestProvisionTrial_OperationInProgress(t *testing.T) {
@@ -93,7 +94,7 @@ func TestProvisionTrial_OperationInProgress(t *testing.T) {
 	// CreateTrialUserFn left nil — the replay path must never reach Keycloak.
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "trial-4")
 	rec := doRequest(d.engine(), http.MethodPost, provisionTrialPath, headers, trialBody(tenantID))
-	assertStatusAndCode(t, rec, http.StatusConflict, "operation_in_progress")
+	assertStatusAndCode(t, rec, http.StatusConflict, "OPERATION_IN_PROGRESS")
 }
 
 // ── RP-2: provision-direct ───────────────────────────────────────────────
@@ -135,7 +136,7 @@ func TestProvisionDirect_RealmCreateFails_NoTeardownNeeded(t *testing.T) {
 	// so bestEffortDeleteRealm must not be invoked.
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "direct-2")
 	rec := doRequest(d.engine(), http.MethodPost, provisionDirectPath, headers, directBody(uuid.New()))
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 }
 
 func TestProvisionDirect_RegisterOIDCFails_TearsDownRealm(t *testing.T) {
@@ -148,7 +149,7 @@ func TestProvisionDirect_RegisterOIDCFails_TearsDownRealm(t *testing.T) {
 	d.keycloak.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error { torndown = true; return nil }
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "direct-3")
 	rec := doRequest(d.engine(), http.MethodPost, provisionDirectPath, headers, directBody(uuid.New()))
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 	if !torndown {
 		t.Fatal("expected compensating teardown to have run")
 	}
@@ -167,7 +168,7 @@ func TestProvisionDirect_CreateInvitedUserFails_TearsDownRealm(t *testing.T) {
 	d.keycloak.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error { torndown = true; return nil }
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "direct-4")
 	rec := doRequest(d.engine(), http.MethodPost, provisionDirectPath, headers, directBody(uuid.New()))
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 	if !torndown {
 		t.Fatal("expected compensating teardown to have run")
 	}
@@ -176,14 +177,15 @@ func TestProvisionDirect_CreateInvitedUserFails_TearsDownRealm(t *testing.T) {
 func TestProvisionDirect_MissingIdempotencyKey(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodPost, provisionDirectPath, sysHeaders(), directBody(uuid.New()))
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "missing_idempotency_key")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY")
 }
 
 func TestProvisionDirect_InvalidRequest(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "direct-5")
 	rec := doRequest(d.engine(), http.MethodPost, provisionDirectPath, headers, `{"tenant_id":"not-a-uuid"}`)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	// Invalid UUID in JSON body → binding error → VALIDATION_FAILED per RFC 9457.
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "VALIDATION_FAILED")
 }
 
 func TestProvisionDirect_UnsafeTenantSlug_Rejected(t *testing.T) {
@@ -192,7 +194,7 @@ func TestProvisionDirect_UnsafeTenantSlug_Rejected(t *testing.T) {
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "direct-slug-1")
 	body := `{"tenant_id":"` + tenantID.String() + `","tenant_name":"Acme","tenant_slug":"acme evil","admin_email":"a@example.com","admin_name":"Admin","plan":"pro"}`
 	rec := doRequest(d.engine(), http.MethodPost, provisionDirectPath, headers, body)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 func TestProvisionDirect_UnsupportedPlan_Rejected(t *testing.T) {
@@ -201,7 +203,7 @@ func TestProvisionDirect_UnsupportedPlan_Rejected(t *testing.T) {
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "direct-plan-1")
 	body := `{"tenant_id":"` + tenantID.String() + `","tenant_name":"Acme","tenant_slug":"acme","admin_email":"a@example.com","admin_name":"Admin","plan":"gold"}`
 	rec := doRequest(d.engine(), http.MethodPost, provisionDirectPath, headers, body)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 // ── RP-3: convert ────────────────────────────────────────────────────────
@@ -284,21 +286,21 @@ func TestConvert_RealmAlreadyDedicated(t *testing.T) {
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "convert-3")
 	rec := doRequest(d.engine(), http.MethodPost, convertPath(tenantID), headers, `{"plan":"pro"}`)
-	assertStatusAndCode(t, rec, http.StatusConflict, "realm_already_dedicated")
+	assertStatusAndCode(t, rec, http.StatusConflict, "REALM_ALREADY_DEDICATED")
 }
 
 func TestConvert_TenantRealmNotFound(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "convert-4")
 	rec := doRequest(d.engine(), http.MethodPost, convertPath(uuid.New()), headers, `{"plan":"pro"}`)
-	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
+	assertStatusAndCode(t, rec, http.StatusNotFound, "TENANT_REALM_NOT_FOUND")
 }
 
 func TestConvert_InvalidTenantIDInPath(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "convert-5")
 	rec := doRequest(d.engine(), http.MethodPost, "/api/v1/internal/tenants/not-a-uuid/convert", headers, `{"plan":"pro"}`)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 func TestConvert_RegisterOIDCFails_ConversionFailed(t *testing.T) {
@@ -313,7 +315,7 @@ func TestConvert_RegisterOIDCFails_ConversionFailed(t *testing.T) {
 	d.keycloak.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error { torndown = true; return nil }
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "convert-6")
 	rec := doRequest(d.engine(), http.MethodPost, convertPath(tenantID), headers, `{"plan":"pro"}`)
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "conversion_failed")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "CONVERSION_FAILED")
 	if !torndown {
 		t.Fatal("expected compensating teardown to have run")
 	}
@@ -333,7 +335,7 @@ func TestConvert_ListUsersFails_ConversionFailed(t *testing.T) {
 	d.keycloak.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error { return nil }
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "convert-7")
 	rec := doRequest(d.engine(), http.MethodPost, convertPath(tenantID), headers, `{"plan":"pro"}`)
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "conversion_failed")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "CONVERSION_FAILED")
 }
 
 func TestConvert_MigrateUserFails_ConversionFailed(t *testing.T) {
@@ -353,7 +355,7 @@ func TestConvert_MigrateUserFails_ConversionFailed(t *testing.T) {
 	d.keycloak.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error { return nil }
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "convert-8")
 	rec := doRequest(d.engine(), http.MethodPost, convertPath(tenantID), headers, `{"plan":"pro"}`)
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "conversion_failed")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "CONVERSION_FAILED")
 }
 
 func TestConvert_OperationInProgress(t *testing.T) {
@@ -362,7 +364,7 @@ func TestConvert_OperationInProgress(t *testing.T) {
 	d.idempotency.rows["convert-9"] = &domain.ProvisioningOperation{IdempotencyKey: "convert-9", TenantID: tenantID, Status: domain.OpStatusInProgress}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "convert-9")
 	rec := doRequest(d.engine(), http.MethodPost, convertPath(tenantID), headers, `{"plan":"pro"}`)
-	assertStatusAndCode(t, rec, http.StatusConflict, "operation_in_progress")
+	assertStatusAndCode(t, rec, http.StatusConflict, "OPERATION_IN_PROGRESS")
 }
 
 // TestConvert_FailedIdempotencyKey_IsRetried pins the fix for a real bug: a
@@ -379,23 +381,23 @@ func TestConvert_FailedIdempotencyKey_IsRetried(t *testing.T) {
 	d.idempotency.rows["convert-9"] = &domain.ProvisioningOperation{IdempotencyKey: "convert-9", TenantID: tenantID, Status: domain.OpStatusFailed}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "convert-9")
 	rec := doRequest(d.engine(), http.MethodPost, convertPath(tenantID), headers, `{"plan":"pro"}`)
-	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
+	assertStatusAndCode(t, rec, http.StatusNotFound, "TENANT_REALM_NOT_FOUND")
 }
 
 func TestConvert_MissingIdempotencyKey(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodPost, convertPath(uuid.New()), sysHeaders(), `{"plan":"pro"}`)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "missing_idempotency_key")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY")
 }
 
 func TestConvert_MalformedJSONBody(t *testing.T) {
 	// convertRequest has no required fields, so a syntactically malformed
 	// body (rather than a missing-required-field one) is needed to exercise
-	// the ShouldBindJSON error branch.
+	// the ShouldBindJSON error branch. Malformed JSON → VALIDATION_FAILED per RFC 9457.
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "convert-10")
 	rec := doRequest(d.engine(), http.MethodPost, convertPath(uuid.New()), headers, `{"plan":`)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "VALIDATION_FAILED")
 }
 
 // ── RP-4: revert-conversion ──────────────────────────────────────────────
@@ -458,7 +460,7 @@ func TestRevertConversion_WindowExpired(t *testing.T) {
 	d.putRealm(realm)
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "revert-3")
 	rec := doRequest(d.engine(), http.MethodPost, revertPath(tenantID), headers, "")
-	assertStatusAndCode(t, rec, http.StatusConflict, "revert_window_expired")
+	assertStatusAndCode(t, rec, http.StatusConflict, "REVERT_WINDOW_EXPIRED")
 }
 
 func TestRevertConversion_NotDedicated_InvalidRequest(t *testing.T) {
@@ -467,14 +469,14 @@ func TestRevertConversion_NotDedicated_InvalidRequest(t *testing.T) {
 	d.putRealm(sharedRealm(tenantID))
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "revert-4")
 	rec := doRequest(d.engine(), http.MethodPost, revertPath(tenantID), headers, "")
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 func TestRevertConversion_TenantRealmNotFound(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "revert-5")
 	rec := doRequest(d.engine(), http.MethodPost, revertPath(uuid.New()), headers, "")
-	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
+	assertStatusAndCode(t, rec, http.StatusNotFound, "TENANT_REALM_NOT_FOUND")
 }
 
 func TestRevertConversion_KeycloakUnavailableOnDelete(t *testing.T) {
@@ -490,20 +492,20 @@ func TestRevertConversion_KeycloakUnavailableOnDelete(t *testing.T) {
 	}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "revert-6")
 	rec := doRequest(d.engine(), http.MethodPost, revertPath(tenantID), headers, "")
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 }
 
 func TestRevertConversion_MissingIdempotencyKey(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodPost, revertPath(uuid.New()), sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "missing_idempotency_key")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY")
 }
 
 func TestRevertConversion_InvalidTenantIDInPath(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "revert-7")
 	rec := doRequest(d.engine(), http.MethodPost, "/api/v1/internal/tenants/not-a-uuid/revert-conversion", headers, "")
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 // ── RP-5: create invited user ────────────────────────────────────────────
@@ -538,7 +540,7 @@ func TestCreateInvitedUser_TenantRealmNotFound(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "invite-2")
 	rec := doRequest(d.engine(), http.MethodPost, invitedUserPath(uuid.New()), headers, `{"email":"u@example.com","full_name":"User One"}`)
-	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
+	assertStatusAndCode(t, rec, http.StatusNotFound, "TENANT_REALM_NOT_FOUND")
 }
 
 func TestCreateInvitedUser_InvalidRequest(t *testing.T) {
@@ -547,7 +549,8 @@ func TestCreateInvitedUser_InvalidRequest(t *testing.T) {
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "invite-3")
 	rec := doRequest(d.engine(), http.MethodPost, invitedUserPath(tenantID), headers, `{"email":"not-an-email","full_name":"User One"}`)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	// Invalid email format → validator.ValidationErrors → VALIDATION_FAILED per RFC 9457.
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "VALIDATION_FAILED")
 }
 
 func TestCreateInvitedUser_KeycloakUnavailable(t *testing.T) {
@@ -559,7 +562,7 @@ func TestCreateInvitedUser_KeycloakUnavailable(t *testing.T) {
 	}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "invite-4")
 	rec := doRequest(d.engine(), http.MethodPost, invitedUserPath(tenantID), headers, `{"email":"u@example.com","full_name":"User One"}`)
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 }
 
 func TestCreateInvitedUser_OperationInProgress(t *testing.T) {
@@ -577,14 +580,14 @@ func TestCreateInvitedUser_OperationInProgress(t *testing.T) {
 func TestCreateInvitedUser_MissingIdempotencyKey(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodPost, invitedUserPath(uuid.New()), sysHeaders(), `{"email":"u@example.com","full_name":"User One"}`)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "missing_idempotency_key")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY")
 }
 
 func TestCreateInvitedUser_InvalidTenantIDInPath(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "invite-6")
 	rec := doRequest(d.engine(), http.MethodPost, "/api/v1/internal/tenants/not-a-uuid/users", headers, `{"email":"u@example.com","full_name":"User One"}`)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 // ── CD-19: commercial-system allow-list for RP-3 and RP-4 ────────────────
@@ -595,7 +598,7 @@ func TestProvisionDirect_CommercialSystem_403(t *testing.T) {
 	headers := withHeader(commercialHeaders(), "Idempotency-Key", "cd19-rp2-1")
 	rec := doRequest(d.engine(), http.MethodPost, "/api/v1/internal/tenants/provision-direct", headers,
 		`{"tenant_name":"Acme","tenant_slug":"acme","admin_email":"a@example.com","admin_name":"Admin","plan":"pro"}`)
-	assertStatusAndCode(t, rec, http.StatusForbidden, "insufficient_role")
+	assertStatusAndCode(t, rec, http.StatusForbidden, "INSUFFICIENT_ROLE")
 }
 
 // RP-3 must be reachable by commercial-system (CD-19 allow-list).
@@ -655,7 +658,7 @@ func TestRevertConversion_CommercialSystem_WindowExpired_409(t *testing.T) {
 	d.putRealm(realm)
 	headers := withHeader(commercialHeaders(), "Idempotency-Key", "cd19-rp4-window-1")
 	rec := doRequest(d.engine(), http.MethodPost, revertPath(tenantID), headers, "")
-	assertStatusAndCode(t, rec, http.StatusConflict, "revert_window_expired")
+	assertStatusAndCode(t, rec, http.StatusConflict, "REVERT_WINDOW_EXPIRED")
 }
 
 // ── CD-19: actor recording ────────────────────────────────────────────────

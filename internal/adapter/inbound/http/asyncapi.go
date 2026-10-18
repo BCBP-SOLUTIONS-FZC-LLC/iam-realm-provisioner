@@ -15,6 +15,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	apispec "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/api"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/gincommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/problem"
 )
 
 // AsyncAPIYAMLHandler serves the raw AsyncAPI 3.0 spec (§7.3).
@@ -145,10 +147,7 @@ type asyncProp struct {
 func AsyncAPIHandler(c *gin.Context) {
 	spec, err := loadAsyncSpec()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    "internal_error",
-			"message": "AsyncAPI spec unavailable",
-		})
+		gincommon.AbortWithProblem(c, problem.NewInternalError(err))
 		return
 	}
 
