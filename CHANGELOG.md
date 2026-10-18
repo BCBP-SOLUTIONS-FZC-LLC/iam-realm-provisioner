@@ -4,6 +4,20 @@ All notable changes to this service are documented here. Format follows [Keep a 
 
 This service has never been deployed to any environment — there is no released version yet, so everything lives under `[Unreleased]`. Because of that, this file tracks only what is currently true and what is still outstanding, not a phase-by-phase build history; the full development diary is available via `git log` if it's ever needed.
 
+## [Unreleased — 2026-10-18 patch 2]
+
+### Fixed
+
+- **Migration grants for `realm_provisioner_migrator`** (ops checklist item 1): `000000_initial_schema.up.sql` now grants `SELECT, UPDATE, DELETE` on `pending_audit_entries`; `SELECT, DELETE` on `rls_violation_log`; `SELECT, INSERT, UPDATE` on `exporter_watermarks`; `DELETE` on `provisioning_operations`. Previously these grants were noted as "Terraform-owned" but never applied, causing AL-5 audit drainer, RLS-6 alert exporter, and `ledger-prune` to fail with permission-denied on every tick.
+
+### Added
+
+- **`deploy/iam/sqs.tf.example`** — Terraform module for the three SQS inbound queues (`membership-realm-q`, `tenant-realm-q`, `billing-realm-q`) with DLQ siblings and `maxReceiveCount=5` RedrivePolicy (ops checklist item 4). Without this, startup panics on `RequireDLQ` preflight.
+- **`deploy/monitoring/pushgateway-scrape.yaml`** — Prometheus scrape config for the reconciler Pushgateway with `honor_labels: true` (ops checklist item 7). Without `honor_labels`, all reconciler metrics are relabeled by Prometheus and become unqueryable.
+- **`scripts/pre-deploy-check.sh`** + **`make predeploy-check`** — validates all 12 production go-live prerequisites (SQS RedrivePolicies, Glue schema availability, Pushgateway reachability, Kubernetes Secret completeness, OpenBao role binding, GitHub Actions secrets) before the first deploy. Exits non-zero if any check fails.
+
+---
+
 ## [Unreleased — 2026-10-18 patch]
 
 ### Fixed
