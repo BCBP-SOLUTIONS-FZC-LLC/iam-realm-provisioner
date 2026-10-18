@@ -4,6 +4,16 @@ All notable changes to this service are documented here. Format follows [Keep a 
 
 This service has never been deployed to any environment — there is no released version yet, so everything lives under `[Unreleased]`. Because of that, this file tracks only what is currently true and what is still outstanding, not a phase-by-phase build history; the full development diary is available via `git log` if it's ever needed.
 
+## [Unreleased — 2026-10-18 patch]
+
+### Fixed
+
+- **Security: `github.com/moby/go-archive` HIGH (CVE-2026-17106)** upgraded v0.2.0 → **v0.3.3** (first patched: v0.3.0). Indirect dependency via `testcontainers-go`; `govulncheck ./...` confirms the vulnerability was not reachable from production code paths, but go.mod presence triggered GitHub Dependabot alert #1. Alert dismissed.
+- **Security: `github.com/moby/sys/user` MEDIUM (CVE-2026-61801)** upgraded v0.4.0 → **v0.4.1** (first patched: v0.4.1). Same scope as above. Alert #5 dismissed.
+- **Production go-live checklist item 12 added** (`operations.md`): explicit caller-migration pre-deploy gate documenting that Org & Membership, Billing, and Signup BFF must be updated to parse `errorCode` (UPPER_SNAKE_CASE, RFC 9457 `application/problem+json`) before this service is first deployed.
+
+---
+
 ## [Unreleased — 2026-10-18]
 
 ### Changed
