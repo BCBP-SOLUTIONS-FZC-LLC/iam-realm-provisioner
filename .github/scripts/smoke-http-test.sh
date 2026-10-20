@@ -145,14 +145,14 @@ echo "  RP-11 HTTP code: ${rp11_code:-<empty>}"
 echo "  RP-11 body:      ${rp11_body:-<empty>}"
 
 if [ "$rp11_code" != "404" ]; then
-  echo "::error::RP-11 returned ${rp11_code:-<empty>}, expected 404 tenant_realm_not_found. Body: ${rp11_body}"
+  echo "::error::RP-11 returned ${rp11_code:-<empty>}, expected 404 TENANT_REALM_NOT_FOUND. Body: ${rp11_body}"
   exit 1
 fi
-if ! printf '%s' "$rp11_body" | grep -qF 'tenant_realm_not_found'; then
-  echo "::error::RP-11 body does not contain tenant_realm_not_found. Body: ${rp11_body}"
+if ! printf '%s' "$rp11_body" | grep -qF 'TENANT_REALM_NOT_FOUND'; then
+  echo "::error::RP-11 body does not contain TENANT_REALM_NOT_FOUND (RFC 9457 errorCode). Body: ${rp11_body}"
   exit 1
 fi
-echo "RP-11 correctly returned 404 tenant_realm_not_found."
+echo "RP-11 correctly returned 404 TENANT_REALM_NOT_FOUND."
 echo "::endgroup::"
 
 {
@@ -160,7 +160,7 @@ echo "::endgroup::"
   echo "- ✅ Postgres started and provisioner schema migrated"
   echo "- ✅ /healthz returns 200"
   echo "- ✅ /metrics returns 200 (Prometheus registry bootstrapped)"
-  echo "- ✅ RP-11 GET /realm returns 404 tenant_realm_not_found (router → Postgres verified)"
+  echo "- ✅ RP-11 GET /realm returns 404 TENANT_REALM_NOT_FOUND (RFC 9457; router → Postgres verified)"
   echo ""
   echo "> /readyz: ${readyz_resp:-<empty>} (503 expected — Keycloak not started)"
 } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"

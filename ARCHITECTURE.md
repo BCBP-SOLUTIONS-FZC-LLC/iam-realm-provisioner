@@ -641,7 +641,7 @@ graph LR
     end
 
     subgraph gincommon_only["Single wiring point — no service builds its own logger/registry/tracer"]
-        gc1["platform-gincommon v1.6.0\nZap logging · Prometheus registry · OTel tracer provider\nall constructed ONCE via gincommon.Config in cmd/server/main.go\nand cmd/reconciler/main.go — every adapter/service receives\nthe already-built Logger/Registerer, never builds its own"]
+        gc1["platform-gincommon/v2 v2.0.0\nZap logging · Prometheus registry · OTel tracer provider\nall constructed ONCE via gincommon.Config in cmd/server/main.go\nand cmd/reconciler/main.go — every adapter/service receives\nthe already-built Logger/Registerer, never builds its own"]
     end
 
     subgraph prom["Prometheus  →  /metrics on dedicated METRICS_PORT (never shares a listener)"]
@@ -668,7 +668,7 @@ metric_status: proposed. Every series: {domain=iam, service=iam-realm-provisione
         l3["RLS violation log — ERROR, 1% sampled (rls_violation_log)"]
     end
 
-    subgraph db_obs["Database observability (platform-pgcommon/v2 v2.0.1)"]
+    subgraph db_obs["Database observability (platform-pgcommon/v2 v2.0.2)"]
         db1["pgx pool metrics — acquire_count/duration, idle/acquired conns"]
         db2["SlowQueryTracer — WARN log > SlowQueryThreshold"]
     end

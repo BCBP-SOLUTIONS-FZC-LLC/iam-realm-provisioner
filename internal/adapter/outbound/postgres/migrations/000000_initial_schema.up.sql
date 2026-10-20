@@ -397,6 +397,21 @@ BEGIN
         EXCEPTION WHEN insufficient_privilege THEN
             RAISE NOTICE 'realm_provisioner_migrator exists but current user cannot ALTER ROLE.';
         END;
+        -- Table grants for the migrator/reconciler role. These cover:
+        --   pending_audit_entries  — AL-5 drainer + GDPR scrub (RP-C2/RP-C3)
+        --   rls_violation_log      — rls_violations_total exporter (§11, RLS-6 alerts)
+        --   exporter_watermarks    — exporter high-water-mark persistence (§11)
+        --   provisioning_operations — ledger-prune CronJob (§13.1)
+        -- Without these the AL-5 audit drainer, RLS-6 alerts, and ledger-prune
+        -- all fail with permission-denied on every tick (ops checklist item 1).
+        BEGIN
+            GRANT SELECT, UPDATE, DELETE ON public.pending_audit_entries  TO realm_provisioner_migrator;
+            GRANT SELECT, DELETE         ON public.rls_violation_log      TO realm_provisioner_migrator;
+            GRANT SELECT, INSERT, UPDATE ON public.exporter_watermarks    TO realm_provisioner_migrator;
+            GRANT DELETE                 ON public.provisioning_operations TO realm_provisioner_migrator;
+        EXCEPTION WHEN insufficient_privilege THEN
+            RAISE NOTICE 'Grants to realm_provisioner_migrator skipped — current user (%) lacks GRANT privilege. Run manually or via Terraform.', current_user;
+        END;
     END IF;
 
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'realm_provisioner_app' AND rolbypassrls) THEN

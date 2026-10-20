@@ -516,5 +516,5 @@ func TestAsyncAPIHandler_SpecLoadError(t *testing.T) {
 	AsyncAPIHandler(c)
 
 	require.Equal(t, http.StatusInternalServerError, w.Code)
-	assert.Contains(t, w.Body.String(), "internal_error")
+	assert.Contains(t, w.Body.String(), "INTERNAL_ERROR")
 }

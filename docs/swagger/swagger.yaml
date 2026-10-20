@@ -1,18 +1,59 @@
 basePath: /api/v1/internal
 definitions:
-  http.ErrorResponse:
+  github_com_BCBP-SOLUTIONS-FZC-LLC_platform-gincommon_v2_internal_problem.FieldError:
     properties:
-      details:
-        additionalProperties: {}
-        type: object
-      error:
+      field:
+        description: Field is the JSON path of the invalid field (e.g. "deadline",
+          "items[0].sku").
         type: string
-      request_id:
+      message:
+        description: |-
+          Message is a fixed phrase ("is required", "must be in the future"). It never
+          echoes the rejected value, which may be PII.
+        type: string
+    type: object
+  http.ProblemResponse:
+    properties:
+      detail:
+        description: |-
+          Detail is a sentence the service wrote about this occurrence. It never
+          carries exception text, SQL, secrets or tenant information.
+        type: string
+      errorCode:
+        description: ErrorCode is the stable, upper snake case, machine-readable code.
+        type: string
+      instance:
+        description: Instance is the request path (never the query string, which may
+          carry tokens).
         type: string
       status:
+        description: Status is the HTTP status code; it always equals the response
+          status.
         type: integer
-      trace_id:
+      tenantId:
+        description: TenantID is set only for a request with a verified tenant context.
         type: string
+      timestamp:
+        description: Timestamp is when the problem was created, formatted with TimestampLayout.
+        type: string
+      title:
+        description: Title is the short, fixed summary of the type. It never varies
+          per occurrence.
+        type: string
+      traceId:
+        description: TraceID correlates the response with the server's logs and traces.
+        type: string
+      type:
+        description: |-
+          Type is the absolute, stable type URI ({base}/{domain}/{error}), or
+          "about:blank" for a status without a registered type (RFC 9457 §4.2.1).
+        type: string
+      validationErrors:
+        description: ValidationErrors lists the invalid fields of a validation-failed
+          problem.
+        items:
+          $ref: '#/definitions/github_com_BCBP-SOLUTIONS-FZC-LLC_platform-gincommon_v2_internal_problem.FieldError'
+        type: array
     type: object
   http.applyRealmConfigRequest:
     properties:
@@ -335,13 +376,13 @@ paths:
           schema:
             $ref: '#/definitions/service.PortabilityAuditResult'
         "403":
-          description: insufficient_role (operator role required)
+          description: INSUFFICIENT_ROLE (operator role required)
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
       summary: RP-13 — Whole-estate IdP region-portability audit (operator-only)
@@ -380,32 +421,32 @@ paths:
         "400":
           description: invalid_request OR missing_idempotency_key
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "403":
           description: insufficient_role (caller not in CD-19 allow-list)
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "404":
           description: tenant_realm_not_found
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "409":
           description: operation_in_progress OR realm_already_dedicated OR tenant_offboarded
             OR optimistic_lock_conflict OR credential_replay_expired
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "502":
           description: conversion_failed
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "503":
           description: db_unavailable OR keycloak_unavailable OR token_service_unavailable
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -434,21 +475,21 @@ paths:
           schema:
             $ref: '#/definitions/service.ExpireTrialResult'
         "400":
-          description: invalid_request OR missing_idempotency_key
+          description: INVALID_REQUEST OR MISSING_IDEMPOTENCY_KEY
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "404":
-          description: tenant_realm_not_found
+          description: TENANT_REALM_NOT_FOUND
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "409":
-          description: operation_in_progress OR realm_already_dedicated OR tenant_offboarded
+          description: OPERATION_IN_PROGRESS OR REALM_ALREADY_DEDICATED OR TENANT_OFFBOARDED
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -487,27 +528,27 @@ paths:
           schema:
             $ref: '#/definitions/service.ConfigureIdpResult'
         "400":
-          description: invalid_request OR missing_idempotency_key OR invalid_idp_protocol
-            OR idp_region_portability_failed
+          description: INVALID_REQUEST OR MISSING_IDEMPOTENCY_KEY OR INVALID_IDP_PROTOCOL
+            OR IDP_REGION_PORTABILITY_FAILED
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "404":
-          description: tenant_realm_not_found
+          description: TENANT_REALM_NOT_FOUND
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "409":
-          description: operation_in_progress OR idp_requires_dedicated_realm OR optimistic_lock_conflict
-            OR tenant_offboarded
+          description: OPERATION_IN_PROGRESS OR IDP_REQUIRES_DEDICATED_REALM OR OPTIMISTIC_LOCK_CONFLICT
+            OR TENANT_OFFBOARDED
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "422":
-          description: idp_warnings_unacknowledged
+          description: IDP_WARNINGS_UNACKNOWLEDGED
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -538,17 +579,17 @@ paths:
         "204":
           description: No Content
         "400":
-          description: invalid_request
+          description: INVALID_REQUEST
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "404":
-          description: tenant_realm_not_found OR idp_config_not_found
+          description: TENANT_REALM_NOT_FOUND OR IDP_CONFIG_NOT_FOUND
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -582,21 +623,21 @@ paths:
           schema:
             $ref: '#/definitions/service.ReactivateResult'
         "400":
-          description: invalid_request OR missing_idempotency_key
+          description: INVALID_REQUEST OR MISSING_IDEMPOTENCY_KEY
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "404":
-          description: tenant_realm_not_found
+          description: TENANT_REALM_NOT_FOUND
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "409":
-          description: operation_in_progress OR tenant_offboarded OR optimistic_lock_conflict
+          description: OPERATION_IN_PROGRESS OR TENANT_OFFBOARDED OR OPTIMISTIC_LOCK_CONFLICT
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -634,18 +675,18 @@ paths:
           schema:
             $ref: '#/definitions/service.GetRealmResult'
         "400":
-          description: invalid_request
+          description: INVALID_REQUEST
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "404":
-          description: tenant_realm_not_found
+          description: TENANT_REALM_NOT_FOUND
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "503":
-          description: db_unavailable or request_timeout (IdP count query failed —
+          description: DB_UNAVAILABLE or REQUEST_TIMEOUT (IdP count query failed —
             never returns silent zero)
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -687,17 +728,17 @@ paths:
           schema:
             $ref: '#/definitions/service.ApplyRealmConfigResult'
         "400":
-          description: invalid_request OR unsupported_realm_setting
+          description: INVALID_REQUEST OR UNSUPPORTED_REALM_SETTING
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "404":
-          description: tenant_realm_not_found
+          description: TENANT_REALM_NOT_FOUND
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -736,23 +777,23 @@ paths:
         "400":
           description: invalid_request OR missing_idempotency_key
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "404":
           description: tenant_realm_not_found
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "409":
           description: operation_in_progress OR revert_window_expired
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "503":
           description: db_unavailable OR keycloak_unavailable OR token_service_unavailable
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -783,15 +824,15 @@ paths:
         "404":
           description: tenant_realm_not_found
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "422":
           description: service_account_not_provisioned
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "502":
           description: keycloak_unavailable
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -826,25 +867,25 @@ paths:
           schema:
             $ref: '#/definitions/service.SuspendResult'
         "400":
-          description: invalid_request OR missing_idempotency_key
+          description: INVALID_REQUEST OR MISSING_IDEMPOTENCY_KEY
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "403":
-          description: insufficient_role (operator role required)
+          description: INSUFFICIENT_ROLE (operator role required)
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "404":
-          description: tenant_realm_not_found
+          description: TENANT_REALM_NOT_FOUND
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "409":
-          description: operation_in_progress OR tenant_offboarded
+          description: OPERATION_IN_PROGRESS OR TENANT_OFFBOARDED
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -882,23 +923,23 @@ paths:
         "400":
           description: invalid_request OR missing_idempotency_key
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "404":
           description: tenant_realm_not_found
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "409":
           description: operation_in_progress OR user_email_conflict
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "503":
           description: db_unavailable OR keycloak_unavailable OR token_service_unavailable
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -930,17 +971,17 @@ paths:
         "204":
           description: No Content
         "400":
-          description: invalid_request
+          description: INVALID_REQUEST
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "404":
-          description: tenant_realm_not_found
+          description: TENANT_REALM_NOT_FOUND
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -974,19 +1015,19 @@ paths:
         "400":
           description: invalid_request
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "404":
           description: tenant_realm_not_found OR keycloak_user_not_found
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "503":
           description: db_unavailable OR keycloak_unavailable
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -1017,17 +1058,17 @@ paths:
         "204":
           description: No Content
         "400":
-          description: invalid_request
+          description: INVALID_REQUEST
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "404":
-          description: tenant_realm_not_found OR keycloak_user_not_found
+          description: TENANT_REALM_NOT_FOUND OR KEYCLOAK_USER_NOT_FOUND
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
       - TenantID: []
@@ -1057,19 +1098,19 @@ paths:
         "400":
           description: invalid_request OR missing_idempotency_key
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "409":
           description: operation_in_progress OR realm_already_dedicated OR tenant_offboarded
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "503":
           description: db_unavailable OR keycloak_unavailable OR token_service_unavailable
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
       - IdempotencyKey: []
@@ -1101,19 +1142,19 @@ paths:
         "400":
           description: invalid_request OR missing_idempotency_key
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "409":
           description: operation_in_progress OR realm_already_dedicated OR tenant_offboarded
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
         "503":
           description: db_unavailable OR keycloak_unavailable OR token_service_unavailable
           schema:
-            $ref: '#/definitions/http.ErrorResponse'
+            $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
       - IdempotencyKey: []

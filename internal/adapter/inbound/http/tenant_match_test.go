@@ -16,7 +16,7 @@ func TestRequireTenantMatch_PathTenantMismatch_Forbidden(t *testing.T) {
 	headers := withHeader(withHeader(sysHeaders(), "Idempotency-Key", "mismatch-1"), "x-tenant-id", uuid.NewString())
 
 	rec := doRequest(d.engine(), http.MethodPost, convertPath(pathTenant), headers, `{"plan":"pro"}`)
-	assertStatusAndCode(t, rec, http.StatusForbidden, "tenant_mismatch")
+	assertStatusAndCode(t, rec, http.StatusForbidden, "TENANT_MISMATCH")
 }
 
 func TestRequireTenantMatch_ProvisionBodyTenantMismatch_Forbidden(t *testing.T) {
@@ -25,7 +25,7 @@ func TestRequireTenantMatch_ProvisionBodyTenantMismatch_Forbidden(t *testing.T) 
 	body := `{"tenant_id":"` + uuid.NewString() + `","tenant_name":"Acme","tenant_slug":"acme","admin_email":"a@example.com","admin_name":"Admin","plan":"pro"}`
 
 	rec := doRequest(d.engine(), http.MethodPost, provisionDirectPath, headers, body)
-	assertStatusAndCode(t, rec, http.StatusForbidden, "tenant_mismatch")
+	assertStatusAndCode(t, rec, http.StatusForbidden, "TENANT_MISMATCH")
 }
 
 func TestRequireTenantMatch_MatchingTenant_Passes(t *testing.T) {
@@ -44,7 +44,7 @@ func TestRequireTenantMatch_ProvisionTrialBodyTenantMismatch_Forbidden(t *testin
 	headers := withHeader(withHeader(sysHeaders(), "Idempotency-Key", "mismatch-3"), "x-tenant-id", uuid.NewString())
 
 	rec := doRequest(d.engine(), http.MethodPost, provisionTrialPath, headers, trialBody(uuid.New()))
-	assertStatusAndCode(t, rec, http.StatusForbidden, "tenant_mismatch")
+	assertStatusAndCode(t, rec, http.StatusForbidden, "TENANT_MISMATCH")
 }
 
 func TestTruncateReason(t *testing.T) {

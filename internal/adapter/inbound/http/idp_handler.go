@@ -7,6 +7,8 @@ import (
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/gincommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/problem"
 )
 
 // ── RP-6 ─────────────────────────────────────────────────────────────────
@@ -33,11 +35,11 @@ type configureIdpRequest struct {
 // @Param        id       path      string               true  "Tenant UUID"  format(uuid)
 // @Param        request  body      configureIdpRequest  true  "IdP configuration payload"
 // @Success      200      {object}  service.ConfigureIdpResult
-// @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key OR invalid_idp_protocol OR idp_region_portability_failed"
-// @Failure      404      {object}  ErrorResponse  "tenant_realm_not_found"
-// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR idp_requires_dedicated_realm OR optimistic_lock_conflict OR tenant_offboarded"
-// @Failure      422      {object}  ErrorResponse  "idp_warnings_unacknowledged"
-// @Failure      500      {object}  ErrorResponse
+// @Failure      400      {object}  ProblemResponse  "INVALID_REQUEST OR MISSING_IDEMPOTENCY_KEY OR INVALID_IDP_PROTOCOL OR IDP_REGION_PORTABILITY_FAILED"
+// @Failure      404      {object}  ProblemResponse  "TENANT_REALM_NOT_FOUND"
+// @Failure      409      {object}  ProblemResponse  "OPERATION_IN_PROGRESS OR IDP_REQUIRES_DEDICATED_REALM OR OPTIMISTIC_LOCK_CONFLICT OR TENANT_OFFBOARDED"
+// @Failure      422      {object}  ProblemResponse  "IDP_WARNINGS_UNACKNOWLEDGED"
+// @Failure      500      {object}  ProblemResponse
 // @Security     SystemRole
 // @Security     TenantID
 // @Security     IdempotencyKey
@@ -47,19 +49,19 @@ func (h *InternalHandler) ConfigureIdp(c *gin.Context) {
 		h.fallback.ConfigureIdp(c)
 		return
 	}
-	tenantID, err := parseTenantID(c)
-	if err != nil {
-		HandleError(c, err)
+	tenantID, perr := parseTenantID(c)
+	if perr != nil {
+		gincommon.AbortWithProblem(c, perr)
 		return
 	}
 	var req configureIdpRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		HandleError(c, domain.NewError(domain.ErrInvalidRequest, err.Error()))
+	if err := gincommon.ShouldBindJSON(c, &req); err != nil {
+		gincommon.AbortWithProblem(c, err)
 		return
 	}
 	protocol := domain.IdpProtocol(req.Protocol)
 	if protocol != domain.IdpProtocolSAML && protocol != domain.IdpProtocolOIDC {
-		HandleError(c, domain.NewError(domain.ErrInvalidIdpProtocol, "protocol must be saml or oidc"))
+		gincommon.AbortWithProblem(c, problem.NewError(realmInvalidIdpProtocol, "protocol must be saml or oidc"))
 		return
 	}
 	result, err := h.Idp.ConfigureIdp(c.Request.Context(), idempotencyKey(c), tenantID, service.ConfigureIdpRequest{
@@ -67,7 +69,7 @@ func (h *InternalHandler) ConfigureIdp(c *gin.Context) {
 		Config: req.Config, Secret: req.Secret, Acknowledgements: req.Acknowledgements,
 	})
 	if err != nil {
-		HandleError(c, err)
+		gincommon.AbortWithProblem(c, domainErrToProblem(err))
 		return
 	}
 	c.JSON(http.StatusOK, result)
@@ -84,9 +86,9 @@ func (h *InternalHandler) ConfigureIdp(c *gin.Context) {
 // @Param        id     path  string  true  "Tenant UUID"  format(uuid)
 // @Param        alias  path  string  true  "IdP alias"
 // @Success      204    "No Content"
-// @Failure      400    {object}  ErrorResponse  "invalid_request"
-// @Failure      404    {object}  ErrorResponse  "tenant_realm_not_found OR idp_config_not_found"
-// @Failure      500    {object}  ErrorResponse
+// @Failure      400    {object}  ProblemResponse  "INVALID_REQUEST"
+// @Failure      404    {object}  ProblemResponse  "TENANT_REALM_NOT_FOUND OR IDP_CONFIG_NOT_FOUND"
+// @Failure      500    {object}  ProblemResponse
 // @Security     SystemRole
 // @Security     TenantID
 // @Router       /tenants/{id}/idp/{alias} [delete]
@@ -95,14 +97,14 @@ func (h *InternalHandler) RemoveIdp(c *gin.Context) {
 		h.fallback.RemoveIdp(c)
 		return
 	}
-	tenantID, err := parseTenantID(c)
-	if err != nil {
-		HandleError(c, err)
+	tenantID, perr := parseTenantID(c)
+	if perr != nil {
+		gincommon.AbortWithProblem(c, perr)
 		return
 	}
 	alias := c.Param("alias")
 	if err := h.Idp.RemoveIdp(c.Request.Context(), tenantID, alias); err != nil {
-		HandleError(c, err)
+		gincommon.AbortWithProblem(c, domainErrToProblem(err))
 		return
 	}
 	c.Status(http.StatusNoContent)
@@ -117,8 +119,8 @@ func (h *InternalHandler) RemoveIdp(c *gin.Context) {
 // @Tags         IdP
 // @Produce      json
 // @Success      200  {object}  service.PortabilityAuditResult
-// @Failure      403  {object}  ErrorResponse  "insufficient_role (operator role required)"
-// @Failure      500  {object}  ErrorResponse
+// @Failure      403  {object}  ProblemResponse  "INSUFFICIENT_ROLE (operator role required)"
+// @Failure      500  {object}  ProblemResponse
 // @Security     SystemRole
 // @Router       /audit/idp-region-portability [post]
 func (h *InternalHandler) PortabilityAudit(c *gin.Context) {
@@ -128,7 +130,7 @@ func (h *InternalHandler) PortabilityAudit(c *gin.Context) {
 	}
 	result, err := h.Idp.PortabilityAudit(c.Request.Context())
 	if err != nil {
-		HandleError(c, err)
+		gincommon.AbortWithProblem(c, domainErrToProblem(err))
 		return
 	}
 	c.JSON(http.StatusOK, result)
@@ -152,9 +154,9 @@ type applyRealmConfigRequest struct {
 // @Param        request  body      applyRealmConfigRequest  true  "Realm config setting"
 // @Success      200      {object}  service.ApplyRealmConfigResult  "Applied immediately"
 // @Success      202      {object}  service.ApplyRealmConfigResult  "Queued for reconciliation (applied:false)"
-// @Failure      400      {object}  ErrorResponse  "invalid_request OR unsupported_realm_setting"
-// @Failure      404      {object}  ErrorResponse  "tenant_realm_not_found"
-// @Failure      500      {object}  ErrorResponse
+// @Failure      400      {object}  ProblemResponse  "INVALID_REQUEST OR UNSUPPORTED_REALM_SETTING"
+// @Failure      404      {object}  ProblemResponse  "TENANT_REALM_NOT_FOUND"
+// @Failure      500      {object}  ProblemResponse
 // @Security     SystemRole
 // @Security     TenantID
 // @Router       /tenants/{id}/realm-config [patch]
@@ -163,19 +165,19 @@ func (h *InternalHandler) ApplyRealmConfig(c *gin.Context) {
 		h.fallback.ApplyRealmConfig(c)
 		return
 	}
-	tenantID, err := parseTenantID(c)
-	if err != nil {
-		HandleError(c, err)
+	tenantID, perr := parseTenantID(c)
+	if perr != nil {
+		gincommon.AbortWithProblem(c, perr)
 		return
 	}
 	var req applyRealmConfigRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		HandleError(c, domain.NewError(domain.ErrInvalidRequest, err.Error()))
+	if err := gincommon.ShouldBindJSON(c, &req); err != nil {
+		gincommon.AbortWithProblem(c, err)
 		return
 	}
 	result, err := h.RealmConfig.ApplyRealmConfig(c.Request.Context(), tenantID, req.SettingKey, req.DesiredValue)
 	if err != nil {
-		HandleError(c, err)
+		gincommon.AbortWithProblem(c, domainErrToProblem(err))
 		return
 	}
 	status := http.StatusOK

@@ -1,0 +1,23 @@
+# Prometheus scrape config for the Pushgateway that iam-realm-provisioner's
+# reconciler CronJobs push metrics to (item 7 of production go-live checklist).
+#
+# CRITICAL: honor_labels: true is required. The reconciler pushes metrics with
+# {domain, service, environment, cronjob} labels; without honor_labels the
+# Prometheus server replaces them with scrape-target labels, breaking all
+# reconciler alerts and SLO-3 (trial-expiry / lapse freshness).
+#
+# Add this block to your Prometheus scrape_configs (or kube-prometheus-stack
+# additionalScrapeConfigs). The Pushgateway URL must match PROMETHEUS_PUSHGATEWAY_URL
+# in deploy/helm/values.yaml.
+
+scrape_configs:
+  - job_name: iam_realm_provisioner_pushgateway
+    honor_labels: true          # ← required (ops checklist item 7)
+    static_configs:
+      - targets:
+          - pushgateway.monitoring.svc.cluster.local:9091
+    metric_relabel_configs:
+      # Keep only this service's metrics to avoid scraping other pushers.
+      - source_labels: [service]
+        regex: iam-realm-provisioner
+        action: keep

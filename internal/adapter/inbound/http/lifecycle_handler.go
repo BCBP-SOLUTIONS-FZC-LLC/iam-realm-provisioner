@@ -7,6 +7,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/gincommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/problem"
 )
 
 // ── RP-11: GET realm (read-only) ─────────────────────────────────────────
@@ -19,9 +21,9 @@ import (
 // @Produce      json
 // @Param        id  path      string  true  "Tenant UUID"  format(uuid)
 // @Success      200 {object}  service.GetRealmResult
-// @Failure      400 {object}  ErrorResponse  "invalid_request"
-// @Failure      404 {object}  ErrorResponse  "tenant_realm_not_found"
-// @Failure      503 {object}  ErrorResponse  "db_unavailable or request_timeout (IdP count query failed — never returns silent zero)"
+// @Failure      400 {object}  ProblemResponse  "INVALID_REQUEST"
+// @Failure      404 {object}  ProblemResponse  "TENANT_REALM_NOT_FOUND"
+// @Failure      503 {object}  ProblemResponse  "DB_UNAVAILABLE or REQUEST_TIMEOUT (IdP count query failed — never returns silent zero)"
 // @Security     SystemRole
 // @Security     TenantID
 // @Router       /tenants/{id}/realm [get]
@@ -30,14 +32,14 @@ func (h *InternalHandler) GetRealm(c *gin.Context) {
 		h.fallback.GetRealm(c)
 		return
 	}
-	tenantID, err := parseTenantID(c)
-	if err != nil {
-		HandleError(c, err)
+	tenantID, perr := parseTenantID(c)
+	if perr != nil {
+		gincommon.AbortWithProblem(c, perr)
 		return
 	}
 	result, err := h.Lifecycle.GetRealm(c.Request.Context(), tenantID)
 	if err != nil {
-		HandleError(c, err)
+		gincommon.AbortWithProblem(c, domainErrToProblem(err))
 		return
 	}
 	c.JSON(http.StatusOK, result)
@@ -59,10 +61,10 @@ type reactivateRequest struct {
 // @Param        id       path      string             false  "Tenant UUID"  format(uuid)
 // @Param        request  body      reactivateRequest  false  "Optional reactivation reason"
 // @Success      200      {object}  service.ReactivateResult
-// @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
-// @Failure      404      {object}  ErrorResponse  "tenant_realm_not_found"
-// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR tenant_offboarded OR optimistic_lock_conflict"
-// @Failure      500      {object}  ErrorResponse
+// @Failure      400      {object}  ProblemResponse  "INVALID_REQUEST OR MISSING_IDEMPOTENCY_KEY"
+// @Failure      404      {object}  ProblemResponse  "TENANT_REALM_NOT_FOUND"
+// @Failure      409      {object}  ProblemResponse  "OPERATION_IN_PROGRESS OR TENANT_OFFBOARDED OR OPTIMISTIC_LOCK_CONFLICT"
+// @Failure      500      {object}  ProblemResponse
 // @Security     SystemRole
 // @Security     TenantID
 // @Security     IdempotencyKey
@@ -72,16 +74,16 @@ func (h *InternalHandler) Reactivate(c *gin.Context) {
 		h.fallback.Reactivate(c)
 		return
 	}
-	tenantID, err := parseTenantID(c)
-	if err != nil {
-		HandleError(c, err)
+	tenantID, perr := parseTenantID(c)
+	if perr != nil {
+		gincommon.AbortWithProblem(c, perr)
 		return
 	}
 	var req reactivateRequest
 	_ = c.ShouldBindJSON(&req) //nolint:errcheck // body is optional (reason only) — a missing/empty body just leaves req zero-valued
 	result, err := h.Lifecycle.Reactivate(c.Request.Context(), idempotencyKey(c), tenantID, domain.ReactivationSourceOperator, truncateReason(req.Reason, 500), nil)
 	if err != nil {
-		HandleError(c, err)
+		gincommon.AbortWithProblem(c, domainErrToProblem(err))
 		return
 	}
 	c.JSON(http.StatusOK, result)
@@ -97,10 +99,10 @@ func (h *InternalHandler) Reactivate(c *gin.Context) {
 // @Produce      json
 // @Param        id  path      string  true  "Tenant UUID"  format(uuid)
 // @Success      200 {object}  service.ExpireTrialResult
-// @Failure      400 {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
-// @Failure      404 {object}  ErrorResponse  "tenant_realm_not_found"
-// @Failure      409 {object}  ErrorResponse  "operation_in_progress OR realm_already_dedicated OR tenant_offboarded"
-// @Failure      500 {object}  ErrorResponse
+// @Failure      400 {object}  ProblemResponse  "INVALID_REQUEST OR MISSING_IDEMPOTENCY_KEY"
+// @Failure      404 {object}  ProblemResponse  "TENANT_REALM_NOT_FOUND"
+// @Failure      409 {object}  ProblemResponse  "OPERATION_IN_PROGRESS OR REALM_ALREADY_DEDICATED OR TENANT_OFFBOARDED"
+// @Failure      500 {object}  ProblemResponse
 // @Security     SystemRole
 // @Security     TenantID
 // @Security     IdempotencyKey
@@ -110,14 +112,14 @@ func (h *InternalHandler) ExpireTrial(c *gin.Context) {
 		h.fallback.ExpireTrial(c)
 		return
 	}
-	tenantID, err := parseTenantID(c)
-	if err != nil {
-		HandleError(c, err)
+	tenantID, perr := parseTenantID(c)
+	if perr != nil {
+		gincommon.AbortWithProblem(c, perr)
 		return
 	}
 	result, err := h.Lifecycle.ExpireTrial(c.Request.Context(), idempotencyKey(c), tenantID, 30)
 	if err != nil {
-		HandleError(c, err)
+		gincommon.AbortWithProblem(c, domainErrToProblem(err))
 		return
 	}
 	c.JSON(http.StatusOK, result)
@@ -139,11 +141,11 @@ type suspendRequest struct {
 // @Param        id       path      string          true  "Tenant UUID"  format(uuid)
 // @Param        request  body      suspendRequest  true  "Suspension reason (required)"
 // @Success      200      {object}  service.SuspendResult
-// @Failure      400      {object}  ErrorResponse  "invalid_request OR missing_idempotency_key"
-// @Failure      403      {object}  ErrorResponse  "insufficient_role (operator role required)"
-// @Failure      404      {object}  ErrorResponse  "tenant_realm_not_found"
-// @Failure      409      {object}  ErrorResponse  "operation_in_progress OR tenant_offboarded"
-// @Failure      500      {object}  ErrorResponse
+// @Failure      400      {object}  ProblemResponse  "INVALID_REQUEST OR MISSING_IDEMPOTENCY_KEY"
+// @Failure      403      {object}  ProblemResponse  "INSUFFICIENT_ROLE (operator role required)"
+// @Failure      404      {object}  ProblemResponse  "TENANT_REALM_NOT_FOUND"
+// @Failure      409      {object}  ProblemResponse  "OPERATION_IN_PROGRESS OR TENANT_OFFBOARDED"
+// @Failure      500      {object}  ProblemResponse
 // @Security     SystemRole
 // @Security     TenantID
 // @Security     IdempotencyKey
@@ -153,19 +155,19 @@ func (h *InternalHandler) Suspend(c *gin.Context) {
 		h.fallback.Suspend(c)
 		return
 	}
-	tenantID, err := parseTenantID(c)
-	if err != nil {
-		HandleError(c, err)
+	tenantID, perr := parseTenantID(c)
+	if perr != nil {
+		gincommon.AbortWithProblem(c, perr)
 		return
 	}
 	var req suspendRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		HandleError(c, domain.NewError(domain.ErrInvalidRequest, err.Error()))
+	if err := gincommon.ShouldBindJSON(c, &req); err != nil {
+		gincommon.AbortWithProblem(c, err)
 		return
 	}
 	result, err := h.Lifecycle.Suspend(c.Request.Context(), idempotencyKey(c), tenantID, req.Reason)
 	if err != nil {
-		HandleError(c, err)
+		gincommon.AbortWithProblem(c, domainErrToProblem(err))
 		return
 	}
 	c.JSON(http.StatusOK, result)
@@ -182,9 +184,9 @@ func (h *InternalHandler) Suspend(c *gin.Context) {
 // @Param        id                path  string  true  "Tenant UUID"        format(uuid)
 // @Param        keycloak_user_id  path  string  true  "Keycloak user UUID"  format(uuid)
 // @Success      204               "No Content"
-// @Failure      400               {object}  ErrorResponse  "invalid_request"
-// @Failure      404               {object}  ErrorResponse  "tenant_realm_not_found"
-// @Failure      500               {object}  ErrorResponse
+// @Failure      400               {object}  ProblemResponse  "INVALID_REQUEST"
+// @Failure      404               {object}  ProblemResponse  "TENANT_REALM_NOT_FOUND"
+// @Failure      500               {object}  ProblemResponse
 // @Security     SystemRole
 // @Security     TenantID
 // @Router       /tenants/{id}/users/{keycloak_user_id} [delete]
@@ -193,18 +195,18 @@ func (h *InternalHandler) DeleteUser(c *gin.Context) {
 		h.fallback.DeleteUser(c)
 		return
 	}
-	tenantID, err := parseTenantID(c)
-	if err != nil {
-		HandleError(c, err)
+	tenantID, perr := parseTenantID(c)
+	if perr != nil {
+		gincommon.AbortWithProblem(c, perr)
 		return
 	}
 	keycloakUserID, err := uuid.Parse(c.Param("keycloak_user_id"))
 	if err != nil {
-		HandleError(c, domain.NewError(domain.ErrInvalidRequest, "invalid keycloak_user_id"))
+		gincommon.AbortWithProblem(c, problem.NewError(realmInvalidRequest, "invalid keycloak_user_id"))
 		return
 	}
 	if err := h.Lifecycle.DeleteUser(c.Request.Context(), tenantID, keycloakUserID); err != nil {
-		HandleError(c, err)
+		gincommon.AbortWithProblem(c, domainErrToProblem(err))
 		return
 	}
 	c.Status(http.StatusNoContent)
@@ -222,9 +224,9 @@ func (h *InternalHandler) DeleteUser(c *gin.Context) {
 // @Param        id                path  string  true  "Tenant UUID"        format(uuid)
 // @Param        keycloak_user_id  path  string  true  "Keycloak user UUID"  format(uuid)
 // @Success      204               "No Content"
-// @Failure      400               {object}  ErrorResponse  "invalid_request"
-// @Failure      404               {object}  ErrorResponse  "tenant_realm_not_found OR keycloak_user_not_found"
-// @Failure      500               {object}  ErrorResponse
+// @Failure      400               {object}  ProblemResponse  "INVALID_REQUEST"
+// @Failure      404               {object}  ProblemResponse  "TENANT_REALM_NOT_FOUND OR KEYCLOAK_USER_NOT_FOUND"
+// @Failure      500               {object}  ProblemResponse
 // @Security     SystemRole
 // @Security     TenantID
 // @Router       /tenants/{id}/users/{keycloak_user_id}/revoke-sessions [post]
@@ -233,18 +235,18 @@ func (h *InternalHandler) RevokeSessions(c *gin.Context) {
 		h.fallback.RevokeSessions(c)
 		return
 	}
-	tenantID, err := parseTenantID(c)
-	if err != nil {
-		HandleError(c, err)
+	tenantID, perr := parseTenantID(c)
+	if perr != nil {
+		gincommon.AbortWithProblem(c, perr)
 		return
 	}
 	keycloakUserID, err := uuid.Parse(c.Param("keycloak_user_id"))
 	if err != nil {
-		HandleError(c, domain.NewError(domain.ErrInvalidRequest, "invalid keycloak_user_id"))
+		gincommon.AbortWithProblem(c, problem.NewError(realmInvalidRequest, "invalid keycloak_user_id"))
 		return
 	}
 	if err := h.Lifecycle.RevokeSessions(c.Request.Context(), tenantID, keycloakUserID); err != nil {
-		HandleError(c, err)
+		gincommon.AbortWithProblem(c, domainErrToProblem(err))
 		return
 	}
 	c.Status(http.StatusNoContent)

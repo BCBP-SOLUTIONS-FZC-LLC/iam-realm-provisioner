@@ -493,6 +493,14 @@ schema-register:
 # schema-register uploads, so it covers exactly the produced schemas. Surfaces
 # "pod would CrashLoop on NewGlueCodec" pre-deploy, which a name-only
 # get-schema check cannot. Requires GLUE_REGISTRY_TENANT_NAME, AWS credentials (or
+# predeploy-check: run scripts/pre-deploy-check.sh to validate all 12
+# production go-live prerequisites before the first deploy.
+# Requires: aws CLI, kubectl, gh CLI, BAO_ADDR, and the environment vars
+# documented in .claude/operations.md.
+.PHONY: predeploy-check
+predeploy-check:
+	@bash scripts/pre-deploy-check.sh
+
 # AWS_ENDPOINT_URL for floci) and python3.
 .PHONY: schema-verify
 schema-verify:

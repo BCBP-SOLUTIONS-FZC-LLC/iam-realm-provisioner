@@ -92,7 +92,7 @@ func TestConfigureIdp_OpenBaoWriteFails(t *testing.T) {
 	body["secret"] = "client-secret-value"
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "idp-1c")
 	rec := doRequestJSON(t, d.engine(), http.MethodPut, idpPath(tenantID), headers, body)
-	assertStatusAndCode(t, rec, http.StatusServiceUnavailable, "object_store_unavailable")
+	assertStatusAndCode(t, rec, http.StatusServiceUnavailable, "OBJECT_STORE_UNAVAILABLE")
 }
 
 func TestConfigureIdp_InvalidProtocol(t *testing.T) {
@@ -101,7 +101,7 @@ func TestConfigureIdp_InvalidProtocol(t *testing.T) {
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "idp-2")
 	rec := doRequestJSON(t, d.engine(), http.MethodPut, idpPath(tenantID), headers, configureIdpBody("ldap", passingOIDCConfig(), nil))
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_idp_protocol")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_IDP_PROTOCOL")
 }
 
 func TestConfigureIdp_RequiresDedicatedRealm(t *testing.T) {
@@ -110,7 +110,7 @@ func TestConfigureIdp_RequiresDedicatedRealm(t *testing.T) {
 	d.putRealm(sharedRealm(tenantID))
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "idp-3")
 	rec := doRequestJSON(t, d.engine(), http.MethodPut, idpPath(tenantID), headers, configureIdpBody("oidc", passingOIDCConfig(), nil))
-	assertStatusAndCode(t, rec, http.StatusConflict, "idp_requires_dedicated_realm")
+	assertStatusAndCode(t, rec, http.StatusConflict, "IDP_REQUIRES_DEDICATED_REALM")
 }
 
 func TestConfigureIdp_RegionPortabilityFailed(t *testing.T) {
@@ -123,7 +123,7 @@ func TestConfigureIdp_RegionPortabilityFailed(t *testing.T) {
 	}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "idp-4")
 	rec := doRequestJSON(t, d.engine(), http.MethodPut, idpPath(tenantID), headers, configureIdpBody("oidc", cfg, nil))
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "idp_region_portability_failed")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "IDP_REGION_PORTABILITY_FAILED")
 }
 
 func TestConfigureIdp_WarningsUnacknowledged(t *testing.T) {
@@ -136,7 +136,7 @@ func TestConfigureIdp_WarningsUnacknowledged(t *testing.T) {
 	}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "idp-5")
 	rec := doRequestJSON(t, d.engine(), http.MethodPut, idpPath(tenantID), headers, configureIdpBody("oidc", cfg, nil))
-	assertStatusAndCode(t, rec, http.StatusUnprocessableEntity, "idp_warnings_unacknowledged")
+	assertStatusAndCode(t, rec, http.StatusUnprocessableEntity, "IDP_WARNINGS_UNACKNOWLEDGED")
 }
 
 func TestConfigureIdp_WarningsAcknowledgedPasses(t *testing.T) {
@@ -159,7 +159,7 @@ func TestConfigureIdp_TenantRealmNotFound(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "idp-7")
 	rec := doRequestJSON(t, d.engine(), http.MethodPut, idpPath(uuid.New()), headers, configureIdpBody("oidc", passingOIDCConfig(), nil))
-	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
+	assertStatusAndCode(t, rec, http.StatusNotFound, "TENANT_REALM_NOT_FOUND")
 }
 
 func TestConfigureIdp_InvalidRequest(t *testing.T) {
@@ -168,7 +168,8 @@ func TestConfigureIdp_InvalidRequest(t *testing.T) {
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "idp-8")
 	rec := doRequest(d.engine(), http.MethodPut, idpPath(tenantID), headers, `{"protocol":"oidc"}`) // missing idp_alias/display_name
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	// Missing required struct fields → gincommon.ShouldBindJSON → VALIDATION_FAILED per RFC 9457.
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "VALIDATION_FAILED")
 }
 
 // CRITICAL (security): a path-traversal idp_alias must be rejected end to
@@ -190,7 +191,7 @@ func TestConfigureIdp_PathTraversalAlias_Rejected(t *testing.T) {
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "idp-traversal")
 	body := `{"idp_alias":"../other-tenant/evil","protocol":"saml","display_name":"Evil"}`
 	rec := doRequest(d.engine(), http.MethodPut, idpPath(tenantID), headers, body)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 func TestRemoveIdp_PathTraversalAlias_Rejected(t *testing.T) {
@@ -206,7 +207,7 @@ func TestRemoveIdp_PathTraversalAlias_Rejected(t *testing.T) {
 		return nil
 	}
 	rec := doRequest(d.engine(), http.MethodDelete, idpAliasPath(tenantID, "..evil"), sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 func TestConfigureIdp_KeycloakUnavailable(t *testing.T) {
@@ -218,7 +219,7 @@ func TestConfigureIdp_KeycloakUnavailable(t *testing.T) {
 	}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "idp-9")
 	rec := doRequestJSON(t, d.engine(), http.MethodPut, idpPath(tenantID), headers, configureIdpBody("oidc", passingOIDCConfig(), nil))
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 }
 
 func TestConfigureIdp_MissingIdempotencyKey(t *testing.T) {
@@ -226,14 +227,14 @@ func TestConfigureIdp_MissingIdempotencyKey(t *testing.T) {
 	tenantID := uuid.New()
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
 	rec := doRequestJSON(t, d.engine(), http.MethodPut, idpPath(tenantID), sysHeaders(), configureIdpBody("oidc", passingOIDCConfig(), nil))
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "missing_idempotency_key")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY")
 }
 
 func TestConfigureIdp_InvalidTenantIDInPath(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "idp-10")
 	rec := doRequestJSON(t, d.engine(), http.MethodPut, "/api/v1/internal/tenants/not-a-uuid/idp", headers, configureIdpBody("oidc", passingOIDCConfig(), nil))
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 // ── RP-7: remove idp ──────────────────────────────────────────────────────
@@ -253,7 +254,7 @@ func TestRemoveIdp_Happy(t *testing.T) {
 func TestRemoveIdp_TenantRealmNotFound(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodDelete, idpAliasPath(uuid.New(), "corp-sso"), sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
+	assertStatusAndCode(t, rec, http.StatusNotFound, "TENANT_REALM_NOT_FOUND")
 }
 
 func TestRemoveIdp_KeycloakUnavailable(t *testing.T) {
@@ -265,7 +266,7 @@ func TestRemoveIdp_KeycloakUnavailable(t *testing.T) {
 		return domain.NewError(domain.ErrKeycloakUnavailable, "down")
 	}
 	rec := doRequest(d.engine(), http.MethodDelete, idpAliasPath(tenantID, "corp-sso"), sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 }
 
 // An OpenBao secret-delete failure is best-effort (logged, not returned) —
@@ -290,7 +291,7 @@ func TestRemoveIdp_OpenBaoDeleteFailureIsBestEffort(t *testing.T) {
 func TestRemoveIdp_InvalidTenantIDInPath(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodDelete, "/api/v1/internal/tenants/not-a-uuid/idp/corp-sso", sysHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 func TestPortabilityAudit_RepositoryFailure(t *testing.T) {
@@ -299,7 +300,7 @@ func TestPortabilityAudit_RepositoryFailure(t *testing.T) {
 		return nil, domain.NewError(domain.ErrKeycloakUnavailable, "listing store down")
 	}
 	rec := doRequest(d.engine(), http.MethodPost, auditPath, operatorHeaders(), "")
-	assertStatusAndCode(t, rec, http.StatusBadGateway, "keycloak_unavailable")
+	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 }
 
 // ── RP-13: portability audit (operator-only, whole-estate) ──────────────
@@ -345,7 +346,7 @@ func TestPortabilityAudit_RequiresOperatorRole(t *testing.T) {
 		return nil, nil
 	}
 	rec := doRequest(d.engine(), http.MethodPost, auditPath, sysHeaders(), "") // iam-system only, no platform_operator
-	assertStatusAndCode(t, rec, http.StatusForbidden, "insufficient_role")
+	assertStatusAndCode(t, rec, http.StatusForbidden, "INSUFFICIENT_ROLE")
 }
 
 // ── RP-8: apply realm config (local-intent-first, RP-INV-6) ─────────────
@@ -409,13 +410,13 @@ func TestApplyRealmConfig_UnsupportedSetting(t *testing.T) {
 	tenantID := uuid.New()
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
 	rec := doRequest(d.engine(), http.MethodPatch, realmConfigPath(tenantID), sysHeaders(), `{"setting_key":"bogus_setting","desired_value":true}`)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "unsupported_realm_setting")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "UNSUPPORTED_REALM_SETTING")
 }
 
 func TestApplyRealmConfig_TenantRealmNotFound(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodPatch, realmConfigPath(uuid.New()), sysHeaders(), `{"setting_key":"local_accounts_enabled","desired_value":true}`)
-	assertStatusAndCode(t, rec, http.StatusNotFound, "tenant_realm_not_found")
+	assertStatusAndCode(t, rec, http.StatusNotFound, "TENANT_REALM_NOT_FOUND")
 }
 
 func TestApplyRealmConfig_InvalidRequest(t *testing.T) {
@@ -423,11 +424,12 @@ func TestApplyRealmConfig_InvalidRequest(t *testing.T) {
 	tenantID := uuid.New()
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
 	rec := doRequest(d.engine(), http.MethodPatch, realmConfigPath(tenantID), sysHeaders(), `{"desired_value":true}`)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	// Missing required setting_key field → gincommon.ShouldBindJSON → VALIDATION_FAILED per RFC 9457.
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "VALIDATION_FAILED")
 }
 
 func TestApplyRealmConfig_InvalidTenantIDInPath(t *testing.T) {
 	d := newServiceDeps()
 	rec := doRequest(d.engine(), http.MethodPatch, "/api/v1/internal/tenants/not-a-uuid/realm-config", sysHeaders(), `{"setting_key":"local_accounts_enabled","desired_value":true}`)
-	assertStatusAndCode(t, rec, http.StatusBadRequest, "invalid_request")
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }

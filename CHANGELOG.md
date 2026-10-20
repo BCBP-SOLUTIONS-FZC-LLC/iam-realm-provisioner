@@ -4,6 +4,39 @@ All notable changes to this service are documented here. Format follows [Keep a 
 
 This service has never been deployed to any environment — there is no released version yet, so everything lives under `[Unreleased]`. Because of that, this file tracks only what is currently true and what is still outstanding, not a phase-by-phase build history; the full development diary is available via `git log` if it's ever needed.
 
+## [Unreleased — 2026-10-18 patch 2]
+
+### Fixed
+
+- **Migration grants for `realm_provisioner_migrator`** (ops checklist item 1): `000000_initial_schema.up.sql` now grants `SELECT, UPDATE, DELETE` on `pending_audit_entries`; `SELECT, DELETE` on `rls_violation_log`; `SELECT, INSERT, UPDATE` on `exporter_watermarks`; `DELETE` on `provisioning_operations`. Previously these grants were noted as "Terraform-owned" but never applied, causing AL-5 audit drainer, RLS-6 alert exporter, and `ledger-prune` to fail with permission-denied on every tick.
+
+### Added
+
+- **`deploy/iam/sqs.tf.example`** — Terraform module for the three SQS inbound queues (`membership-realm-q`, `tenant-realm-q`, `billing-realm-q`) with DLQ siblings and `maxReceiveCount=5` RedrivePolicy (ops checklist item 4). Without this, startup panics on `RequireDLQ` preflight.
+- **`deploy/monitoring/pushgateway-scrape.yaml`** — Prometheus scrape config for the reconciler Pushgateway with `honor_labels: true` (ops checklist item 7). Without `honor_labels`, all reconciler metrics are relabeled by Prometheus and become unqueryable.
+- **`scripts/pre-deploy-check.sh`** + **`make predeploy-check`** — validates all 12 production go-live prerequisites (SQS RedrivePolicies, Glue schema availability, Pushgateway reachability, Kubernetes Secret completeness, OpenBao role binding, GitHub Actions secrets) before the first deploy. Exits non-zero if any check fails.
+
+---
+
+## [Unreleased — 2026-10-18 patch]
+
+### Fixed
+
+- **Security: `github.com/moby/go-archive` HIGH (CVE-2026-17106)** upgraded v0.2.0 → **v0.3.3** (first patched: v0.3.0). Indirect dependency via `testcontainers-go`; `govulncheck ./...` confirms the vulnerability was not reachable from production code paths, but go.mod presence triggered GitHub Dependabot alert #1. Alert dismissed.
+- **Security: `github.com/moby/sys/user` MEDIUM (CVE-2026-61801)** upgraded v0.4.0 → **v0.4.1** (first patched: v0.4.1). Same scope as above. Alert #5 dismissed.
+- **Production go-live checklist item 12 added** (`operations.md`): explicit caller-migration pre-deploy gate documenting that Org & Membership, Billing, and Signup BFF must be updated to parse `errorCode` (UPPER_SNAKE_CASE, RFC 9457 `application/problem+json`) before this service is first deployed.
+
+---
+
+## [Unreleased — 2026-10-18]
+
+### Changed
+
+- **Platform library upgrades:** `platform-gincommon` v1.6.0 → **v2.0.0** (new `/v2` module path; all 30 import sites across `internal/` updated); `platform-pgcommon/v2` v2.0.1 → **v2.0.2** (pool-error-handling and RLS GUC-binding fixes). `platform-events/v2` remains at v2.1.0 (already latest). Direct dep versions confirmed with `go list -u -m`; all other direct dependencies are already at their latest minor/patch. `govulncheck` reports **0 reachable vulnerabilities** (one module-level finding `GO-2026-5932` in `golang.org/x/crypto/openpgp` — unmaintained, no fix available, unreachable from production code).
+- **RFC 9457 Problem Details adoption (platform-gincommon v2 feature):** All HTTP error responses are now `Content-Type: application/problem+json` with the RFC 9457 shape `{type, title, status, detail, instance, traceId, errorCode, tenantId, timestamp}` — field validation additionally carries `validationErrors[]`. Removed `ErrorResponse` struct, `newErrorResponse`, `HandleError`, `isDBUnavailable`, and `errorLogger` from `internal/adapter/inbound/http/errors.go`. Replaced with a `domainErrToProblem` adapter that maps every frozen §17 `domain.ErrorCode` to a `problem.MustType("realm", ...)` entry (UPPER_SNAKE_CASE `errorCode`) and classifies leaked `pgconn` errors before falling back to `problem.FromError`. All middleware error responses migrated from `c.AbortWithStatusJSON(status, ErrorResponse{...})` to `gincommon.AbortWithProblem(c, problem.NewError(...))`. All binding errors now use `gincommon.ShouldBindJSON` which returns `VALIDATION_FAILED` (RFC 9457 field-level `validationErrors[]` array) for struct validation failures — callers that previously branched on `400 invalid_request` for missing/invalid fields must now check `errorCode == "VALIDATION_FAILED"`. Business-rule validation failures (invalid slug, invalid plan, invalid path UUID) continue to return `INVALID_REQUEST`. The `asyncapi.go` spec-load error and the docs bearer-auth path are also migrated. `ProblemResponse` type alias added for Swagger `@Failure` annotations. Swagger docs regenerated: `docs/swagger/{docs.go,swagger.json,swagger.yaml}` updated to reflect RFC 9457 response shape.
+
+---
+
 ## [Unreleased — 2026-10-15]
 
 ### Changed

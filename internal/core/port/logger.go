@@ -3,7 +3,7 @@ package port
 import (
 	"context"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/gincommon"
 )
 
 // Logger is the structured logging port this service funnels through: HTTP

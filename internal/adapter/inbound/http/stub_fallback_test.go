@@ -48,7 +48,7 @@ func TestNilServiceFallsBackToStub501(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := doRequest(r, tc.method, tc.path, tc.headers, tc.body)
-			assertStatusAndCode(t, rec, http.StatusNotImplemented, "not_implemented")
+			assertStatusAndCode(t, rec, http.StatusNotImplemented, "NOT_IMPLEMENTED")
 		})
 	}
 }

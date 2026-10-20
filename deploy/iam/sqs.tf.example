@@ -1,0 +1,100 @@
+# Terraform snippet — SQS queues for iam-realm-provisioner's three inbound
+# consumers, each with a -dlq sibling and maxReceiveCount=5 RedrivePolicy.
+# This is *illustrative*, not applied by the application. Platform Terraform
+# owns the authoritative version of these resources.
+#
+# The service enforces RequireDLQ at startup: a queue with no RedrivePolicy
+# causes an immediate startup panic. This file covers item 4 of the
+# production go-live checklist (.claude/operations.md).
+#
+# Three queues / three DLQs. Adjust var.* references to match your root module.
+
+locals {
+  queues = {
+    "membership-realm" = {}
+    "tenant-realm"     = {}
+    "billing-realm"    = {}
+  }
+}
+
+# DLQ siblings (no RedrivePolicy themselves)
+resource "aws_sqs_queue" "iam_realm_dlq" {
+  for_each                  = local.queues
+  name                      = "iam-${each.key}-q-dlq"
+  message_retention_seconds = 1209600 # 14 days
+  kms_master_key_id         = var.sqs_kms_key_id
+  tags                      = var.common_tags
+}
+
+# Primary queues — RedrivePolicy maxReceiveCount=5 so platform-events'
+# own DLQ-forward (max-receive-count=4, one below) fires before SQS's
+# silent redrive (SQS_MAX_RECEIVE_COUNT env var in Helm values.yaml).
+resource "aws_sqs_queue" "iam_realm" {
+  for_each                   = local.queues
+  name                       = "iam-${each.key}-q"
+  visibility_timeout_seconds = 30
+  message_retention_seconds  = 604800 # 7 days
+  kms_master_key_id          = var.sqs_kms_key_id
+  tags                       = var.common_tags
+
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.iam_realm_dlq[each.key].arn
+    maxReceiveCount     = 5
+  })
+}
+
+# SNS → SQS subscriptions (adjust filter policies to match asyncapi.yaml)
+resource "aws_sns_topic_subscription" "membership_realm" {
+  topic_arn            = var.iam_membership_events_topic_arn
+  protocol             = "sqs"
+  endpoint             = aws_sqs_queue.iam_realm["membership-realm"].arn
+  raw_message_delivery = true
+  filter_policy = jsonencode({
+    EventType = ["DepartmentMembershipGranted", "DepartmentMembershipLevelChanged",
+                 "TenantRoleGranted", "TenantRoleRevoked"]
+  })
+}
+
+resource "aws_sns_topic_subscription" "tenant_realm" {
+  topic_arn            = var.iam_tenant_events_topic_arn
+  protocol             = "sqs"
+  endpoint             = aws_sqs_queue.iam_realm["tenant-realm"].arn
+  raw_message_delivery = true
+  filter_policy        = jsonencode({ EventType = ["TrialStarted"] })
+}
+
+resource "aws_sns_topic_subscription" "billing_realm" {
+  topic_arn            = var.billing_events_topic_arn
+  protocol             = "sqs"
+  endpoint             = aws_sqs_queue.iam_realm["billing-realm"].arn
+  raw_message_delivery = true
+  filter_policy        = jsonencode({ EventType = ["TenantReactivated"] })
+}
+
+# Queue policy — allow SNS to send messages
+resource "aws_sqs_queue_policy" "iam_realm" {
+  for_each  = local.queues
+  queue_url = aws_sqs_queue.iam_realm[each.key].id
+  policy    = data.aws_iam_policy_document.sqs_allow_sns[each.key].json
+}
+
+data "aws_iam_policy_document" "sqs_allow_sns" {
+  for_each = local.queues
+  statement {
+    actions   = ["sqs:SendMessage"]
+    resources = [aws_sqs_queue.iam_realm[each.key].arn]
+    principals {
+      type        = "Service"
+      identifiers = ["sns.amazonaws.com"]
+    }
+  }
+}
+
+# Outputs consumed by the Helm existingSecret
+output "sqs_queue_urls" {
+  value = {
+    membership_realm = aws_sqs_queue.iam_realm["membership-realm"].url
+    tenant_realm     = aws_sqs_queue.iam_realm["tenant-realm"].url
+    billing_realm    = aws_sqs_queue.iam_realm["billing-realm"].url
+  }
+}

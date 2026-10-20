@@ -1,8 +1,8 @@
 package http
 
 import (
-	"net/http"
-
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/gincommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/problem"
 	"github.com/gin-gonic/gin"
 )
 
@@ -38,7 +38,7 @@ type StubHandlers struct{}
 func NewStubHandlers() StubHandlers { return StubHandlers{} }
 
 func (StubHandlers) notImplemented(c *gin.Context) {
-	c.AbortWithStatusJSON(http.StatusNotImplemented, ErrorResponse{Error: "not_implemented", Status: http.StatusNotImplemented})
+	gincommon.AbortWithProblem(c, problem.NewNotImplementedError("endpoint not yet implemented"))
 }
 
 // ProvisionTrial responds 501 (RP-1 not wired to this handler set).

@@ -19,7 +19,7 @@ ALLOW_PROPOSED_OWNERS="platform-gincommon,platform-events,platform-pgcommon"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-go build -o "$work/metricslint" github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/cmd/metricslint
+go build -o "$work/metricslint" github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/cmd/metricslint
 
 METRICS_SCRAPE_OUT="$work/scrape.txt" \
   go test ./internal/adapter/outbound/metrics/ -count=1 -run '^TestStandard_LibrariesShareRegistryCollectors$' >/dev/null
@@ -43,8 +43,8 @@ echo "metricslint check passed."
 "$work/metricslint" refs deploy docs
 echo "metricslint refs passed."
 
-gincommon_dir=$(go list -m -f '{{.Dir}}' github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon)
-gincommon_version=$(go list -m -f '{{.Version}}' github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon)
+gincommon_dir=$(go list -m -f '{{.Dir}}' github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2)
+gincommon_version=$(go list -m -f '{{.Version}}' github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2)
 inventory=docs/observability/metric-registry.md
 python3 .github/scripts/metrics-inventory.py "$gincommon_dir/internal/obsregistry/registry.json" \
   "$work/scrape.txt" "$gincommon_version" >"$work/metric-registry.md"
