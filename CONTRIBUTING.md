@@ -68,11 +68,11 @@ internal/
     s3/              ← Realm export target on offboarding (§15.5)
     httpx/           ← The shared traceparent-injecting HTTP transport
     metrics/         ← iam_realm_provisioner_* Prometheus counters/histograms/gauges
-  eventschema/        ← Embedded JSON Schema files: 9 produced (ByEventType) + 6 consumed (ConsumedByConsumer)
+  eventschema/        ← Embedded JSON Schema files: 10 produced (ByEventType) + 6 consumed (ConsumedByConsumer)
 cmd/reconciler/jobs/  ← trial_expiry, trial_hard_delete, subscription_lapse, realm_config_reconcile,
                        outbox_prune, processed_events_prune, ledger_prune
 pkg/requestctx/       ← Typed request context
-api/asyncapi.yaml     ← AsyncAPI 3.0 — the iam-tenant-events channel (9 published messages) + 3 inbound SQS channels
+api/asyncapi.yaml     ← AsyncAPI 3.0 — the iam-tenant-events channel (10 published messages) + 3 inbound SQS channels
 deploy/               ← Helm chart, AWS IAM policy, OpenBao policy, Prometheus alerts, Keycloak realm template
 docs/                 ← lld/, architecture/ (*.mmd), observability/ (standard, metric registry, per-alert runbooks), runbook.md
 test/                 ← unit/, postgres/ (RLS, tagged `integration`), integration/ (Keycloak+OpenBao+floci, tagged `integration`),
@@ -262,6 +262,6 @@ Releases are handled via the CI/CD pipeline (`.github/workflows/ci.yml`). SemVer
 2. `build-image`'s cache then feeds `trivy` (CVE scan) and `smoke` (smoke tests against both binaries), which run in parallel with each other.
 3. On push to `main`, `push` builds+pushes the image to GHCR and signs it with Cosign keyless signing (Sigstore OIDC).
 4. The Helm chart in `deploy/helm/` is applied by the platform CD pipeline — one Deployment (the server) plus 7 CronJobs (the reconciler jobs), all dispatched from the same image with a `command` override.
-5. Separately, schema changes (`internal/eventschema/*.json`, `api/asyncapi.yaml`) trigger `schema-registry.yml`, which registers this service's 9 event schemas to the shared `iam-tenant-events` Glue registry (staging on push to `main`, production on release) — see `docs/runbook-schema-registry.md`.
+5. Separately, schema changes (`internal/eventschema/*.json`, `api/asyncapi.yaml`) trigger `schema-registry.yml`, which registers this service's 10 event schemas to the shared `iam-tenant-events` Glue registry (staging on push to `main`, production on release) — see `docs/runbook-schema-registry.md`.
 
 Notify the platform team on Slack if a migration or breaking env-var change requires coordinated rollout — especially anything touching the OpenBao path convention or the Keycloak admin credential.

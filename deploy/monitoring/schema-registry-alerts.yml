@@ -1,5 +1,5 @@
 # Prometheus alerting rules for the Glue Schema Registry CI pipeline
-# (.github/workflows/schema-registry.yml) governing this service's 9 event
+# (.github/workflows/schema-registry.yml) governing this service's 10 event
 # schemas on the shared `iam-tenant-events` Glue registry (LLD §7.3.1).
 #
 # Metrics are emitted by `schema-gov metrics` (platform-schemagov v0.4+) on every
@@ -52,7 +52,7 @@ groups:
           description: >-
             {{ $value | humanize }} breaking change(s) were blocked by the CI diff check
             in Glue registry {{ $labels.registry }} ({{ $labels.environment }}).
-            A developer attempted an incompatible change to one of this service's 9
+            A developer attempted an incompatible change to one of this service's 10
             event schemas. Registration was blocked. Follow LLD §7.3.1's
             schema-evolution rules — a breaking change needs a new Glue schema
             name, a new AsyncAPI message, and a major version bump.
@@ -88,7 +88,7 @@ groups:
             remove them (archives to docs/schema-archive/ before deleting).
 
       # ── Registration spike ───────────────────────────────────────────────────
-      # A normal run registers 1–9 schemas (this service owns 9 total). A spike
+      # A normal run registers 1–10 schemas (this service owns 10 total). A spike
       # suggests a bulk import, schema reset, or misconfiguration. Default
       # threshold: 10.
       - alert: SchemaRegistrationSpike
@@ -103,7 +103,7 @@ groups:
           description: >-
             {{ $value | humanize }} schemas were processed in a single registration run
             for registry {{ $labels.registry }} ({{ $labels.environment }}).
-            This exceeds the expected maximum for this service (9 owned schemas).
+            This exceeds the expected maximum for this service (10 owned schemas).
             Verify the changes are intentional — unexpected spikes may indicate a
             bulk import, schema directory reset, or misconfigured
             GLUE_REGISTRY_TENANT_NAME (e.g. accidentally pointed at O&M's own

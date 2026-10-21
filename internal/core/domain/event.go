@@ -23,19 +23,26 @@ const SystemActorID = "00000000-0000-0000-0000-0000000000a1"
 // CommercialSystemUUID (pkg/requestctx/principals.go).
 const CommercialActorID = "00000000-0000-0000-0000-0000000000c1"
 
-// The 9 frozen published event type names (§25, §7.5) — the values of the
+// The 10 frozen published event type names (§25, §7.5) — the values of the
 // envelope `type` field, and the Glue schema names registered in the shared
 // `iam-tenant-events` registry.
 const (
-	EventTrialTenantProvisioned = "TrialTenantProvisioned"
-	EventTenantRealmReady       = "TenantRealmReady"
-	EventTenantConverted        = "TenantConverted"
-	EventDirectPaidSignup       = "DirectPaidSignup"
-	EventTrialExpired           = "TrialExpired"
-	EventTrialReactivated       = "TrialReactivated"
-	EventTenantSuspended        = "TenantSuspended"
-	EventTenantOffboarded       = "TenantOffboarded"
-	EventTenantReactivated      = "TenantReactivated"
+	EventTrialTenantProvisioned    = "TrialTenantProvisioned"
+	EventTenantIdentityProvisioned = "TenantIdentityProvisioned"
+	EventTenantRealmReady          = "TenantRealmReady"
+	EventTenantConverted           = "TenantConverted"
+	EventDirectPaidSignup          = "DirectPaidSignup"
+	EventTrialExpired              = "TrialExpired"
+	EventTrialReactivated          = "TrialReactivated"
+	EventTenantSuspended           = "TenantSuspended"
+	EventTenantOffboarded          = "TenantOffboarded"
+	EventTenantReactivated         = "TenantReactivated"
+)
+
+// Signup types carried on TenantIdentityProvisioned.
+const (
+	SignupTypeTrial      = "trial"
+	SignupTypeDirectPaid = "direct_paid"
 )
 
 // The 4 consumed event type names (§7.1) this service subscribes to across
@@ -72,6 +79,23 @@ type TrialTenantProvisionedPayload struct {
 	TenantID       uuid.UUID `json:"tenant_id"`
 	Realm          string    `json:"realm"`
 	KeycloakUserID uuid.UUID `json:"keycloak_user_id"`
+}
+
+// TenantIdentityProvisionedPayload is the frozen payload for
+// TenantIdentityProvisioned (§25, §7.5) — emitted by RP-1 and RP-2 once the
+// tenant's admin user exists in Keycloak. It carries everything O&M's I-1
+// needs, so O&M can create a tenant the Signup BFF never got to (BFF-2
+// signup backstop). The tenant fields are exactly the values RP received;
+// no admin email/name (no PII on the bus).
+type TenantIdentityProvisionedPayload struct {
+	TenantID    uuid.UUID `json:"tenant_id"`
+	OwnerUserID uuid.UUID `json:"owner_user_id"`
+	Slug        string    `json:"slug"`
+	Name        string    `json:"name"`
+	Plan        string    `json:"plan"`
+	SignupType  string    `json:"signup_type"`
+	Realm       string    `json:"realm"`
+	RealmType   string    `json:"realm_type"`
 }
 
 // TenantRealmReadyPayload is the frozen payload for TenantRealmReady (§25,

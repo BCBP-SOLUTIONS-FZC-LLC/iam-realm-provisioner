@@ -42,13 +42,13 @@ for QUEUE in membership-realm-q tenant-realm-q billing-realm-q; do
 done
 
 # ── 5. Glue schema registration ──────────────────────────────────────────────
-section "Item 5 — Glue registry '${GLUE_REGISTRY}' has all 9 schema definitions AVAILABLE"
+section "Item 5 — Glue registry '${GLUE_REGISTRY}' has all 10 schema definitions AVAILABLE"
 SCHEMA_COUNT=$(aws glue list-schemas --registry-id "RegistryName=${GLUE_REGISTRY}" \
   --region "$REGION" --query 'length(Schemas)' --output text 2>/dev/null || echo 0)
-if [[ "$SCHEMA_COUNT" -ge 9 ]]; then
-  pass "Glue registry has ${SCHEMA_COUNT} schemas (≥9 required)"
+if [[ "$SCHEMA_COUNT" -ge 10 ]]; then
+  pass "Glue registry has ${SCHEMA_COUNT} schemas (≥10 required)"
 else
-  fail "Glue registry '${GLUE_REGISTRY}' has ${SCHEMA_COUNT}/9 schemas" \
+  fail "Glue registry '${GLUE_REGISTRY}' has ${SCHEMA_COUNT}/10 schemas" \
        "Run: GLUE_REGISTRY_TENANT_NAME=${GLUE_REGISTRY} make schema-register && make schema-verify"
 fi
 
@@ -115,7 +115,7 @@ if [[ -n "$AUDIT_URL" ]]; then
   pass "AUDIT_LOG_BASE_URL set to ${AUDIT_URL}"
 else
   echo "  ⚠️  WARN: AUDIT_LOG_BASE_URL unset — TenantIdpConfigChanged entries will accumulate"
-  echo "         Set once iam-audit-log is deployed (ops checklist item 9)"
+  echo "         Set once iam-audit-log is deployed (ops checklist item 10)"
 fi
 
 # ── 11. Deploy gate secrets ──────────────────────────────────────────────────

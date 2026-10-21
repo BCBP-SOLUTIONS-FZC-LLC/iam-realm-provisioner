@@ -3,7 +3,7 @@ iam-realm-provisioner {{ .Chart.Version }} deployed.
 This service is the single writer to the Keycloak Admin API and the system
 of record for tenant identity lifecycle (RP-1..RP-16), the three inbound
 SQS consumers (membership-realm-q, tenant-realm-q, billing-realm-q), and
-the iam.tenant.events topic's 9 published events.
+the iam.tenant.events topic's 10 published events.
 
 ━━ PRE-INSTALL CHECKLIST ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -11,7 +11,7 @@ Step 1 — Register & verify Glue event schemas (required before first install
          and after any schema change; pod panics at startup if schemas are
          missing from the registry):
 
-  make schema-register   # registers all 9 iam-tenant-events schemas to Glue
+  make schema-register   # registers all 10 iam-tenant-events schemas to Glue
   make schema-verify     # confirms each schema is AVAILABLE via GetSchemaByDefinition
   helm install ...       # only then install/upgrade
 

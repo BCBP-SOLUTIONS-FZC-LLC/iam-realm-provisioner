@@ -335,7 +335,7 @@ type ProvisionTrialResult struct {
 
 // ProvisionTrial implements RP-1 (§8.1): create the trial user in the
 // shared realm, stamp tenant_id, trigger verification email, and emit
-// TrialTenantProvisioned. Keycloak-effect-first, then local commit (§9.1).
+// TenantIdentityProvisioned + TrialTenantProvisioned. Keycloak-effect-first, then local commit (§9.1).
 // Idempotent via idempotencyKey (§9.2).
 func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey string, req ProvisionTrialRequest) (out *ProvisionTrialResult, err error) {
 	existing, found, err := s.idempotency.Begin(ctx, idempotencyKey, req.TenantID, domain.OpProvisionTrial)
@@ -396,6 +396,10 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 		if !ok {
 			return nil
 		}
+		if err := pub.Enqueue(ctx, tenantIdentityProvisionedEvent(ctx, req.TenantID, kcUserID,
+			req.TenantSlug, req.TenantName, req.Plan, domain.SignupTypeTrial, s.sharedRealm, domain.RealmStrategyShared)); err != nil {
+			return err
+		}
 		return pub.Enqueue(ctx, &domain.Event{
 			Type: domain.EventTrialTenantProvisioned, TenantID: req.TenantID,
 			Subject: "tenants/" + req.TenantID.String(),
@@ -414,6 +418,23 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 		s.log.WarnContext(ctx, "provision_trial: idempotency complete failed", "tenant_id", req.TenantID, "error", err.Error())
 	}
 	return result, nil
+}
+
+// tenantIdentityProvisionedEvent builds the TenantIdentityProvisioned event
+// RP-1 and RP-2 enqueue first in their commit transaction (§7.5, BFF-2
+// signup backstop). slug/name/plan are passed through exactly as received —
+// O&M's I-1 keeps whichever of this event or the BFF's own call lands
+// first, so the two must never differ.
+func tenantIdentityProvisionedEvent(ctx context.Context, tenantID, ownerUserID uuid.UUID, slug, name, plan, signupType, realm string, realmType domain.RealmStrategy) *domain.Event {
+	return &domain.Event{
+		Type: domain.EventTenantIdentityProvisioned, TenantID: tenantID,
+		Subject: "tenants/" + tenantID.String(),
+		Actor:   callerActor(ctx),
+		Data: domain.TenantIdentityProvisionedPayload{
+			TenantID: tenantID, OwnerUserID: ownerUserID, Slug: slug, Name: name, Plan: plan,
+			SignupType: signupType, Realm: realm, RealmType: string(realmType),
+		},
+	}
 }
 
 // selectShard places a new dedicated realm on the least-loaded shard,
@@ -462,7 +483,8 @@ type ProvisionDirectResult struct {
 
 // ProvisionDirect implements RP-2 (§8.2): provision the dedicated realm
 // straight away (no shared-realm intermediate), create the admin user, and
-// emit TenantRealmReady + DirectPaidSignup + TenantConverted(direct_signup=true).
+// emit TenantIdentityProvisioned + TenantRealmReady + DirectPaidSignup +
+// TenantConverted(direct_signup=true).
 func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKey string, req ProvisionDirectRequest) (out *ProvisionDirectResult, err error) {
 	existing, found, err := s.idempotency.Begin(ctx, idempotencyKey, req.TenantID, domain.OpProvisionDirect)
 	if err != nil {
@@ -497,7 +519,7 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 		s.failIdempotency(ctx, idempotencyKey)
 		return nil, err
 	}
-	_, err = s.keycloak.CreateInvitedUser(ctx, realmName, port.CreateUserRequest{
+	kcUserID, err := s.keycloak.CreateInvitedUser(ctx, realmName, port.CreateUserRequest{
 		Email: req.AdminEmail, FullName: req.AdminName, TenantID: req.TenantID,
 		HashedPasswordSeed: req.HashedPasswordSeed, EmailVerified: false,
 		RequiredActions: []string{"VERIFY_EMAIL"},
@@ -509,7 +531,7 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 		// otherwise destroy and recreate a perfectly good realm+OIDC
 		// clients just to dodge an email that's actually this tenant's own
 		// already-created user (§9.2).
-		_, err = s.resolveUserCreateConflict(ctx, realmName, req.AdminEmail, req.TenantID, err)
+		kcUserID, err = s.resolveUserCreateConflict(ctx, realmName, req.AdminEmail, req.TenantID, err)
 	}
 	if err != nil {
 		s.bestEffortDeleteRealm(ctx, realmName)
@@ -544,6 +566,13 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 		pub, ok := port.EventPublisherFromContext(ctx)
 		if !ok {
 			return nil
+		}
+		// First, so O&M's backstop normally sees the tenant before the
+		// realm-ready/settle events below (outbox order only — the topic is
+		// not FIFO, so O&M still tolerates any arrival order).
+		if err := pub.Enqueue(ctx, tenantIdentityProvisionedEvent(ctx, req.TenantID, kcUserID,
+			req.TenantSlug, req.TenantName, req.Plan, domain.SignupTypeDirectPaid, realmName, domain.RealmStrategyDedicated)); err != nil {
+			return err
 		}
 		if err := pub.Enqueue(ctx, &domain.Event{
 			Type: domain.EventTenantRealmReady, TenantID: req.TenantID,

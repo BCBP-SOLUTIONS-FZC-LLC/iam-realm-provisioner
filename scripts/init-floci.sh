@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Floci ready-hook — provisions this service's messaging topology (§7.1,
-# §7.3), the realm-export S3 bucket, and the Glue Schema Registry + all 9
+# §7.3), the realm-export S3 bucket, and the Glue Schema Registry + all 10
 # event schemas (§7.3.1). Runs automatically on container start via the
 # volume mount to /etc/floci/init/ready.d/. Replaces the former
 # scripts/init-localstack.sh — Floci is an open-source (MIT), always-free
@@ -22,7 +22,7 @@
 #                    queues are provisioned against this one topic so a
 #                    developer can hand-publish test events to any of them).
 #   4 fan-out SQS  — LLD §7.4's downstream-consumer mapping for this
-#                    service's own 9 produced events: tenant-orgm-q,
+#                    service's own 10 produced events: tenant-orgm-q,
 #                    tenant-audit-q (unfiltered — every event), tenant-notification-q
 #                    (TenantConverted/DirectPaidSignup/TrialExpired/
 #                    TenantSuspended/TenantReactivated), tenant-authz-q
@@ -39,7 +39,7 @@
 #                    tier emulates KMS, and REALM_EXPORT_KMS_KEY already
 #                    shipped unset in local dev before this migration —
 #                    that stays unchanged, not a regression.
-#   1 Glue registry — iam-tenant-events, 9 schemas, one per produced event,
+#   1 Glue registry — iam-tenant-events, 10 schemas, one per produced event,
 #                    registered from the same JSON Schema Draft-07 files
 #                    eventbus.GlueCodec ships, so GLUE_REGISTRY_TENANT_NAME
 #                    can stay set in .env and the app runs with the real
@@ -130,12 +130,12 @@ subscribe_queue "$TENANT_TOPIC_ARN" "$MEMBERSHIP_REALM_Q" '{"EventType": ["Depar
 subscribe_queue "$TENANT_TOPIC_ARN" "$BILLING_REALM_Q" '{"EventType": ["TenantReactivated"]}'
 
 # -- Outbound fan-out SQS (LLD §7.4) ---------------------------------------
-# Downstream-consumer queues for this service's own 9 produced events.
+# Downstream-consumer queues for this service's own 10 produced events.
 # In real deployments each belongs to its consumer (O&M/Audit/Notification/
 # AuthZ Enrichment); provisioned here so local dev/integration tests can
 # observe the full fan-out without those services running.
 
-# O&M — consumes all nine (settles/reconciles the tenants row).
+# O&M — consumes all ten (settles/reconciles the tenants row).
 TENANT_ORGM_Q=$(create_queue_with_dlq tenant-orgm-q)
 subscribe_queue "$TENANT_TOPIC_ARN" "$TENANT_ORGM_Q"
 
@@ -180,6 +180,7 @@ register_schema tenant_offboarded.json        TenantOffboarded
 register_schema tenant_reactivated.json       TenantReactivated
 register_schema tenant_realm_ready.json       TenantRealmReady
 register_schema tenant_suspended.json         TenantSuspended
+register_schema tenant_identity_provisioned.json TenantIdentityProvisioned
 register_schema trial_expired.json            TrialExpired
 register_schema trial_reactivated.json        TrialReactivated
 register_schema trial_tenant_provisioned.json TrialTenantProvisioned
@@ -190,10 +191,10 @@ echo "  SNS_TOPIC_TENANT_ARN=$TENANT_TOPIC_ARN"
 echo "  SQS_MEMBERSHIP_REALM_QUEUE_URL=$MEMBERSHIP_REALM_Q"
 echo "  SQS_TENANT_REALM_QUEUE_URL=$TENANT_REALM_Q"
 echo "  SQS_BILLING_REALM_QUEUE_URL=$BILLING_REALM_Q"
-echo "  SQS_TENANT_ORGM_QUEUE_URL=$TENANT_ORGM_Q (dev-only fan-out: all 9 produced events)"
-echo "  SQS_TENANT_AUDIT_QUEUE_URL=$TENANT_AUDIT_Q (dev-only fan-out: all 9 produced events)"
+echo "  SQS_TENANT_ORGM_QUEUE_URL=$TENANT_ORGM_Q (dev-only fan-out: all 10 produced events)"
+echo "  SQS_TENANT_AUDIT_QUEUE_URL=$TENANT_AUDIT_Q (dev-only fan-out: all 10 produced events)"
 echo "  SQS_TENANT_NOTIFICATION_QUEUE_URL=$TENANT_NOTIFICATION_Q (dev-only fan-out: TenantConverted/DirectPaidSignup/TrialExpired/TenantSuspended/TenantReactivated)"
 echo "  SQS_TENANT_AUTHZ_QUEUE_URL=$TENANT_AUTHZ_Q (dev-only fan-out: TenantConverted only)"
 echo "  SQS_TENANT_LIFECYCLE_UP_QUEUE_URL=$TENANT_LIFECYCLE_UP_Q (dev-only fan-out: TenantOffboarded — iam-user-profile ScrubTenant)"
 echo "  REALM_EXPORT_BUCKET=$BUCKET"
-echo "  GLUE_REGISTRY_TENANT_NAME=iam-tenant-events (9 schemas)"
+echo "  GLUE_REGISTRY_TENANT_NAME=iam-tenant-events (10 schemas)"

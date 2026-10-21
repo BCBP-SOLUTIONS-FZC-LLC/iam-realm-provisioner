@@ -28,7 +28,7 @@ sequenceDiagram
 
         RP ->>+ PG: RunInTx {
         RP ->> PG: UPSERT tenant_realms(tenant_id, realm='trial', strategy='shared', status='active')
-        RP ->>+ OB: outbox.Enqueue(TrialTenantProvisioned{tenant_id, realm:'trial', keycloak_user_id})
+        RP ->>+ OB: outbox.Enqueue(TenantIdentityProvisioned{...}, TrialTenantProvisioned{tenant_id, realm:'trial', keycloak_user_id})
         OB -->>- RP: inserted
         RP ->> PG: }  COMMIT
         PG -->>- RP: committed (local row + outbox row atomic, RP-EVT-1)

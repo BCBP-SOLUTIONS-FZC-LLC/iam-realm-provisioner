@@ -80,8 +80,8 @@ servers:
     protocol: sns
     description: |
       The `iam-tenant-events` SNS topic (shared with Org & Membership,
-      two-producer topic per HLD §9.1.1). This service publishes 9 of the
-      11 schemas registered in the `iam-tenant-events` Glue registry.
+      two-producer topic per HLD §9.1.1). This service publishes 10 of the
+      12 schemas registered in the `iam-tenant-events` Glue registry.
     security:
       - $ref: '#/components/securitySchemes/iamRole'
 
@@ -158,10 +158,12 @@ channels:
     address: "iam-tenant-events"
     servers:
       - $ref: '#/servers/snsTenantEvents'
-    description: The shared iam.tenant.events SNS topic — this service's 9 published events.
+    description: The shared iam.tenant.events SNS topic — this service's 10 published events.
     messages:
       TrialTenantProvisioned:
         $ref: '#/components/messages/TrialTenantProvisioned'
+      TenantIdentityProvisioned:
+        $ref: '#/components/messages/TenantIdentityProvisioned'
       TenantRealmReady:
         $ref: '#/components/messages/TenantRealmReady'
       TenantConverted:
@@ -229,6 +231,20 @@ operations:
     summary: RP-1 emits TrialTenantProvisioned on shared-trial user creation.
     messages:
       - $ref: '#/channels/iamTenantEvents/messages/TrialTenantProvisioned'
+
+  sendTenantIdentityProvisioned:
+    action: send
+    channel:
+      $ref: '#/channels/iamTenantEvents'
+    summary: >-
+      RP-1 (trial) and RP-2 (direct paid) emit TenantIdentityProvisioned once
+      the tenant's admin user exists in Keycloak — the signup backstop (BFF-2)
+      O&M consumes to run I-1 itself if the BFF never created the tenant.
+      Enqueued first in the commit transaction (RP-2: before TenantRealmReady,
+      DirectPaidSignup, TenantConverted); the topic is not FIFO, so consumers
+      must tolerate any arrival order.
+    messages:
+      - $ref: '#/channels/iamTenantEvents/messages/TenantIdentityProvisioned'
 
   sendTenantRealmReady:
     action: send
@@ -335,8 +351,8 @@ components:
       description: |
         This service is the producer. Emitted onto the shared iam-tenant-events
         SNS topic (co-produced alongside Org & Membership, HLD §9.1.1) via the
-        transactional outbox. All 9 of this service's own event types —
-        TrialTenantProvisioned, TenantRealmReady, TenantConverted,
+        transactional outbox. All 10 of this service's own event types —
+        TrialTenantProvisioned, TenantIdentityProvisioned, TenantRealmReady, TenantConverted,
         DirectPaidSignup, TrialExpired, TrialReactivated, TenantSuspended,
         TenantOffboarded, TenantReactivated(source=operator) — carry this tag.
     consumed:
@@ -370,6 +386,15 @@ components:
         - $ref: '#/components/messageTraits/glueWireFormat'
       payload:
         $ref: '#/components/schemas/TrialTenantProvisionedPayload'
+
+    TenantIdentityProvisioned:
+      title: TenantIdentityProvisioned
+      tags:
+        - $ref: '#/components/tags/published'
+      traits:
+        - $ref: '#/components/messageTraits/glueWireFormat'
+      payload:
+        $ref: '#/components/schemas/TenantIdentityProvisionedPayload'
 
     TenantRealmReady:
       title: TenantRealmReady
@@ -531,6 +556,20 @@ components:
         tenant_id: { type: string, format: uuid }
         realm: { type: string, const: "trial" }
         keycloak_user_id: { type: string, format: uuid }
+
+    TenantIdentityProvisionedPayload:
+      type: object
+      additionalProperties: true
+      required: [tenant_id, owner_user_id, slug, name, plan, signup_type, realm, realm_type]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        owner_user_id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        plan: { type: string, enum: [starter, pro, enterprise] }
+        signup_type: { type: string, enum: [trial, direct_paid] }
+        realm: { type: string }
+        realm_type: { type: string, enum: [shared, dedicated] }
 
     TenantRealmReadyPayload:
       type: object

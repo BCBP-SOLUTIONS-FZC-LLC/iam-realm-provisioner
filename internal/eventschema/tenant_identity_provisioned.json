@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TenantIdentityProvisionedPayload",
+  "type": "object",
+  "required": [
+    "tenant_id",
+    "owner_user_id",
+    "slug",
+    "name",
+    "plan",
+    "signup_type",
+    "realm",
+    "realm_type"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "owner_user_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "slug": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "plan": {
+      "type": "string",
+      "enum": [
+        "starter",
+        "pro",
+        "enterprise"
+      ]
+    },
+    "signup_type": {
+      "type": "string",
+      "enum": [
+        "trial",
+        "direct_paid"
+      ]
+    },
+    "realm": {
+      "type": "string"
+    },
+    "realm_type": {
+      "type": "string",
+      "enum": [
+        "shared",
+        "dedicated"
+      ]
+    }
+  }
+}

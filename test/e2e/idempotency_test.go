@@ -26,7 +26,7 @@ func TestProvisionTrial_IdempotencyKeyReplay_NoDuplicateKeycloakUser(t *testing.
 	slug := "e2e-idem-" + uuid.NewString()[:8]
 	req := provisionTrialBody{
 		TenantID: tenantID, TenantName: "E2E Idempotency Co", TenantSlug: slug,
-		AdminEmail: slug + "@example.com", AdminName: "Idem Admin", Plan: "trial",
+		AdminEmail: slug + "@example.com", AdminName: "Idem Admin", Plan: "starter",
 	}
 	key := newIdempotencyKey()
 	headers := sysHeaders(tenantID)
@@ -67,7 +67,7 @@ func TestProvisionTrial_MissingIdempotencyKey_Rejected(t *testing.T) {
 	slug := "e2e-noidem-" + uuid.NewString()[:8]
 	req := provisionTrialBody{
 		TenantID: tenantID, TenantName: "E2E No-Idem Co", TenantSlug: slug,
-		AdminEmail: slug + "@example.com", AdminName: "No Idem Admin", Plan: "trial",
+		AdminEmail: slug + "@example.com", AdminName: "No Idem Admin", Plan: "starter",
 	}
 	resp, er := decodeErrorBody(t, http.MethodPost, "/api/v1/internal/tenants/provision-trial", sysHeaders(tenantID), req)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
