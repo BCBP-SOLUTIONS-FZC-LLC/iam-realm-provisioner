@@ -16,6 +16,7 @@ This service has never been deployed to any environment — there is no released
 
 ### Changed
 
+- **deploy: platform namespace names gateway / observability (2026-10-22):** Helm NetworkPolicy ingress selector `envoy-gateway-system` → `gateway` (Envoy Gateway data plane) and metrics-ingress selector `monitoring` → `observability` (Prometheus), matching the platform namespace list (AWS dev environment HLD). Staging/prod/dev `existingCallerNamespaces` renamed and de-duplicated (the Envoy proxy and Signup BFF entries both became `gateway`); comments reconciled. `prometheus-adapter-rule.yaml` and the Pushgateway scrape target → `observability`.
 - **`platform-gincommon/v2` v2.0.0 → v2.1.0**: additive only — RFC 9457 extension members (`Error.WithExtension`/`WithExtensions`, `Builder.Extension`/`Extensions`, `Problem.Extension`, `ValidExtensionName`); a `Problem` with no extensions serialises byte-identically, so error responses are unchanged. No code change, no new dependencies (only the gincommon line in `go.mod`/`go.sum` moved); the extension API is not adopted yet.
 - **RP-1 validates `plan`** ∈ `starter`|`pro`|`enterprise` (`400 INVALID_REQUEST`), matching RP-2 — the new event's schema enums `plan`, so an unchecked value would pass Keycloak and then fail enqueue-time validation.
 - **RP-2 keeps the created admin user's `sub`** (previously discarded from `CreateInvitedUser` and the same-tenant email-conflict resolve) to populate `owner_user_id`.
