@@ -3,7 +3,7 @@
   rather than letting the pod panic at runtime.
 
   RP-GAP-005: GLUE_REGISTRY_TENANT_NAME must be set in non-dev/test
-  environments. The server resolves all 9 produced schema version UUIDs at
+  environments. The server resolves all 10 produced schema version UUIDs at
   startup via Glue GetSchemaByDefinition — a missing registry name causes an
   immediate panic. Run 'make schema-register && make schema-verify' before
   deploying to staging or production.

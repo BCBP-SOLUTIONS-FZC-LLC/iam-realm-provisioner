@@ -3,7 +3,7 @@
 The Realm Provisioner Service — the **single writer to the Keycloak Admin API** (RP-INV-1) and the system of record for tenant identity lifecycle in the IAM subsystem. It provisions and tears down Keycloak realms and users, migrates trial tenants into dedicated realms, configures per-tenant SAML/OIDC identity providers (secrets held only in OpenBao, never Postgres), and drives the tenant lifecycle state machine (trial → active → suspended → offboarded) via seven scheduled reconciler jobs.
 
 **Repository:** `github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`
-**Module:** Go 1.26.9 · private module · deployed as three binaries from one image (`cmd/server`, `cmd/reconciler`, `cmd/migrate`)
+**Module:** Go 1.26.10 · private module · deployed as three binaries from one image (`cmd/server`, `cmd/reconciler`, `cmd/migrate`)
 **Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.23 Approved** — names frozen at v1.0 sign-off (`docs/lld/iam-lld-realm-provisioner-service.md`)
 
 ---
@@ -52,8 +52,8 @@ Every mutating endpoint below marked "required" enforces `RequireIdempotencyKey`
 
 | # | Method & Path | Idempotency-Key | Purpose |
 |---|---|---|---|
-| RP-1 | `POST /tenants/provision-trial` | required | Create a trial user in the shared `trial` realm, stamp `tenant_id`, trigger `VERIFY_EMAIL`. Emits `TrialTenantProvisioned`. |
-| RP-2 | `POST /tenants/provision-direct` | required | Provision a **dedicated** realm straight away: create realm from template, register OIDC clients, create admin user. Emits `TenantRealmReady` + `DirectPaidSignup` + `TenantConverted{direct_signup:true}`. |
+| RP-1 | `POST /tenants/provision-trial` | required | Create a trial user in the shared `trial` realm, stamp `tenant_id`, trigger `VERIFY_EMAIL`. `plan` ∈ `starter`\|`pro`\|`enterprise`. Emits `TenantIdentityProvisioned` + `TrialTenantProvisioned`. |
+| RP-2 | `POST /tenants/provision-direct` | required | Provision a **dedicated** realm straight away: create realm from template, register OIDC clients, create admin user. Emits `TenantIdentityProvisioned` + `TenantRealmReady` + `DirectPaidSignup` + `TenantConverted{direct_signup:true}`. |
 | RP-3 | `POST /tenants/:id/convert` | required | Trial → dedicated conversion: create dedicated realm, migrate every trial user (`sub`-preserving, TOTP copied, WebAuthn re-enrollment flagged), force-logout the shared realm. Emits `TenantRealmReady` + `TenantConverted{direct_signup:false}`. |
 | RP-4 | `POST /tenants/:id/revert-conversion` | required | Undo Convert within the 7-day reversal window: migrate users back, tear down the dedicated realm, and re-mint the tenant's `platform-automation` client back in the shared realm (§2.5 — the dedicated realm's client died with the realm). `409 revert_window_expired` past the window. Emits `TrialReactivated`. Named callers: Billing (on fraud/chargeback dispute, CD-10). |
 | RP-5 | `POST /tenants/:id/users` | required | Create an invited user in the tenant's current realm with `required_actions` applied verbatim. No local persistence. |
@@ -145,7 +145,7 @@ iam-realm-provisioner/
 │   │   ├── domain/                    # Entities, value objects, ErrorCode taxonomy (§17), event payload structs — no deps beyond google/uuid
 │   │   ├── port/                      # KeycloakAdmin (RP-INV-1's sole seam, incl. §2.5 service-account methods), repositories, IdempotencyStore, Inbox/InboxPruner (platform-events inbox), OpenBaoClient, OrgMembershipClient, ObjectStore, SubscriptionLapseReader, TokenServiceClient
 │   │   └── service/                   # ProvisioningService, LifecycleService, IdpService, RealmConfigService, MfaService, AuditDeliveryService
-│   ├── eventschema/                   # Embedded JSON Schema draft-07: 9 produced + 6 consumed, + asyncapi_drift_test.go
+│   ├── eventschema/                   # Embedded JSON Schema draft-07: 10 produced + 6 consumed, + asyncapi_drift_test.go
 │   └── adapter/
 │       ├── inbound/
 │       │   ├── http/                  # Gin handlers (RP-1..RP-17), DTOs, middleware, router.go, /asyncapi
@@ -164,7 +164,7 @@ iam-realm-provisioner/
 │           └── metrics/               # iam_realm_provisioner_* (Tier 3) + platform_* (Tier 1) Prometheus counters/histograms/gauges
 ├── pkg/requestctx/                    # Typed RequestContext{UserID, TenantID, Roles}
 ├── api/
-│   ├── asyncapi.yaml                  # AsyncAPI 3.0 — iam-tenant-events (9 published) + 3 inbound SQS channels + 3 downstream Commercial consumer queue references (CD-26)
+│   ├── asyncapi.yaml                  # AsyncAPI 3.0 — iam-tenant-events (10 published) + 3 inbound SQS channels + 3 downstream Commercial consumer queue references (CD-26)
 │   └── embed.go                       # //go:embed asyncapi.yaml — served from the compiled binary, no source tree in the image
 ├── deploy/                            # Helm chart, AWS IAM policy, OpenBao policy, Prometheus alerts, Keycloak realm template
 ├── docs/lld/                          # LLD v1.23 (names frozen at v1.0)
@@ -262,7 +262,7 @@ O&M is this service's primary caller, in both directions:
 | O&M → RP | `ResetMFA` → RP-9 | Fail-closed, no reconciler — unlike RP-16 |
 | RP → O&M | `OrgMembershipClient.HasResidualMFARequirement` | Backs the `membership-realm-q` MFA-revoke decision (§ below); read-only |
 | O&M → events → RP | `TrialStarted` on `tenant-realm-q` | Idempotent upsert of `trial_ends_at` only — RP never queries O&M for trial timing, it's push-only |
-| RP → events → O&M | All 9 produced events on `iam.tenant.events` | O&M consumes on its own `tenant-orgm-q` |
+| RP → events → O&M | All 10 produced events on `iam.tenant.events` | O&M consumes on its own `tenant-orgm-q` |
 
 ### 6. AuthZ Enrichment — event-only
 
@@ -270,11 +270,12 @@ AuthZ Enrichment does not call this service directly; it subscribes to `TenantCo
 
 ### 7. Subscribing to SNS events
 
-This service publishes to **`iam-tenant-events`** via a transactional outbox — 9 event types, envelope `source = "iam-realm-provisioner"`. `tenant_id` is on the **envelope**, never duplicated inside `data`.
+This service publishes to **`iam-tenant-events`** via a transactional outbox — 10 event types, envelope `source = "iam-realm-provisioner"`. `tenant_id` is on the **envelope**, never duplicated inside `data`.
 
 | Event | Producer | Key payload fields |
 |---|---|---|
 | `TrialTenantProvisioned` | RP-1 | `tenant_id`, `realm`, `keycloak_user_id` |
+| `TenantIdentityProvisioned` | RP-1, RP-2 | `tenant_id`, `owner_user_id`, `slug`, `name`, `plan`, `signup_type` (`trial`\|`direct_paid`), `realm`, `realm_type` (`shared`\|`dedicated`) — BFF-2 signup backstop: O&M runs I-1 if the tenant is missing (RP-D16) |
 | `TenantRealmReady` | RP-2, RP-3 | `tenant_id`, `realm`, `keycloak_shard`, `oidc_clients[]` |
 | `TenantConverted` | RP-2 (`direct_signup:true`), RP-3 (`false`) | `tenant_id`, `realm`, `plan`, `billing_subscription_id?`, `users_migrated`, `direct_signup` |
 | `DirectPaidSignup` | RP-2 | `tenant_id`, `realm`, `direct_signup` |
@@ -375,7 +376,7 @@ Every job is idempotent per tenant (safe to re-run) and batched (`RECONCILER_BAT
 
 ### Prerequisites
 
-- Go 1.26.9+
+- Go 1.26.10+
 - Docker (Postgres, Floci, Keycloak, OpenBao — `make docker-up`)
 - `GOPRIVATE=github.com/BCBP-SOLUTIONS-FZC-LLC/*` (`GONOSUMDB` too) and an SSH key registered with the BCBP org
 
@@ -427,12 +428,12 @@ make run         # start the server on :8080 (metrics on :9090)
 | `make clean` | Remove `bin/` and coverage artefacts |
 | `make schema-pull` | Pull the `platform-schemagov` Docker image (`0.4`) |
 | `make extract-schemas` | Derive `internal/eventschema/*.json` from `api/asyncapi.yaml` |
-| `make schema-validate` | Validate AsyncAPI + this service's 9 event schemas — 8 passes, no AWS credentials needed |
+| `make schema-validate` | Validate AsyncAPI + this service's 10 event schemas — 8 passes, no AWS credentials needed |
 | `make schema-diff CURRENT=… PROPOSED=…` | Show compatibility diff between two schema files |
 | `make swag` | Generate Swagger docs into `docs/swagger/` from handler annotations — re-run and commit whenever they change |
 | `make swag-check` | Fails if regenerating Swagger docs from current handler annotations would change `docs/swagger/` (regenerate-and-diff, `.github/scripts/check-swagger-stale.sh`) — wired into `validate-quality.yml` |
-| `make schema-register` | Register this service's 9 event schemas to the shared Glue registry (requires `GLUE_REGISTRY_TENANT_NAME`) |
-| `make schema-verify` | Pre-deploy check that each of this service's 9 schema definitions is registered and `AVAILABLE` — the same lookup the pod runs at startup |
+| `make schema-register` | Register this service's 10 event schemas to the shared Glue registry (requires `GLUE_REGISTRY_TENANT_NAME`) |
+| `make schema-verify` | Pre-deploy check that each of this service's 10 schema definitions is registered and `AVAILABLE` — the same lookup the pod runs at startup |
 | `make schema-prune` | Dry-run: list orphaned Glue schemas (add `EXECUTE=true` to delete — see `docs/runbook-schema-registry.md` for the shared-registry caveat with `iam-org-membership`) |
 
 ### Running a single test
@@ -531,14 +532,14 @@ make docker-up   # Postgres + Floci (4572) + Floci UI (4504) + Keycloak + OpenBa
 | `membership-realm-q` (+ `-dlq`) | SQS queue, filtered `EventType IN [DepartmentMembershipGranted, DepartmentMembershipLevelChanged, TenantRoleGranted, TenantRoleRevoked]` |
 | `tenant-realm-q` (+ `-dlq`) | SQS queue, filtered `EventType IN [TrialStarted]` |
 | `billing-realm-q` (+ `-dlq`) | SQS queue, filtered `EventType IN [TenantReactivated]` |
-| `tenant-orgm-q` (+ `-dlq`) | SQS queue, **unfiltered** — dev-only fan-out for O&M's LLD §7.4 subscription (all 9 produced events) |
-| `tenant-audit-q` (+ `-dlq`) | SQS queue, **unfiltered** — dev-only fan-out for Audit's LLD §7.4 subscription (all 9 produced events) |
+| `tenant-orgm-q` (+ `-dlq`) | SQS queue, **unfiltered** — dev-only fan-out for O&M's LLD §7.4 subscription (all 10 produced events) |
+| `tenant-audit-q` (+ `-dlq`) | SQS queue, **unfiltered** — dev-only fan-out for Audit's LLD §7.4 subscription (all 10 produced events) |
 | `tenant-notification-q` (+ `-dlq`) | SQS queue, dev-only fan-out for Notification's LLD §7.4 subscription, filtered `EventType IN [TenantConverted, DirectPaidSignup, TrialExpired, TenantSuspended, TenantReactivated]` |
 | `tenant-authz-q` (+ `-dlq`) | SQS queue, dev-only fan-out for AuthZ Enrichment's LLD §7.4 subscription, filtered `EventType IN [TenantConverted]` |
 | `iam-realm-exports` | S3 bucket (`REALM_EXPORT_BUCKET`, RP-EVT-4 offboarding target) |
-| `iam-tenant-events` | Glue registry, 9 schemas — one per produced event, real `GlueCodec` wire format locally (no `NoopCodec` fallback needed) |
+| `iam-tenant-events` | Glue registry, 10 schemas — one per produced event, real `GlueCodec` wire format locally (no `NoopCodec` fallback needed) |
 
-The four fan-out queues mirror LLD §7.4's "Outbound — `iam.tenant.events` via the outbox" consumer mapping exactly — in production each belongs to its real consumer (O&M, Audit, Notification, AuthZ Enrichment), which is why this service never owns one itself; provisioning them locally (the same approach `iam-org-membership`'s `init-floci.sh` takes for its own topics) lets a developer observe the full fan-out for any of this service's 9 produced events without standing up those services.
+The four fan-out queues mirror LLD §7.4's "Outbound — `iam.tenant.events` via the outbox" consumer mapping exactly — in production each belongs to its real consumer (O&M, Audit, Notification, AuthZ Enrichment), which is why this service never owns one itself; provisioning them locally (the same approach `iam-org-membership`'s `init-floci.sh` takes for its own topics) lets a developer observe the full fan-out for any of this service's 10 produced events without standing up those services.
 
 In production the three inbound queues above subscribe to **three different upstream topics** (O&M's `iam.membership.events`, O&M's `iam.tenant.events`, Billing's `billing.events`); in local dev, without those services running, the script subscribes all three to this service's own `iam-tenant-events` topic so a developer can hand-publish test events to any of them. Each SNS→SQS subscription sets `RawMessageDelivery=true`.
 
@@ -575,7 +576,7 @@ curl -s -X POST http://localhost:8080/api/v1/internal/tenants/provision-trial \
   -d "{\"tenant_id\":\"$TENANT_ID\",\"tenant_name\":\"Acme\",\"tenant_slug\":\"acme\",\"admin_email\":\"owner@acme.test\",\"admin_name\":\"Owner\",\"plan\":\"trial\"}" | jq .
 ```
 
-A `201` means the row and the `TrialTenantProvisioned` outbox event committed atomically. Per LLD §7.4, `TrialTenantProvisioned` fans out to `tenant-orgm-q` and `tenant-audit-q` (both unfiltered) — expect the message in either within ~500 ms (Step 5). It never reaches `tenant-notification-q`/`tenant-authz-q` (filtered to a different event subset) or any of the three *inbound* queues (`membership-realm-q`/`tenant-realm-q`/`billing-realm-q` filter for entirely different event types this service consumes, not produces).
+A `201` means the row and the `TenantIdentityProvisioned` + `TrialTenantProvisioned` outbox events committed atomically. Per LLD §7.4, `TrialTenantProvisioned` fans out to `tenant-orgm-q` and `tenant-audit-q` (both unfiltered) — expect the message in either within ~500 ms (Step 5). It never reaches `tenant-notification-q`/`tenant-authz-q` (filtered to a different event subset) or any of the three *inbound* queues (`membership-realm-q`/`tenant-realm-q`/`billing-realm-q` filter for entirely different event types this service consumes, not produces).
 
 ### Step 5 — Read messages from SQS
 
@@ -616,7 +617,7 @@ docker compose exec postgres psql -U postgres -d provisioner -c \
 ### Canonical tests (do not break)
 
 - **`test/postgres/rls_test.go`** — the 5 canonical RLS cases (missing GUC → 0 rows; cross-tenant `INSERT`/`UPDATE` rejected; cross-tenant `SELECT`/`UPDATE` see/affect 0 rows; **Case 5** — no GUC leakage across a pooled PgBouncer backend, pool pinned to `MaxConns=1`) plus two structural tests (every tenant-scoped table has `rowsecurity=true AND forcerowsecurity=true`; `outbox_events`/`processed_events`/`exporter_watermarks` deliberately do not).
-- **`internal/eventschema/asyncapi_drift_test.go`** — asserts `api/asyncapi.yaml`'s `iamTenantEvents` channel message list and `eventschema.ByEventType`'s map keys name exactly the same 9 events. This repo's CI-enforceable substitute for a live AWS Glue Schema Registry comparison.
+- **`internal/eventschema/asyncapi_drift_test.go`** — asserts `api/asyncapi.yaml`'s `iamTenantEvents` channel message list and `eventschema.ByEventType`'s map keys name exactly the same 10 events. This repo's CI-enforceable substitute for a live AWS Glue Schema Registry comparison.
 - **RP-INV-1 grep** — `.github/scripts/arch-lint.sh`: no `Nerzal/gocloak` import outside `internal/adapter/outbound/keycloak/`.
 - **RLS-6 grep** — inline in `validate-quality.yml` (not a standalone script, matching the sibling IAM services): no non-`SET LOCAL` write to `app.tenant_id`.
 
@@ -742,7 +743,7 @@ Before the first production deploy, work through the eleven one-time platform/op
 | `iam-realm-provisioner-reconciler` | `/iam-realm-provisioner-reconciler` | One-shot reconciler (`cmd/reconciler`), dispatched via `--job=<name>` by the 7 K8s CronJobs. |
 | `migrate` | `/migrate` | Schema migration (`cmd/migrate`) — run by the Helm pre-install/pre-upgrade hook Job before replicas roll, so they start with `RUN_MIGRATIONS=false`. |
 
-Two-stage `Dockerfile`: `golang:1.26.9-bookworm` builder, runtime is `gcr.io/distroless/static-debian12:nonroot` (no shell, non-root) — only the three compiled binaries and `deploy/keycloak/realm-template.json` are copied in, never the source tree (`api/asyncapi.yaml` is compiled in via `//go:embed`). `EXPOSE 8080 9090`.
+Two-stage `Dockerfile`: `golang:1.26.10-bookworm` builder, runtime is `gcr.io/distroless/static-debian12:nonroot` (no shell, non-root) — only the three compiled binaries and `deploy/keycloak/realm-template.json` are copied in, never the source tree (`api/asyncapi.yaml` is compiled in via `//go:embed`). `EXPOSE 8080 9090`.
 
 ### Helm chart
 
@@ -763,7 +764,7 @@ Nine workflow files, including a tag-triggered `release.yml` (`VERSIONING.md` §
 - **`validate-test.yml`** (reusable) — `make test-ci` (unit + postgres/RLS + integration, `-race`, merged coverage) → `coverage-gate.sh` (`COVERAGE_THRESHOLD: '95'` pinned in this workflow) → uploads `coverage.out` as an artifact → `arch-lint.sh` (layering + RP-INV-1; RLS-6 is inline in `validate-quality.yml` instead) → `metrics-registry-lint.sh` (Enterprise Platform Observability Standard — no removed metric name in rules/HPA/adapter; alerts on `proposed` metrics labelled `metric_status: proposed`). A separate `e2e` job in the same workflow runs `make test-e2e` in parallel with `test`, matching `iam-authz-enrichment`. It drives the production router over real HTTP against its own Postgres and Keycloak 26 testcontainers. `ci.yml` and `release.yml` gate on both jobs.
 - **`validate-quality.yml`** (reusable) — `go mod verify` → a grep rejecting HTML-escaped operators (`&gt;`/`&lt;`/`&amp;`) in workflow/script files → an inline RLS-6 gate (reject non-transaction-local `SET app.tenant_id`, matching the sibling IAM services' convention of inlining this check directly in the workflow rather than a standalone script) → `check-metric-naming.sh` (Enterprise Platform Observability Standard naming/suffix/label/registry-compliance rules, mirroring the sibling IAM services' identically-named step) → `gofmt` check → `go mod tidy` drift check → `go vet` → `golangci-lint` → `govulncheck` → a Dockerfile digest-pin check (rejects a floating `FROM` tag without `@sha256:...`). The AsyncAPI-vs-Glue drift gate (`platform-schemagov validate`) runs separately, in `schema-registry.yml`'s `pr-check` job (see below).
 - **`changelog-check.yml`** — fails a PR that touches `internal/`, `api/`, `deploy/`, `cmd/`, or `pkg/` without also updating `CHANGELOG.md`.
-- **`schema-registry.yml`** — registers this service's 9 event schemas to the shared `iam-tenant-events` Glue registry: PR read-only validate+diff, push-to-`main`/release full validate→diff→register→changelog pipeline against staging/production. See `docs/runbook-schema-registry.md`.
+- **`schema-registry.yml`** — registers this service's 10 event schemas to the shared `iam-tenant-events` Glue registry: PR read-only validate+diff, push-to-`main`/release full validate→diff→register→changelog pipeline against staging/production. See `docs/runbook-schema-registry.md`.
 - **`schema-prune.yml`** — monthly dry-run orphan report plus an operator `workflow_dispatch` execute path (archives to `docs/schema-archive/` before `glue:DeleteSchema`); hard-blocks execute while `iam-org-membership`'s `TenantCreated`/`TrialStarted` are present in the shared registry.
 - **`schema-health-quarterly.yml`** — read-only quarterly GitHub Step Summary: lifecycle-annotation lint + Glue schema version-accumulation scan.
 - **`freeze-watchdog.yml`** — daily cron alerting when `schema-registry.yml`'s `SCHEMA_FREEZE` environment variable (staging/production) has been left active too long (`::warning` at 24h, `::error`+job failure at 72h) — a forgotten freeze silently blocks all schema registration with no CI failure otherwise. Modeled on sibling `iam-user-profile`'s workflow of the same name.
@@ -906,7 +907,7 @@ This service sits on **no synchronous request-path dependency for any other serv
 | RP-3 Convert — old-credential revoke | Token Service (TS-3 read + TS-2 POST `.../credentials/:version/revoke`) | best-effort, post-commit | Logged and non-fatal; the old shared-realm credential remains active until TS's own rotation sweep; `503 token_service_unavailable` or missing rotating version → skipped with WARN |
 | RP-11 GetRealm — IdP count query | `keycloak_idp_configs` (same Postgres pool) | fail-closed (503, never silent 0) | `503 db_unavailable` or `503 request_timeout` — never silently returns 0 (which would permit an SSO-losing plan downgrade) |
 | Invite (O&M → RP-5) | Keycloak Admin API | fail-closed | `502` → O&M `503`; no invitation |
-| MFA reset (O&M → RP-9) | Keycloak Admin API | fail-closed | `502` → O&M `503`; no `MFAReset` — no reconciler |
+| MFA reset (O&M → RP-10) | Keycloak Admin API | fail-closed | `502` → O&M `503`; no `MFAReset` — no reconciler |
 | Realm-config (O&M → RP-8) | Keycloak Admin API | fail-open + durable reconcile | `pending` row, RP-C4 converges (RP-INV-6) |
 | RP-6 / RP-7 IdP | OpenBao KV + Keycloak | fail-closed | No partial `keycloak_idp_configs` row |
 | RP-6 / RP-7 IdP audit entry | Audit Log AL-5 direct-write (`POST /api/v1/internal/audit-entries`) | async, retried from `pending_audit_entries` | Rows accumulate if `AUDIT_LOG_BASE_URL` unset (WARN, drainer off); 429/5xx → backoff retry; other 4xx (`metadata_too_large` is guarded at 8192 bytes before send) → `failed` (permanent park) |

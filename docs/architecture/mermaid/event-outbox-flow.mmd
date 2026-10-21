@@ -8,7 +8,7 @@ sequenceDiagram
     participant SNS as SNS — single topic iam.tenant.events<br/>(events.NewSNSPublisher, NOT a RoutingPublisher)
     participant OMQ as SQS tenant-orgm-q / tenant-audit-q / tenant-notif-q / tenant-authz-q<br/>(O&M's own subscriptions — this service never self-consumes)
 
-    Note over SVC,OB: Phase 1 — Atomic write + event enqueue (RP-EVT-1 / CONS-1)<br/>Every one of the 9 published events shares its RunInTx with the local state change that caused it
+    Note over SVC,OB: Phase 1 — Atomic write + event enqueue (RP-EVT-1 / CONS-1)<br/>Every one of the 10 published events shares its RunInTx with the local state change that caused it
 
     SVC ->>+ TX: RunInTx(ctx, func(txCtx))
     TX ->>+ DB: UPSERT/UPDATE tenant_realms (or keycloak_idp_configs, record_version optimistic lock)
@@ -38,7 +38,7 @@ sequenceDiagram
         end
     end
 
-    SNS ->>+ OMQ: fan-out by per-event SNS subscription filter policy<br/>(9 event types — TrialTenantProvisioned, TenantRealmReady, TenantConverted,<br/>DirectPaidSignup, TrialExpired, TrialReactivated, TenantSuspended,<br/>TenantOffboarded, TenantReactivated{source=operator})
+    SNS ->>+ OMQ: fan-out by per-event SNS subscription filter policy<br/>(10 event types — TrialTenantProvisioned, TenantIdentityProvisioned, TenantRealmReady, TenantConverted,<br/>DirectPaidSignup, TrialExpired, TrialReactivated, TenantSuspended,<br/>TenantOffboarded, TenantReactivated{source=operator})
     deactivate OMQ
     Note over OMQ: O&M settles tenants row · Audit · Notification · AuthZ cache invalidation
 

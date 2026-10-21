@@ -30,7 +30,7 @@ ServiceAccount's projected JWT, not IRSA/STS). See `deploy/openbao/`.
 
 | Action | Purpose | LLD ref |
 |---|---|---|
-| `sns:Publish` | Outbox → SNS `iam-tenant-events` topic (this service's 9 published events) | §7.3 |
+| `sns:Publish` | Outbox → SNS `iam-tenant-events` topic (this service's 10 published events) | §7.3 |
 | `sqs:ReceiveMessage` / `DeleteMessage` / `GetQueueAttributes` / `ChangeMessageVisibility` | Three inbound consumers on `membership-realm-q` / `tenant-realm-q` / `billing-realm-q` | §7.1 |
 | `sqs:GetQueueAttributes` / `ReceiveMessage` on the three DLQs | Ops visibility into DLQ depth (`deploy/monitoring/app-alerts.yml`'s `{membership,tenant,billing}-realm-q` DLQ alerts) — read-only for triage, not a consume-and-delete grant | §11.5 |
 | `glue:GetSchemaByDefinition` (+ read-only siblings) | `GlueCodec` resolves each schema's version ID once at startup by definition (this build's embedded schema) — no periodic refresh | §13.4 |

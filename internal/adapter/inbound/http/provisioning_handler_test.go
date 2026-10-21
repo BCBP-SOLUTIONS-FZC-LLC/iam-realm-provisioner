@@ -47,9 +47,21 @@ func TestProvisionTrial_Happy(t *testing.T) {
 	if body.Realm != "trial" || body.Strategy != "shared" || body.KeycloakUserID != kcUserID || !body.EmailVerificationSent {
 		t.Fatalf("unexpected result: %+v", body)
 	}
-	if len(d.tx.pub.events) != 1 || d.tx.pub.events[0].Type != domain.EventTrialTenantProvisioned {
-		t.Fatalf("expected TrialTenantProvisioned event, got %+v", d.tx.pub.events)
+	if len(d.tx.pub.events) != 2 || d.tx.pub.events[0].Type != domain.EventTenantIdentityProvisioned ||
+		d.tx.pub.events[1].Type != domain.EventTrialTenantProvisioned {
+		t.Fatalf("expected TenantIdentityProvisioned+TrialTenantProvisioned events, got %+v", d.tx.pub.events)
 	}
+}
+
+// RP-1 enforces the same plan set as RP-2, since TenantIdentityProvisioned
+// carries the plan to O&M's I-1 under a schema enum.
+func TestProvisionTrial_UnsupportedPlan_Rejected(t *testing.T) {
+	d := newServiceDeps() // keycloak.CreateTrialUserFn left nil — a bypass would panic
+	tenantID := uuid.New()
+	headers := withHeader(sysHeaders(), "Idempotency-Key", "trial-plan-1")
+	body := `{"tenant_id":"` + tenantID.String() + `","tenant_name":"Acme","tenant_slug":"acme","admin_email":"a@example.com","admin_name":"Admin","plan":"trial"}`
+	rec := doRequest(d.engine(), http.MethodPost, provisionTrialPath, headers, body)
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
 func TestProvisionTrial_MissingIdempotencyKey(t *testing.T) {
@@ -122,8 +134,8 @@ func TestProvisionDirect_Happy(t *testing.T) {
 	if body.Strategy != "dedicated" || body.KeycloakShard == "" || len(body.OIDCClients) != 2 {
 		t.Fatalf("unexpected result: %+v", body)
 	}
-	if len(d.tx.pub.events) != 3 {
-		t.Fatalf("expected 3 events (TenantRealmReady+DirectPaidSignup+TenantConverted), got %d", len(d.tx.pub.events))
+	if len(d.tx.pub.events) != 4 {
+		t.Fatalf("expected 4 events (TenantIdentityProvisioned+TenantRealmReady+DirectPaidSignup+TenantConverted), got %d", len(d.tx.pub.events))
 	}
 }
 

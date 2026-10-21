@@ -17,6 +17,7 @@ import (
 func TestProvisionDirect_Success(t *testing.T) {
 	svc, kc, realms, _, pub := newProvisioningTestService(t)
 	tenantID := uuid.New()
+	adminID := uuid.New()
 	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error {
 		assert.Equal(t, "tenant-acme", realmName)
 		assert.Equal(t, "v1", v)
@@ -27,11 +28,11 @@ func TestProvisionDirect_Success(t *testing.T) {
 	}
 	kc.CreateInvitedUserFn = func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
 		assert.Contains(t, req.RequiredActions, "VERIFY_EMAIL")
-		return uuid.New(), nil
+		return adminID, nil
 	}
 
 	result, err := svc.ProvisionDirect(context.Background(), "pd-1", service.ProvisionDirectRequest{
-		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
+		TenantID: tenantID, TenantName: "Acme Ltd", TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 		Plan: "pro", BillingSubscriptionID: "sub_1",
 	})
 	require.NoError(t, err)
@@ -46,11 +47,18 @@ func TestProvisionDirect_Success(t *testing.T) {
 	require.NotNil(t, row.KeycloakShard)
 	assert.Equal(t, "kc-shard-1", *row.KeycloakShard)
 
-	require.Len(t, pub.events, 3)
-	assert.Equal(t, domain.EventTenantRealmReady, pub.events[0].Type)
-	assert.Equal(t, domain.EventDirectPaidSignup, pub.events[1].Type)
-	assert.Equal(t, domain.EventTenantConverted, pub.events[2].Type)
-	converted := pub.events[2].Data.(domain.TenantConvertedPayload)
+	// TenantIdentityProvisioned first (BFF-2 backstop), owner = the admin
+	// user RP-2 just created, then the three existing events in order.
+	require.Len(t, pub.events, 4)
+	assert.Equal(t, domain.EventTenantIdentityProvisioned, pub.events[0].Type)
+	assert.Equal(t, domain.TenantIdentityProvisionedPayload{
+		TenantID: tenantID, OwnerUserID: adminID, Slug: "acme", Name: "Acme Ltd", Plan: "pro",
+		SignupType: "direct_paid", Realm: "tenant-acme", RealmType: "dedicated",
+	}, pub.events[0].Data.(domain.TenantIdentityProvisionedPayload))
+	assert.Equal(t, domain.EventTenantRealmReady, pub.events[1].Type)
+	assert.Equal(t, domain.EventDirectPaidSignup, pub.events[2].Type)
+	assert.Equal(t, domain.EventTenantConverted, pub.events[3].Type)
+	converted := pub.events[3].Data.(domain.TenantConvertedPayload)
 	assert.True(t, converted.DirectSignup)
 	assert.Equal(t, 0, converted.UsersMigrated)
 	require.NotNil(t, converted.BillingSubscriptionID)
@@ -71,7 +79,7 @@ func TestProvisionDirect_NoBillingSubscriptionID(t *testing.T) {
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A", Plan: "pro",
 	})
 	require.NoError(t, err)
-	converted := pub.events[2].Data.(domain.TenantConvertedPayload)
+	converted := pub.events[3].Data.(domain.TenantConvertedPayload)
 	assert.Nil(t, converted.BillingSubscriptionID)
 }
 
@@ -242,7 +250,9 @@ func TestProvisionDirect_CreateInvitedUserConflict_SameTenant_ResolvesWithoutTea
 	row, err := realms.FindByTenantID(context.Background(), tenantID)
 	require.NoError(t, err, "local commit must still land on a resolved conflict")
 	assert.Equal(t, domain.RealmStrategyDedicated, row.Strategy)
-	assert.NotEmpty(t, pub.events)
+	require.NotEmpty(t, pub.events)
+	assert.Equal(t, existingID, pub.events[0].Data.(domain.TenantIdentityProvisionedPayload).OwnerUserID,
+		"a resolved same-tenant conflict reports the existing admin as the owner")
 	assert.Equal(t, domain.OpStatusSucceeded, idem.rows["pd-conflict-1"].Status)
 }
 
@@ -322,7 +332,7 @@ func TestProvisionDirect_IdempotentReplay(t *testing.T) {
 
 	assert.Equal(t, 1, calls, "Keycloak must not be re-invoked on replay")
 	assert.Equal(t, first, second)
-	assert.Len(t, pub.events, 3)
+	assert.Len(t, pub.events, 4)
 }
 
 // selectShard's own error path also surfaces through ProvisionDirect,
@@ -400,8 +410,8 @@ func TestProvisionDirect_FirstEventEnqueueFails(t *testing.T) {
 	assert.Equal(t, domain.OpStatusFailed, idem.rows["pd-11"].Status)
 }
 
-// The DirectPaidSignup enqueue (the second of three) failing propagates,
-// even though the first (TenantRealmReady) succeeded.
+// The TenantRealmReady enqueue (the second of four) failing propagates,
+// even though the first (TenantIdentityProvisioned) succeeded.
 func TestProvisionDirect_SecondEventEnqueueFails(t *testing.T) {
 	svc, kc, _, idem, pub := newProvisioningTestService(t)
 	tenantID := uuid.New()
@@ -418,12 +428,13 @@ func TestProvisionDirect_SecondEventEnqueueFails(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Len(t, pub.events, 1, "the first event enqueued before the failure is still recorded by the mock")
-	assert.Equal(t, domain.EventTenantRealmReady, pub.events[0].Type)
+	assert.Equal(t, domain.EventTenantIdentityProvisioned, pub.events[0].Type)
 	assert.Equal(t, domain.OpStatusFailed, idem.rows["pd-12"].Status)
 }
 
-// The TenantConverted enqueue (the third of three) failing propagates, even
-// though the first two (TenantRealmReady, DirectPaidSignup) succeeded.
+// The DirectPaidSignup enqueue (the third of four) failing propagates, even
+// though the first two (TenantIdentityProvisioned, TenantRealmReady)
+// succeeded.
 func TestProvisionDirect_ThirdEventEnqueueFails(t *testing.T) {
 	svc, kc, _, idem, pub := newProvisioningTestService(t)
 	tenantID := uuid.New()
@@ -440,9 +451,31 @@ func TestProvisionDirect_ThirdEventEnqueueFails(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Len(t, pub.events, 2, "the first two events enqueued before the failure are still recorded by the mock")
-	assert.Equal(t, domain.EventTenantRealmReady, pub.events[0].Type)
-	assert.Equal(t, domain.EventDirectPaidSignup, pub.events[1].Type)
+	assert.Equal(t, domain.EventTenantIdentityProvisioned, pub.events[0].Type)
+	assert.Equal(t, domain.EventTenantRealmReady, pub.events[1].Type)
 	assert.Equal(t, domain.OpStatusFailed, idem.rows["pd-third-enqueue"].Status)
+}
+
+// The TenantConverted enqueue (the last of four) failing propagates, even
+// though the first three succeeded.
+func TestProvisionDirect_FourthEventEnqueueFails(t *testing.T) {
+	svc, kc, _, idem, pub := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
+	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) { return nil, nil }
+	kc.CreateInvitedUserFn = func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
+		return uuid.New(), nil
+	}
+	pub.EnqueueErr = errors.New("outbox unavailable")
+	pub.FailFromCall = 4
+
+	_, err := svc.ProvisionDirect(context.Background(), "pd-fourth-enqueue", service.ProvisionDirectRequest{
+		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A", BillingSubscriptionID: "sub_1",
+	})
+	require.Error(t, err)
+	require.Len(t, pub.events, 3, "the first three events enqueued before the failure are still recorded by the mock")
+	assert.Equal(t, domain.EventDirectPaidSignup, pub.events[2].Type)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["pd-fourth-enqueue"].Status)
 }
 
 // RP-2, §8.2: a tenant already offboarded (exported/deleted) must be

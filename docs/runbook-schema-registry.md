@@ -11,11 +11,11 @@ with `iam-org-membership` (O&M), the topic's other producer (LLD §7.3.1):
 > format). O&M registers two schemas there (`TenantCreated`, `TrialStarted`);
 > this service registers the other nine. The two producers share the
 > registry and the topic but never the schema names, so there is no
-> collision (RP-D5, §22 — the nine event-type names are this service's alone
+> collision (RP-D5, §22 — the ten event-type names are this service's alone
 > within this registry).
 
 Every operational tool in this repo (`make schema-*`, `.github/workflows/schema-*.yml`)
-is scoped to this service's own 9 schemas — the files under
+is scoped to this service's own 10 schemas — the files under
 `internal/eventschema/`. None of them ever registers, diffs, verifies, or
 deletes `TenantCreated` / `TrialStarted`. Because those two names have no
 file in this repo and never will, `schema-gov prune`'s orphan detection
@@ -30,24 +30,25 @@ moves those two schemas elsewhere. See "Pruning orphaned schemas" below.
 
 ## The contract
 
-The service resolves its 9 event schemas' version UUIDs from AWS Glue once
+The service resolves its 10 event schemas' version UUIDs from AWS Glue once
 at startup (`eventbus.NewGlueCodec`, `internal/adapter/outbound/eventbus/glue_codec.go`)
 **by definition**: `glue:GetSchemaByDefinition` with each embedded
 `internal/eventschema/*.json` file, sent in the exact compact form
 `schema-gov register` uploads. Each build therefore stamps the version that
 actually describes its payloads — not the registry's latest — and the UUID
 is fixed for the life of the pod (there is no refresher). Startup fails
-readiness if any of the 9 definitions isn't registered (or isn't
+readiness if any of the 10 definitions isn't registered (or isn't
 `AVAILABLE`) — the pod will not accept traffic. This is intentional;
 publishing an event whose header points at a version that doesn't describe
 it would silently mislead every consumer downstream (LLD §7.3.1).
 
-The 9 expected schema names in the registry — **PascalCase**, per LLD §7.3.1
+The 10 expected schema names in the registry — **PascalCase**, per LLD §7.3.1
 and the frozen name inventory (§25):
 
 | Domain event `type` | Registered Glue schema name |
 |---|---|
 | `TrialTenantProvisioned` | `TrialTenantProvisioned` |
+| `TenantIdentityProvisioned` | `TenantIdentityProvisioned` |
 | `TenantRealmReady` | `TenantRealmReady` |
 | `TenantConverted` | `TenantConverted` |
 | `DirectPaidSignup` | `DirectPaidSignup` |
@@ -73,7 +74,7 @@ is the CI-enforced guarantee that the file stem's PascalCase form and the
 directly (filename doesn't matter to it), but `diff`/`register` genuinely
 need the PascalCase name — so `schema-registry.yml`'s `staging`/`production`/
 `pr-check` jobs (and the local `make schema-register` target) all run
-`.github/scripts/stage-produced-event-schemas.sh` first, copying the 9 files
+`.github/scripts/stage-produced-event-schemas.sh` first, copying the 10 files
 into `.tmp/glue-schemas/<PascalCaseName>.json` before ever calling `diff`/
 `register` — the actual mechanism that makes the filename convention above
 a non-issue for the registered name, not just a documentation claim.
@@ -82,7 +83,7 @@ a non-issue for the registered name, not just a documentation claim.
 
 Run this once, in the target AWS account, before every promotion to a new
 environment. Runs the exact lookup the pod runs at startup —
-`get-schema-by-definition` with each of this service's 9 staged schema files
+`get-schema-by-definition` with each of this service's 10 staged schema files
 (serialized the way `schema-gov register` uploads it), requiring `AVAILABLE`
 — so it also catches a schema registered from a *different* commit, which a
 name-only check cannot. Needs `aws` and `python3`. Does **not** check for or
@@ -97,7 +98,7 @@ make schema-verify
 Expected output:
 
 ```
-OK: all 9 iam-realm-provisioner schema definitions registered and AVAILABLE in 'iam-tenant-events'
+OK: all 10 iam-realm-provisioner schema definitions registered and AVAILABLE in 'iam-tenant-events'
 ```
 
 Failure modes and fixes:
@@ -151,7 +152,7 @@ duration. `NoopCodec` is a local-dev/test fallback only.
 
 ## Local development
 
-`scripts/init-floci.sh` registers all 9 of this service's Glue schemas
+`scripts/init-floci.sh` registers all 10 of this service's Glue schemas
 automatically, alongside its SNS topic/SQS-queue/DLQ messaging topology
 (see the script's own header comment) — a plain `make docker-up` is enough;
 no extra setup is needed. This works because **Floci** (the local AWS
@@ -211,7 +212,7 @@ migration window; override a single run with `workflow_dispatch`'s
 `.github/workflows/schema-health-quarterly.yml` runs a read-only quarterly
 report (lifecycle lint + Glue version-accumulation scan) as a GitHub Step
 Summary — it never mutates the registry. Expect "no x-lifecycle annotation"
-warnings for all 9 of this service's events in that report; `api/asyncapi.yaml`
+warnings for all 10 of this service's events in that report; `api/asyncapi.yaml`
 deliberately carries no `x-lifecycle` annotations today (frozen event set,
 see `ARCHITECTURE.md`) and Pass 4 only warns, never fails, on that condition.
 
@@ -261,7 +262,7 @@ Set in `deploy/helm/values.yaml` (per environment) or
 |---|---|---|
 | `GLUE_REGISTRY_TENANT_NAME` | Glue registry name | `iam-tenant-events` in every environment that shares it with O&M, and by default in local dev too (Floci provisions it for free) — see "Local development" above. Leave empty to force `NoopCodec` |
 | `SCHEMA_GOV_IMAGE` | `platform-schemagov` Docker image tag used by `make schema-*` and `.github/workflows/schema-*.yml` | Currently `ghcr.io/bcbp-solutions-fzc-llc/platform-schemagov:0.4` |
-| `PROMETHEUS_URL` | Event-usage data source for the usage-check/enforce-lifecycle CI steps | Deliberately unset — this service is pre-production with no live Prometheus, and its 9 events are frozen at LLD v1.0; auto-deprecating a never-fired-in-pre-production event would be wrong. Leaving it unset runs usage-check with `--source disabled`, which makes lifecycle enforcement a deliberate no-op, not a deleted capability |
+| `PROMETHEUS_URL` | Event-usage data source for the usage-check/enforce-lifecycle CI steps | Deliberately unset — this service is pre-production with no live Prometheus, and its 10 events are frozen at LLD v1.0; auto-deprecating a never-fired-in-pre-production event would be wrong. Leaving it unset runs usage-check with `--source disabled`, which makes lifecycle enforcement a deliberate no-op, not a deleted capability |
 | `AWS_REGION` | Primary region | `ap-south-1` |
 
 `GLUE_REGISTRY_TENANT_NAME` has no corresponding `*_ARN` variable in this

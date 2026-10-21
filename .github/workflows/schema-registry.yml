@@ -1,9 +1,9 @@
-# Auto-registers iam-realm-provisioner's 9 JSON schemas in the shared AWS
+# Auto-registers iam-realm-provisioner's 10 JSON schemas in the shared AWS
 # Glue Schema Registry `iam-tenant-events` (LLD §7.3.1).
 #
 # IMPORTANT — shared registry: `iam-tenant-events` also carries two schema
 # names owned by iam-org-membership (O&M): `TenantCreated` and `TrialStarted`.
-# This service registers/diffs/verifies only the 9 files present under
+# This service registers/diffs/verifies only the 10 files present under
 # internal/eventschema/ and never touches those two names — see the
 # "Detect orphaned schemas" step below for the O&M-exclusion note.
 #
@@ -27,15 +27,15 @@
 #                                TenantCreated/TrialStarted are EXPECTED here — O&M's, not ours)
 #   5. Assess event usage      — Prometheus per-event activity (or skipped if PROMETHEUS_URL unset); classify ACTIVE/COLD/NEVER_SEEN
 #   6. Enforce usage→lifecycle — Rule 1: NEVER_SEEN+active→deprecated; Rule 2: NEVER_SEEN+deprecated→retired
-#      (dormant while PROMETHEUS_URL is unset — see .env-example; this service's 9 events
+#      (dormant while PROMETHEUS_URL is unset — see .env-example; this service's 10 events
 #      are frozen at LLD v1.0 and pre-production, and must never be auto-deprecated)
-#   7. Stage produced schemas  — copy the 9 internal/eventschema/*.json files into .tmp/glue-schemas,
+#   7. Stage produced schemas  — copy the 10 internal/eventschema/*.json files into .tmp/glue-schemas,
 #                                renamed to their PascalCase Glue name (schema-gov diff/register need
 #                                that name, not the snake_case filename — matches iam-org-membership's
 #                                identically-named script)
 #   8. Diff vs. registry       — fail on breaking changes before any upload
 #   9. Register schemas        — idempotent create/update (registry ensured inside this step);
-#                                only ever submits the 9 staged schemas
+#                                only ever submits the 10 staged schemas
 #  10. Update schema changelog — prepend dated entry; commit + push
 #  11. Emit metrics            — CloudWatch + Prometheus + logs (always runs)
 #
@@ -163,7 +163,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      # Stages this service's 9 produced schemas under their PascalCase Glue
+      # Stages this service's 10 produced schemas under their PascalCase Glue
       # name (internal/eventschema/*.json is snake_case) — schema-gov
       # prune/usage-check/diff/register take a schema's name from its file stem and
       # need the name every other reference to these events uses
@@ -199,7 +199,7 @@ jobs:
       #   not set            → --source disabled   (enforce-lifecycle no-ops)
       #
       # PROMETHEUS_URL is deliberately unset for this service today (see
-      # .env-example): it is pre-production (no live Prometheus) and its 9
+      # .env-example): it is pre-production (no live Prometheus) and its 10
       # events were frozen at LLD v1.0 sign-off — they must never be
       # auto-deprecated just because a pre-production environment has never
       # published them. This keeps the capability wired but dormant, not
@@ -231,7 +231,7 @@ jobs:
       # Fetches current Glue definition per-schema (aws CLI) then diffs via the
       # container. Runs MAX_PARALLEL diffs concurrently; output is buffered and
       # printed in deterministic order. Fails on any breaking change. Only
-      # diffs the 9 staged files — O&M's two schemas are never in this loop
+      # diffs the 10 staged files — O&M's two schemas are never in this loop
       # because it iterates the local file list, not Glue's.
       - name: Diff schemas against registry
         env:
@@ -307,7 +307,7 @@ jobs:
           fi
 
       # Registry creation is handled inside the register command (GlueAdapter.ensure_registry).
-      # Only registers the 9 staged schemas — never O&M's
+      # Only registers the 10 staged schemas — never O&M's
       # TenantCreated/TrialStarted, which this service has no file for.
       - name: Register schemas
         env:

@@ -8,7 +8,7 @@ The Keycloak admin credential is an OpenBao secret, surfaced via External Secret
 
 **Keycloak admin role set:**
 - Master realm: `create-realm` **only** — not full master `admin`. Required for `POST /admin/realms`.
-- Managed realms: `realm-admin` composite (covers `manage-realm`/`manage-users`/`manage-clients`/`manage-identity-providers`) — covers realm enable/disable, client registration, user CRUD (RP-15), IdP config (RP-6), realm-role assign/revoke, credential reset (RP-9), session/token revocation (RP-16).
+- Managed realms: `realm-admin` composite (covers `manage-realm`/`manage-users`/`manage-clients`/`manage-identity-providers`) — covers realm enable/disable, client registration, user CRUD (RP-15), IdP config (RP-6), realm-role assign/revoke, credential reset (RP-10), session/token revocation (RP-16).
 - `create-realm` auto-confers admin on realms this account creates — no per-realm bootstrap hook needed since RP is the sole creator (RP-INV-1).
 - Cross-realm migration (trial→dedicated, RP-3) — one account holds rights on both the source realm (`view-users`/`query-users` via `realm-admin` on `trial`) and the target realm (`manage-users`/`manage-realm` via `realm-admin` on the new realm).
 - Deferred hardening (not MVP): split bootstrap (`create-realm` only) vs runtime (`realm-admin`) accounts.
@@ -227,7 +227,7 @@ Every job is idempotent per tenant (safe to re-run) and batched (`RECONCILER_BAT
 
 #### 13.2.1 Schema Governance (`schema-*.yml`, `platform-schemagov`)
 
-Three additional workflows govern this service's 9 event schemas on the AWS
+Three additional workflows govern this service's 10 event schemas on the AWS
 Glue Schema Registry `iam-tenant-events` (LLD §7.3.1), all driven by the same
 `platform-schemagov` (`schema-gov`) Docker image the drift gate above uses:
 
@@ -255,7 +255,7 @@ Glue Schema Registry `iam-tenant-events` (LLD §7.3.1), all driven by the same
 service's alone — O&M is the topic's other producer and registers two more
 schema names there, `TenantCreated` and `TrialStarted` (LLD §7.3.1). This
 service's tooling (`make schema-*` and all three workflows above) only ever
-acts on the 9 files under `internal/eventschema/`; it never registers,
+acts on the 10 files under `internal/eventschema/`; it never registers,
 diffs, verifies, or deletes those two names. Because `schema-gov prune`'s
 orphan detection is "Glue schema names minus local file names," those two
 names will **always** surface as false-positive "orphans" in a dry-run
@@ -278,7 +278,7 @@ deliberately left **unset** in this repo's `.env-example` and in every
 environment today: this service is pre-production — nothing is deployed to
 any environment and there is no live Prometheus to query (LLD §19.5, the
 same "nothing is deployed" fact behind this service's rollback-is-reverting-
-the-branch posture) — and its 9 events were frozen at LLD v1.0 sign-off
+the-branch posture) — and its 10 events were frozen at LLD v1.0 sign-off
 (§25). Auto-deprecating a frozen
 event merely because a pre-production environment has never published it
 would be wrong. Leaving `PROMETHEUS_URL` unset makes `usage-check` run with
@@ -295,7 +295,7 @@ day a real production Prometheus is configured and this URL is set.
 **Build-tag structure.** Four test suites live under `test/`, each gated by its own Go build tag so a plain `go build ./...`/`go vet ./...`/`go test ./...` compiles **none** of them: `test/unit/` (no tag — mocked, no Docker, `make test-unit`), `test/postgres/` and `test/integration/` (both `-tags=integration` — testcontainers-go, Postgres/RLS and Keycloak/OpenBao respectively, `make test-postgres`/`make test-integration`), `test/e2e/` (`-tags=e2e`, `make test-e2e`), `test/load/` (`-tags=load`, fake Keycloak, no Docker, `make test-load`). `make ci`/`make test-ci` *does* compile and run the `integration`-tagged suites for real (via `go test -tags=integration`, which must compile the package before it can even attempt to start a container) — so this is not a CI gap. It **is** a local-verification gap: a quick sanity check with a bare `go vet ./...` after changing a shared port interface (e.g. `port.KeycloakAdmin`) can look completely clean while a fake/mock implementing that interface under `-tags=integration` (or `e2e`/`load`) is left broken, undetected until the next `make ci` run or an explicit tagged vet. Run `go vet -tags=integration,e2e,load ./...` (fast, no Docker needed — vet only compiles, it doesn't execute) as a matter of habit whenever a `core/port` interface's method set changes.
 - **Unit** — provisioning-flow branches (trial/direct/convert/revert); Keycloak-effect-first ordering (local commit only after the Keycloak step succeeds; compensating teardown on partial failure); idempotency-ledger replay (same key → stored result, **no** second Keycloak call); the reconcile-based MFA-role handler (converges under redelivery/reordering); `TenantReactivated` handler no-ops on a non-suspended tenant; the §11.6 validator (each CRITICAL blocks `400`, each WARN allows only with a recorded acknowledgement); realm-config apply→reconcile-on-Keycloak-failure; shard-placement tie-break determinism. `KeycloakAdmin` is mocked — assert **exact** `gocloak` call shapes (realm clone, `sub`-preserving user create, TOTP copy, WebAuthn required-action flag, forced logout).
 - **Integration (testcontainers-go)** — a Postgres testcontainer with RLS (repo CRUD, the full RLS matrix, `processed_events` dedup, outbox enqueue/publish/prune, `realm_config_reconciliations` retry) **and** a Keycloak testcontainer for the `keycloak` adapter: real realm clone, user create with `sub` preservation, TOTP copy, IdP create with attribute mappers, `requires-mfa` role assign/revoke, realm disable/enable, realm export. Also asserts admin-token caching + single-flight refresh against a real token endpoint, and the rate limiter under a simulated migration burst.
-- **Contract** — an `OrgMembershipClient` mock (I-8 shape) plus a test that the trial-expiry sweep touches **only** the local `tenant_realms.trial_ends_at`, never calls O&M; the `TrialStarted` consumer upserts `trial_ends_at`; all 9 published-event payloads validated against `internal/eventschema/*.json` **and** `api/asyncapi.yaml`; consumed-event decodes against producers' schemas; a test that the produced `TenantReactivated` (RP-10) and the consumed `TenantReactivated` (from Billing, `billing-realm-q`) are distinguished by `source` and never self-consumed; RP-13's report shape matches the LLD verbatim.
+- **Contract** — an `OrgMembershipClient` mock (I-8 shape) plus a test that the trial-expiry sweep touches **only** the local `tenant_realms.trial_ends_at`, never calls O&M; the `TrialStarted` consumer upserts `trial_ends_at`; all 10 published-event payloads validated against `internal/eventschema/*.json` **and** `api/asyncapi.yaml`; consumed-event decodes against producers' schemas; a test that the produced `TenantReactivated` (RP-10) and the consumed `TenantReactivated` (from Billing, `billing-realm-q`) are distinguished by `source` and never self-consumed; RP-13's report shape matches the LLD verbatim.
 - **E2E** — trial provision → conversion (users migrated, TOTP copied, WebAuthn flagged, shared sessions force-logged-out) → `TenantConverted` → O&M flips realm/strategy/status; IdP configure with a region-pinned URL blocked `400`, region-neutral succeeds; an approver-level grant on `membership-realm-q` assigns `requires-mfa`; billing-lapse crons → `TenantSuspended` (realm disabled) → past retention → realm exported to S3 → `TenantOffboarded` (terminal); `TenantReactivated` on a suspended tenant re-enables the realm, on a cancelled tenant no-ops.
 - **RLS (canonical, must implement all 5 cases, `test/postgres/rls_test.go`)** — Case 1: missing GUC → 0 rows. Case 2: cross-tenant `INSERT`/`UPDATE` rejected by `WITH CHECK`. Case 3: cross-tenant `SELECT` returns 0 rows. Case 4: cross-tenant `UPDATE` affects 0 rows. **Case 5 (critical)** — no GUC leakage across a pooled PgBouncer connection: pin the pool to one backend (`MaxConns=1`), tenant A writes under `SET LOCAL`, tenant B reads on the **same backend** and sees only B's rows (and 0 rows with no GUC set at all — fail-closed). Applies to all 5 tenant-scoped tables plus reconciler/consumer write paths. Plus two structural tests: every tenant-scoped table has RLS+FORCE enabled, and the three operational tables (`outbox_events`/`processed_events`/`exporter_watermarks`) deliberately do not.
 - **Load** (`test/load/`) — a migration load test: convert a synthetic tenant with N users (e.g. 500), assert the client-side rate limiter keeps the Keycloak Admin API call rate in budget, conversion time scales linearly; reports p50/p95/p99 per-user migration latency.
@@ -333,7 +333,7 @@ day a real production Prometheus is configured and this URL is set.
 - O&M → RP (`RealmProvisionerClient`, byte-exact signatures required): `CreateInvitedUser` → RP-5; `DeleteUser` → RP-15 (idempotent); `PatchRealmConfig` → RP-8 (local-intent-first); `RevokeUserSessions` → RP-16 (best-effort/fail-open from O&M's perspective); `ResetMFA` → RP-9 (fail-closed).
 - RP → O&M: `OrgMembershipClient.HasResidualMFARequirement` — backs the `membership-realm-q` MFA-revoke decision (§ above); read-only, no write path from RP into O&M's own tables.
 - O&M → events → RP: `TrialStarted` on `tenant-realm-q` — idempotent upsert of `trial_ends_at` only; RP never queries O&M for trial timing, it's push-only.
-- RP → events → O&M: all 9 produced events on `iam-tenant-events`, consumed by O&M's own `tenant-orgm-q`.
+- RP → events → O&M: all 10 produced events on `iam-tenant-events`, consumed by O&M's own `tenant-orgm-q`.
 
 ### 18.2 `billing-service`
 
@@ -363,7 +363,7 @@ Things the code cannot do for itself. Each is a one-time platform/ops step; skip
 | 2 | **`existingSecret` holds every `envFromSecret` key**: the three DSNs, `KEYCLOAK_ADMIN_CLIENT_SECRET`, `SNS_TOPIC_TENANT_ARN`, `SQS_{MEMBERSHIP,TENANT,BILLING}_REALM_QUEUE_URL`, `DOCS_AUTH_TOKEN` | `helm upgrade` fails to render |
 | 3 | **IRSA**: `serviceAccount.annotations` → `eks.amazonaws.com/role-arn` with `deploy/iam/policy.json` (SNS, SQS incl. the `-dlq` queues' `SendMessage`/`GetQueueAttributes`, Glue, S3/KMS) | Outbox publish, consumers, DLQ forwarding and realm export fail |
 | 4 | **Inbound queues have a RedrivePolicy** (`maxReceiveCount=5` → `-dlq`) | Startup panics (`DLQ preflight`) |
-| 5 | **Glue registry `iam-tenant-events`** has this build's 9 schema definitions registered and `AVAILABLE` (`make schema-verify`) | Startup panics resolving a schema |
+| 5 | **Glue registry `iam-tenant-events`** has this build's 10 schema definitions registered and `AVAILABLE` (`make schema-verify`) | Startup panics resolving a schema |
 | 6 | **OpenBao**: Kubernetes-auth role `iam-realm-provisioner` bound to this ServiceAccount; Keycloak admin credential at `BAO_KEYCLOAK_ADMIN_PATH` | No IdP configuration, no Keycloak admin token |
 | 7 | **`PROMETHEUS_PUSHGATEWAY_URL`** set, and the Pushgateway scrape uses `honor_labels: true`; `networkPolicy.pushgatewayPort` matches it | Reconciler metrics and the reconciler/SLO-3 alerts are dark |
 | 8 | **`networkPolicy.databasePorts`** includes the PgBouncer and direct-Postgres ports in use | Pods and the migrate Job cannot reach the database |

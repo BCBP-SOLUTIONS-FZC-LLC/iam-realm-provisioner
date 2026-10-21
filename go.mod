@@ -1,6 +1,6 @@
 module github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2 v2.1.0

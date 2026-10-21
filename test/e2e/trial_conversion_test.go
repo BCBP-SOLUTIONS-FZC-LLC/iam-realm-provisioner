@@ -56,7 +56,7 @@ func TestTrialProvisionThenConvert(t *testing.T) {
 	// ── RP-1: provision-trial ───────────────────────────────────────────
 	trialReq := provisionTrialBody{
 		TenantID: tenantID, TenantName: "E2E Trial Co", TenantSlug: slug,
-		AdminEmail: email, AdminName: "Trial Admin", Plan: "trial",
+		AdminEmail: email, AdminName: "Trial Admin", Plan: "starter",
 	}
 	var trialResult service.ProvisionTrialResult
 	resp := doJSON(t, http.MethodPost, "/api/v1/internal/tenants/provision-trial",

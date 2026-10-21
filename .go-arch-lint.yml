@@ -32,7 +32,7 @@ components:
   requestctx:
     in: pkg/requestctx
 
-  # Embedded JSON schemas for the 9 published events, validated at
+  # Embedded JSON schemas for the 10 published events, validated at
   # outbox-enqueue time by the eventbus adapter's ValidatingCodec.
   eventschema:
     in: internal/eventschema

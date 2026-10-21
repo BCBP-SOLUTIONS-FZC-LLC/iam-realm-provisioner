@@ -2,11 +2,14 @@ package eventbus
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/eventschema"
 )
 
@@ -63,6 +66,39 @@ func TestValidatingCodec_Encode_ValidPayloadPasses(t *testing.T) {
 	assert.Equal(t, payload, out)
 }
 
+// The domain payload RP-1/RP-2 enqueue must satisfy the embedded
+// TenantIdentityProvisioned schema for both signup types — a mismatch would
+// fail every signup at enqueue time, after the Keycloak effect landed.
+func TestValidatingCodec_Encode_TenantIdentityProvisionedDomainPayloadPasses(t *testing.T) {
+	c, err := NewValidatingCodec(NoopCodec{})
+	require.NoError(t, err)
+
+	for _, p := range []domain.TenantIdentityProvisionedPayload{
+		{TenantID: uuid.New(), OwnerUserID: uuid.New(), Slug: "acme", Name: "Acme", Plan: "starter",
+			SignupType: domain.SignupTypeTrial, Realm: "trial", RealmType: string(domain.RealmStrategyShared)},
+		{TenantID: uuid.New(), OwnerUserID: uuid.New(), Slug: "acme", Name: "Acme", Plan: "enterprise",
+			SignupType: domain.SignupTypeDirectPaid, Realm: "tenant-acme", RealmType: string(domain.RealmStrategyDedicated)},
+	} {
+		raw, err := json.Marshal(p)
+		require.NoError(t, err)
+		_, _, err = c.Encode(context.Background(), domain.EventTenantIdentityProvisioned, raw)
+		require.NoError(t, err, p.SignupType)
+	}
+}
+
+func TestValidatingCodec_Encode_TenantIdentityProvisionedUnknownPlanFailsClosed(t *testing.T) {
+	c, err := NewValidatingCodec(NoopCodec{})
+	require.NoError(t, err)
+
+	raw, err := json.Marshal(domain.TenantIdentityProvisionedPayload{
+		TenantID: uuid.New(), OwnerUserID: uuid.New(), Slug: "acme", Name: "Acme", Plan: "gold",
+		SignupType: domain.SignupTypeTrial, Realm: "trial", RealmType: string(domain.RealmStrategyShared),
+	})
+	require.NoError(t, err)
+	_, _, err = c.Encode(context.Background(), domain.EventTenantIdentityProvisioned, raw)
+	require.Error(t, err)
+}
+
 func TestValidatingCodec_Encode_MissingRequiredFieldFailsClosed(t *testing.T) {
 	c, err := NewValidatingCodec(NoopCodec{})
 	require.NoError(t, err)
@@ -95,7 +131,7 @@ func TestValidatingCodec_Encode_MalformedJSONFailsClosed(t *testing.T) {
 
 // TestValidatingCodec_Encode_UnregisteredEventTypePassesThrough confirms a
 // consumed-only event type (no entry in eventschema.ByEventType, since that
-// map holds only this service's 9 produced events) is treated as a no-op
+// map holds only this service's 10 produced events) is treated as a no-op
 // pass-through rather than rejected.
 func TestValidatingCodec_Encode_UnregisteredEventTypePassesThrough(t *testing.T) {
 	c, err := NewValidatingCodec(NoopCodec{})

@@ -4,6 +4,23 @@ All notable changes to this service are documented here. Format follows [Keep a 
 
 This service has never been deployed to any environment — there is no released version yet, so everything lives under `[Unreleased]`. Because of that, this file tracks only what is currently true and what is still outstanding, not a phase-by-phase build history; the full development diary is available via `git log` if it's ever needed.
 
+## [Unreleased — 2026-10-21]
+
+### Added
+
+- **New produced event `TenantIdentityProvisioned`** on `iam-tenant-events` (LLD v1.32, RP-D16) — the server-side signup backstop for Signup BFF open question BFF-2, requested by Org & Membership. RP-1 and RP-2 enqueue it **first** in their commit transaction with `tenant_id`, `owner_user_id` (the admin's Keycloak `sub`), `slug`, `name`, `plan` (request values verbatim), `signup_type` (`trial`|`direct_paid`), `realm`, `realm_type` (`shared`|`dedicated`). O&M consumes it and runs its idempotent I-1 when the BFF's own call never landed. No admin email/name on the bus. Open schema, Glue version 1. This service now produces **10** events (was 9); `TrialTenantProvisioned` is still emitted.
+
+### Changed
+
+- **RP-1 validates `plan`** ∈ `starter`|`pro`|`enterprise` (`400 INVALID_REQUEST`), matching RP-2 — the new event's schema enums `plan`, so an unchecked value would pass Keycloak and then fail enqueue-time validation.
+- **RP-2 keeps the created admin user's `sub`** (previously discarded from `CreateInvitedUser` and the same-tenant email-conflict resolve) to populate `owner_user_id`.
+
+### Deploy note
+
+- Register the new schema before rolling out (`make schema-register` / `schema-registry.yml`, then `make schema-verify`): `GlueCodec` resolves every produced schema at startup and the pod will not become ready without it. `scripts/pre-deploy-check.sh` now expects 10 schemas.
+
+---
+
 ## [Unreleased — 2026-10-18 patch 2]
 
 ### Fixed

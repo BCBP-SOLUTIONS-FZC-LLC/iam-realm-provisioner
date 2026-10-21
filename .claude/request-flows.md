@@ -59,6 +59,7 @@ TokenService.IssueOrRotateCredential(tenant_id, principal_id, {
 
 ```
 POST /tenants/provision-trial {tenant_id, tenant_name, tenant_slug, admin_email, admin_name, hashed_password_seed?, plan}
+  -- handler: plan must be starter|pro|enterprise (400 INVALID_REQUEST), same as RP-2
   idempotency.Begin(key, tenant_id, "provision_trial")
     found + succeeded -> replay
     found + other     -> 409 operation_in_progress
@@ -74,6 +75,8 @@ POST /tenants/provision-trial {tenant_id, tenant_name, tenant_slug, admin_email,
   RunInTx:
     tenant_realms.Upsert{tenant_id, realm_name:"trial", strategy:"shared", status:"active",
       service_account_principal_id, service_account_keycloak_client_id}
+    outbox.Enqueue(TenantIdentityProvisioned{tenant_id, owner_user_id:keycloak_user_id, slug, name, plan,
+      signup_type:"trial", realm:"trial", realm_type:"shared"})   -- BFF-2 backstop, first (RP-D16)
     outbox.Enqueue(TrialTenantProvisioned{tenant_id, realm:"trial", keycloak_user_id})
   idempotency.Complete(key, marshaled result)
   -> 201 {tenant_id, realm:"trial", strategy:"shared", keycloak_user_id, email_verification_sent:true}
@@ -88,7 +91,7 @@ POST /tenants/provision-direct {..., billing_subscription_id}
                              deterministic behavior under concurrent placements
   Keycloak.CreateRealmFromTemplate(realmName, "v1")           -- fail -> failIdempotency, return err (no teardown needed, nothing created yet)
   Keycloak.RegisterOIDCClients(realmName, tenant_slug)        -- fail -> bestEffortDeleteRealm(realmName), failIdempotency, return err
-  Keycloak.CreateInvitedUser(realmName, {..., RequiredActions:["VERIFY_EMAIL"]})
+  kcUserID := Keycloak.CreateInvitedUser(realmName, {..., RequiredActions:["VERIFY_EMAIL"]})   -- sub kept for TenantIdentityProvisioned
     -- 409 user_email_conflict (§9.2) -> resolveUserCreateConflict(realmName, email, tenant_id) BEFORE any teardown:
          existing.tenant_id == tenant_id -> resume in place (realm/OIDC clients from this same attempt kept, no teardown)
          else / lookup fails             -> bestEffortDeleteRealm, failIdempotency, return the ORIGINAL 409 unchanged
@@ -98,6 +101,8 @@ POST /tenants/provision-direct {..., billing_subscription_id}
   RunInTx:
     tenant_realms.Upsert{tenant_id, realm_name:realmName, strategy:"dedicated", keycloak_shard:shard, status:"active", converted_at:now(),
       service_account_principal_id, service_account_keycloak_client_id}
+    outbox.Enqueue(TenantIdentityProvisioned{tenant_id, owner_user_id:kcUserID, slug, name, plan,
+      signup_type:"direct_paid", realm, realm_type:"dedicated"})   -- BFF-2 backstop, first (RP-D16)
     outbox.Enqueue(TenantRealmReady{tenant_id, realm, keycloak_shard, oidc_clients})
     outbox.Enqueue(DirectPaidSignup{tenant_id, realm, direct_signup:true})
     outbox.Enqueue(TenantConverted{tenant_id, realm, plan, billing_subscription_id?, users_migrated:0, direct_signup:true})

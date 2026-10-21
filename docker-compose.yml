@@ -48,7 +48,7 @@ services:
     # service now covers SNS + SQS + S3 + Glue with no Pro tier / auth
     # token needed — docker-compose.pro.yml (LocalStack Pro, Glue+KMS) is
     # retired; scripts/init-floci.sh provisions the SNS topic, all 7 SQS
-    # queues, the S3 realm-export bucket, and the Glue registry + all 9
+    # queues, the S3 realm-export bucket, and the Glue registry + all 10
     # event schemas in one run. KMS is NOT emulated here (undocumented
     # whether Floci's free tier covers it, and nothing in this stack
     # provisioned a KMS key even under the old Pro setup) — REALM_EXPORT_KMS_KEY
@@ -71,7 +71,7 @@ services:
       # back empty.
       FLOCI_HOSTNAME: floci
       # init-floci.sh makes ~40 sequential aws CLI round-trips (1 topic, 7
-      # queues + 7 DLQs, 7 subscriptions, 1 S3 bucket, 1 Glue registry, 9
+      # queues + 7 DLQs, 7 subscriptions, 1 S3 bucket, 1 Glue registry, 10
       # schemas); floci's default 30s ready-hook timeout is right at that
       # edge on a busy host. Give real headroom.
       FLOCI_INIT_HOOKS_TIMEOUT_SECONDS: "90"

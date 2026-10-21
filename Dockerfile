@@ -26,7 +26,7 @@
 ########################################
 # Stage: builder
 ########################################
-FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS builder
+FROM golang:1.26.10-bookworm@sha256:fe3da92a5cb2881e4aa75e625cb0b7c50571632fb4cf340cbe53e6ccdcffdd51 AS builder
 
 ARG BUILD_VERSION=dev
 ARG SOURCE_DATE_EPOCH
@@ -98,6 +98,15 @@ COPY --from=builder /out/iam-realm-provisioner-server /iam-realm-provisioner-ser
 COPY --from=builder /out/iam-realm-provisioner-reconciler /iam-realm-provisioner-reconciler
 COPY --from=builder /out/migrate /migrate
 COPY --from=builder /src/deploy/keycloak/realm-template.json /deploy/keycloak/realm-template.json
+
+# Ship the builder's freshly apt-installed CA bundle (ca-certificates
+# 20250419~deb12u2, DLA-4845-1) over distroless's older one (deb12u1): the
+# update removes two distrusted roots (Comodo "AAA Certificate Services",
+# "emSign ECC Root CA - G3"), and the Go binaries read this exact file for
+# every outbound TLS connection (Keycloak, OpenBao, AWS, O&M, Token Service,
+# Audit Log). The pinned distroless digest is still the latest upstream and
+# has no deb12u2 build yet — see .trivyignore. Drop this line once it does.
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 USER nonroot:nonroot
 

@@ -20,8 +20,8 @@ This service has no Go package for another service to import — its "public API
 
 | In scope (SemVer applies) | Out of scope (may change without MAJOR) |
 |---------------------------|------------------------------------------|
-| The 16 mesh-only paths under `/api/v1/internal` (RP-1..RP-16) — method, path, and frozen request/response field names (LLD §5, §25) | `internal/*` package structure, exported Go identifiers, file layout — nothing here is imported by another module. Gin's internal capture name (`:keycloak_user_id` vs the LLD's `:uid` on RP-9) is not part of the wire contract |
-| The 9 produced event `type` names and frozen payload fields on `iam.tenant.events`; the three inbound queue names and their `EventType` filters (LLD §7, §25) | Envelope field order / JSON key sort; Glue wire-format header internals |
+| The 16 mesh-only paths under `/api/v1/internal` (RP-1..RP-16) — method, path, and frozen request/response field names (LLD §5, §25) | `internal/*` package structure, exported Go identifiers, file layout — nothing here is imported by another module. Gin's internal capture name (`:keycloak_user_id` vs the LLD's `:uid` on RP-10) is not part of the wire contract |
+| The 10 produced event `type` names and frozen payload fields on `iam.tenant.events`; the three inbound queue names and their `EventType` filters (LLD §7, §25) | Envelope field order / JSON key sort; Glue wire-format header internals |
 | `processed_events.consumer` ∈ `{membership, tenant, billing}` and `TenantSuspended.source` / `TenantReactivated.source` enums | Additive `provisioning_operations.operation` discriminator values (new endpoint names) |
 | Domain error **codes** in LLD §17 (`keycloak_unavailable`, `operation_in_progress`, `idp_region_portability_failed`, …) and their HTTP statuses | Exact `ErrorResponse.message` wording |
 | Required env var **names and semantics** (LLD §12, `.env-example`) | Env var **defaults** — tunable without a MAJOR bump unless the new default itself breaks a documented invariant (`cmd/server` fail-fast, CONFIG-1..6) |
@@ -160,7 +160,7 @@ Both should match a `v[0-9]*.[0-9]*.[0-9]*-*` tag trigger and produce a signed, 
 
 | iam-realm-provisioner | Go (`go.mod`) | Keycloak Admin API client | Shared platform libraries | `platform-schemagov` (`schema-gov` CLI) |
 |---|---|---|---|---|
-| Unreleased (`main`) | `1.26.9` | `github.com/Nerzal/gocloak/v13` `v13.9.0` (Keycloak 26 in local compose / integration tests) | `platform-gincommon` v1.6.0, `platform-events/v2` v2.0.0, `platform-pgcommon/v2` v2.0.0 | `0.4` (`SCHEMA_GOV_IMAGE` in `.env-example`) |
+| Unreleased (`main`) | `1.26.10` | `github.com/Nerzal/gocloak/v13` `v13.9.0` (Keycloak 26 in local compose / integration tests) | `platform-gincommon` v1.6.0, `platform-events/v2` v2.0.0, `platform-pgcommon/v2` v2.0.0 | `0.4` (`SCHEMA_GOV_IMAGE` in `.env-example`) |
 
 None of those libraries is re-exported — a consumer of this *service* never needs them as a direct dependency of *this* module. Callers depend on the HTTP/event contract, not on gocloak.
 

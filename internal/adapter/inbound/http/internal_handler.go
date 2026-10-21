@@ -86,6 +86,10 @@ func (h *InternalHandler) ProvisionTrial(c *gin.Context) {
 	if !tenantMatchesCaller(c, req.TenantID) {
 		return
 	}
+	if !validPlan(req.Plan) {
+		gincommon.AbortWithProblem(c, problem.NewError(realmInvalidRequest, "plan must be one of: starter, pro, enterprise"))
+		return
+	}
 	result, err := h.Provisioning.ProvisionTrial(c.Request.Context(), idempotencyKey(c), service.ProvisionTrialRequest{
 		TenantID: req.TenantID, TenantName: req.TenantName, TenantSlug: req.TenantSlug,
 		AdminEmail: req.AdminEmail, AdminName: req.AdminName,
