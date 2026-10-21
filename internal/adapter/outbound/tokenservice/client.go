@@ -19,6 +19,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/problem"
+
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/httpx"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
@@ -79,12 +81,14 @@ func (c *Client) do(req *http.Request, tenantID uuid.UUID) (*http.Response, erro
 // classifyStatus maps a non-2xx TS response status to the shared error
 // every RegisterPrincipal/IssueOrRotateCredential/ReadPrincipal apply
 // identically: >=500 as the retryable ErrTokenServiceUnavailable, 404 as
-// ErrServiceAccountNotProvisioned (principal not yet registered), 400 as a
-// typed invalid-request domain error surfacing the TS error code, any other
-// >=300 as a plain unexpected-status error. Returns nil for a 2xx status.
-// Callers that need to special-case a specific status first
-// (IssueOrRotateCredential's 409) check that before falling through here.
-func classifyStatus(status int, endpoint string, body io.Reader) error {
+// ErrServiceAccountNotProvisioned (principal not yet registered), 400/422 as
+// a plain error surfacing the RFC 9457 problem's errorCode (decoded with
+// platform-gincommon's problem.FromResponse), any other >=300 as a plain
+// unexpected-status error. Returns nil for a 2xx status. Callers that need
+// to special-case a specific status first (IssueOrRotateCredential's 409)
+// check that before falling through here.
+func classifyStatus(resp *http.Response, endpoint string) error {
+	status := resp.StatusCode
 	if status >= 500 {
 		return domain.NewError(domain.ErrTokenServiceUnavailable, "token service unavailable").WithDetails(map[string]any{"status": status})
 	}
@@ -93,15 +97,10 @@ func classifyStatus(status int, endpoint string, body io.Reader) error {
 			WithDetails(map[string]any{"endpoint": endpoint})
 	}
 	if status == http.StatusBadRequest || status == http.StatusUnprocessableEntity {
-		var errBody errorResponseBody
-		if decErr := json.NewDecoder(io.LimitReader(body, 4096)).Decode(&errBody); decErr != nil {
-			errBody = errorResponseBody{}
+		if p, err := problem.FromResponse(resp); err == nil && p.ErrorCode != "" {
+			return fmt.Errorf("tokenservice: %s rejected request — %s", endpoint, p.ErrorCode)
 		}
-		msg := fmt.Sprintf("tokenservice: %s rejected request (status %d)", endpoint, status)
-		if errBody.Error != "" {
-			msg = fmt.Sprintf("tokenservice: %s rejected request — %s", endpoint, errBody.Error)
-		}
-		return fmt.Errorf("%s", msg)
+		return fmt.Errorf("tokenservice: %s rejected request (status %d)", endpoint, status)
 	}
 	if status >= 300 {
 		return fmt.Errorf("tokenservice: unexpected status %d from %s", status, endpoint)
@@ -144,7 +143,7 @@ func (c *Client) RegisterPrincipal(ctx context.Context, tenantID uuid.UUID, req 
 			"token service: principal registration conflict — concurrent write in progress").
 			WithDetails(map[string]any{"tenant_id": tenantID})
 	}
-	if err := classifyStatus(resp.StatusCode, "TS-4", resp.Body); err != nil {
+	if err := classifyStatus(resp, "TS-4"); err != nil {
 		return nil, err
 	}
 
@@ -162,12 +161,16 @@ type issueOrRotateRequestBody struct {
 	OverlapSeconds *int   `json:"overlap_seconds,omitempty"`
 }
 
-// errorResponseBody is the subset of platform-gincommon's flat
-// ErrorResponse wire shape this client needs to disambiguate a 409 — see
-// the Token Service LLD §17 (`rotation_in_flight` vs `optimistic_lock_conflict`
-// vs the additive `credential_replay_revoked`, all 409).
-type errorResponseBody struct {
-	Error string `json:"error"`
+// ts1ConflictCodes maps the RFC 9457 errorCode values Token Service's TS-1
+// sends on a 409 (its internal/adapter/inbound/http/errors.go problem
+// types, Token Service LLD §17) to this service's domain codes. A 409 whose
+// errorCode is absent from this map — or whose body is not a problem at
+// all — falls back to ErrServiceAccountRotationInFlight.
+var ts1ConflictCodes = map[string]domain.ErrorCode{
+	"ROTATION_IN_FLIGHT":        domain.ErrServiceAccountRotationInFlight,
+	"OPTIMISTIC_LOCK_CONFLICT":  domain.ErrOptimisticLockConflict,
+	"CREDENTIAL_REPLAY_REVOKED": domain.ErrCredentialReplayRevoked,
+	"CREDENTIAL_REPLAY_EXPIRED": domain.ErrCredentialReplayExpired,
 }
 
 type issueOrRotateResponseBody struct {
@@ -180,14 +183,14 @@ type issueOrRotateResponseBody struct {
 
 // IssueOrRotateCredential calls TS-1
 // POST /api/v1/internal/tenants/:id/service-accounts/:principal_id/credentials.
-// A 409 is surfaced as one of the four §17 causes when TS-1's response body
-// names it explicitly — domain.ErrOptimisticLockConflict (record_version
+// A 409 is surfaced as one of the four §17 causes when TS-1's RFC 9457
+// problem body names it explicitly in errorCode (ts1ConflictCodes) — domain.ErrOptimisticLockConflict (record_version
 // mismatch), domain.ErrCredentialReplayRevoked (TS-D13: a replayed
 // rotation_id whose credential has since been revoked),
 // domain.ErrCredentialReplayExpired (TS-D22: a replayed rotation_id past
 // ROTATION_REPLAY_WINDOW), or domain.ErrServiceAccountRotationInFlight
-// (concurrent rotation on the same principal). An empty/unparseable 409 body
-// falls back to ErrServiceAccountRotationInFlight as the safe retryable default.
+// (concurrent rotation on the same principal). An empty/unparseable/
+// non-problem 409 body, or an unknown errorCode, falls back to ErrServiceAccountRotationInFlight as the safe retryable default.
 func (c *Client) IssueOrRotateCredential(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error) {
 	url := fmt.Sprintf("%s/api/v1/internal/tenants/%s/service-accounts/%s/credentials", c.baseURL, tenantID, principalID)
 	httpReq, err := c.newRequest(ctx, http.MethodPost, url, issueOrRotateRequestBody{
@@ -204,21 +207,18 @@ func (c *Client) IssueOrRotateCredential(ctx context.Context, tenantID, principa
 	defer httpx.CloseBody(c.log, resp.Body)
 
 	if resp.StatusCode == http.StatusConflict {
-		var errBody errorResponseBody
-		_ = json.NewDecoder(resp.Body).Decode(&errBody) //nolint:errcheck // best-effort; falls back to the safe default below on a malformed/empty body
-		code := domain.ErrServiceAccountRotationInFlight
-		switch errBody.Error {
-		case string(domain.ErrOptimisticLockConflict):
-			code = domain.ErrOptimisticLockConflict
-		case string(domain.ErrCredentialReplayRevoked):
-			code = domain.ErrCredentialReplayRevoked
-		case string(domain.ErrCredentialReplayExpired):
-			code = domain.ErrCredentialReplayExpired
+		var upstream string
+		if p, err := problem.FromResponse(resp); err == nil { // best-effort; a malformed/empty/non-problem body falls back to the safe default below
+			upstream = p.ErrorCode
+		}
+		code, ok := ts1ConflictCodes[upstream]
+		if !ok {
+			code = domain.ErrServiceAccountRotationInFlight
 		}
 		return nil, domain.NewError(code, "token service credential issue/rotate conflict").
-			WithDetails(map[string]any{"tenant_id": tenantID, "principal_id": principalID, "upstream_error": errBody.Error})
+			WithDetails(map[string]any{"tenant_id": tenantID, "principal_id": principalID, "upstream_error": upstream})
 	}
-	if err := classifyStatus(resp.StatusCode, "TS-1", resp.Body); err != nil {
+	if err := classifyStatus(resp, "TS-1"); err != nil {
 		return nil, err
 	}
 
@@ -278,7 +278,7 @@ func (c *Client) revokeVersion(ctx context.Context, tenantID, principalID uuid.U
 		return err
 	}
 	defer httpx.CloseBody(c.log, resp.Body)
-	return classifyStatus(resp.StatusCode, "TS-2", resp.Body)
+	return classifyStatus(resp, "TS-2")
 }
 
 type credentialSummaryBody struct {
@@ -317,7 +317,7 @@ func (c *Client) ReadPrincipal(ctx context.Context, tenantID, principalID uuid.U
 	}
 	defer httpx.CloseBody(c.log, resp.Body)
 
-	if err := classifyStatus(resp.StatusCode, "TS-3", resp.Body); err != nil {
+	if err := classifyStatus(resp, "TS-3"); err != nil {
 		return nil, err
 	}
 

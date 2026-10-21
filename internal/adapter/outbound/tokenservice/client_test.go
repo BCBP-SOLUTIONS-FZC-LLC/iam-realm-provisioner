@@ -255,10 +255,59 @@ func TestIssueOrRotateCredential_ConflictWithNoBody_DefaultsToRotationInFlight(t
 	assert.Equal(t, domain.ErrServiceAccountRotationInFlight, derr.Code)
 }
 
-func TestIssueOrRotateCredential_ConflictWithRotationInFlightBody_MapsToRotationInFlight(t *testing.T) {
+// writeProblem writes an RFC 9457 problem body shaped exactly like Token
+// Service's platform-gincommon renderer emits (application/problem+json,
+// UPPER_SNAKE errorCode).
+func writeProblem(w http.ResponseWriter, status int, typeName, title, errorCode string) {
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	_, _ = fmt.Fprintf(w, `{"type":"https://errors.company.com/iam/%s","title":%q,"status":%d,"detail":"conflict","instance":"/api/v1/internal/tenants/x/service-accounts/y/credentials","traceId":"4bf92f3577b34da6a3ce929d0e0e4736","errorCode":%q,"timestamp":"2026-10-21T10:00:00Z"}`,
+		typeName, title, status, errorCode)
+}
+
+// Every TS-1 409 errorCode Token Service emits (its errors.go problem types)
+// must map to its distinct domain code — not be flattened into
+// ErrServiceAccountRotationInFlight. optimistic-lock-conflict is a
+// record_version mismatch unrelated to a rotation race; the replay codes
+// (TS-D13 revoked, TS-D22 expired) mean the caller's stored rotation_id is
+// stale and must not be retried as transient.
+func TestIssueOrRotateCredential_ConflictProblem_MapsErrorCodeToDomainCode(t *testing.T) {
+	cases := []struct {
+		typeName, title, errorCode string
+		want                       domain.ErrorCode
+	}{
+		{"rotation-in-flight", "Rotation In Flight", "ROTATION_IN_FLIGHT", domain.ErrServiceAccountRotationInFlight},
+		{"optimistic-lock-conflict", "Optimistic Lock Conflict", "OPTIMISTIC_LOCK_CONFLICT", domain.ErrOptimisticLockConflict},
+		{"credential-replay-revoked", "Credential Replay Revoked", "CREDENTIAL_REPLAY_REVOKED", domain.ErrCredentialReplayRevoked},
+		{"credential-replay-expired", "Credential Replay Expired", "CREDENTIAL_REPLAY_EXPIRED", domain.ErrCredentialReplayExpired},
+		// Unknown code → the safe retryable default.
+		{"conflict", "Conflict", "CONFLICT", domain.ErrServiceAccountRotationInFlight},
+	}
+	for _, tc := range cases {
+		t.Run(tc.errorCode, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeProblem(w, http.StatusConflict, tc.typeName, tc.title, tc.errorCode)
+			}))
+			defer srv.Close()
+
+			c := New(srv.URL, noopLogger{})
+			_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
+			require.Error(t, err)
+			var derr *domain.Error
+			require.ErrorAs(t, err, &derr)
+			assert.Equal(t, tc.want, derr.Code)
+			assert.Equal(t, tc.errorCode, derr.Details["upstream_error"])
+		})
+	}
+}
+
+// A 409 whose body is not application/problem+json is not decoded at all —
+// it falls back to the safe default.
+func TestIssueOrRotateCredential_ConflictNonProblemBody_DefaultsToRotationInFlight(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(`{"error":"rotation_in_flight","status":409}`))
+		_, _ = w.Write([]byte(`{"errorCode":"OPTIMISTIC_LOCK_CONFLICT"}`))
 	}))
 	defer srv.Close()
 
@@ -270,43 +319,21 @@ func TestIssueOrRotateCredential_ConflictWithRotationInFlightBody_MapsToRotation
 	assert.Equal(t, domain.ErrServiceAccountRotationInFlight, derr.Code)
 }
 
-// TS-1's own second 409 cause (§17 of the Token Service LLD) — a
-// record_version mismatch on the principal/credential row, unrelated to a
-// concurrent rotation — must surface as the distinct
-// domain.ErrOptimisticLockConflict, not be flattened into
-// ErrServiceAccountRotationInFlight.
-func TestIssueOrRotateCredential_ConflictWithOptimisticLockBody_MapsToOptimisticLockConflict(t *testing.T) {
+// A 400/422 problem surfaces Token Service's errorCode in the error text.
+func TestRegisterPrincipal_BadRequestProblemSurfacesErrorCode(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(`{"error":"optimistic_lock_conflict","status":409}`))
+		writeProblem(w, http.StatusBadRequest, "invalid-request", "Invalid Request", "INVALID_REQUEST")
 	}))
 	defer srv.Close()
 
 	c := New(srv.URL, noopLogger{})
-	_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
+	_, err := c.RegisterPrincipal(context.Background(), uuid.New(), port.RegisterPrincipalRequest{
+		PrincipalSub: uuid.New(), KeycloakClientID: "platform-automation",
+	})
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TS-4 rejected request — INVALID_REQUEST")
 	var derr *domain.Error
-	require.ErrorAs(t, err, &derr)
-	assert.Equal(t, domain.ErrOptimisticLockConflict, derr.Code)
-}
-
-// TS-1's third §17 409 cause (TS-D13): a replayed rotation_id whose
-// credential has since been revoked. Must surface as the distinct
-// domain.ErrCredentialReplayRevoked, not be flattened into
-// ErrServiceAccountRotationInFlight.
-func TestIssueOrRotateCredential_ConflictWithCredentialReplayRevokedBody_MapsToCredentialReplayRevoked(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(`{"error":"credential_replay_revoked","status":409}`))
-	}))
-	defer srv.Close()
-
-	c := New(srv.URL, noopLogger{})
-	_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
-	require.Error(t, err)
-	var derr *domain.Error
-	require.ErrorAs(t, err, &derr)
-	assert.Equal(t, domain.ErrCredentialReplayRevoked, derr.Code)
+	assert.False(t, errors.As(err, &derr), "a 400 must not be a domain.Error")
 }
 
 func TestIssueOrRotateCredential_ServerErrorMapsToTokenServiceUnavailable(t *testing.T) {
