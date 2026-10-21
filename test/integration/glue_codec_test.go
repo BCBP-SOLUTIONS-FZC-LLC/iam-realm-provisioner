@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -56,7 +57,16 @@ func startFloci(t *testing.T) string {
 				Image:        flociImage,
 				ExposedPorts: []string{"4566/tcp"},
 				Env:          map[string]string{"FLOCI_DEFAULT_REGION": "ap-south-1", "FLOCI_DEFAULT_ACCOUNT_ID": "000000000000"},
-				WaitingFor:   wait.ForLog("Ready.").WithStartupTimeout(60 * time.Second),
+				// "Ready." alone is not enough: under a loaded parallel run the
+				// mapped port can accept a connection before floci serves it.
+				// Also poll a real Glue call until it answers 200.
+				WaitingFor: wait.ForAll(
+					wait.ForLog("Ready."),
+					wait.ForHTTP("/").WithPort("4566/tcp").WithMethod(http.MethodPost).
+						WithHeaders(map[string]string{"Content-Type": "application/x-amz-json-1.1", "X-Amz-Target": "AWSGlue.ListRegistries"}).
+						WithBody(strings.NewReader("{}")).
+						WithPollInterval(200*time.Millisecond),
+				).WithDeadline(60 * time.Second),
 			},
 			Started: true,
 		})
