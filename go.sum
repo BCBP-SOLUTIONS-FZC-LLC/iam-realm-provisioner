@@ -34,8 +34,8 @@ github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c h1:udKWzYgxTojEK
 github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c/go.mod h1:xomTg63KZ2rFqZQzSB4Vz2SUXa1BpHTVz9L5PTmPC4E=
 github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2 v2.1.0 h1:huBNqORFe6asW7HflkA7AApuZuPY/DABYmHxO8RIoVk=
 github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2 v2.1.0/go.mod h1:Wb1VB+D6NH9y+Wllv2NBzGFswbQNuaOVrgy1tbn2GGQ=
-github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2 v2.0.0 h1:EME5ICyBORcWeLhngHEyco5WNntV+UUog9hQosxkUtk=
-github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2 v2.0.0/go.mod h1:MxG9tszwOgys30CM22dI8aHklaFMhypheVZwGaLqs70=
+github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2 v2.1.0 h1:9QdRZbz+7I5AI5Xakrr9D7sKAqD8PCTeHLnQK2hd9n4=
+github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2 v2.1.0/go.mod h1:wB53+epzev+2uIrX/QqL+Tw6mewLVLSQd9xN+IuImX8=
 github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2 v2.0.2 h1:vGlI8ytjCTySc9W6LNEMkGp6mqxmBQB9YM6T97PGRvA=
 github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2 v2.0.2/go.mod h1:Y7kwnvVdASCEYRtbsjC+/O5gYjOqJD2z3nDeXcF0JCU=
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=

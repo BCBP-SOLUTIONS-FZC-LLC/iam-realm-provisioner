@@ -160,7 +160,7 @@ Both should match a `v[0-9]*.[0-9]*.[0-9]*-*` tag trigger and produce a signed, 
 
 | iam-realm-provisioner | Go (`go.mod`) | Keycloak Admin API client | Shared platform libraries | `platform-schemagov` (`schema-gov` CLI) |
 |---|---|---|---|---|
-| Unreleased (`main`) | `1.26.10` | `github.com/Nerzal/gocloak/v13` `v13.9.0` (Keycloak 26 in local compose / integration tests) | `platform-gincommon` v1.6.0, `platform-events/v2` v2.0.0, `platform-pgcommon/v2` v2.0.0 | `0.4` (`SCHEMA_GOV_IMAGE` in `.env-example`) |
+| Unreleased (`main`) | `1.26.10` | `github.com/Nerzal/gocloak/v13` `v13.9.0` (Keycloak 26 in local compose / integration tests) | `platform-gincommon/v2` v2.1.0, `platform-events/v2` v2.1.0, `platform-pgcommon/v2` v2.0.2 | `0.4` (`SCHEMA_GOV_IMAGE` in `.env-example`) |
 
 None of those libraries is re-exported — a consumer of this *service* never needs them as a direct dependency of *this* module. Callers depend on the HTTP/event contract, not on gocloak.
 

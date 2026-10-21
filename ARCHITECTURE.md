@@ -641,7 +641,7 @@ graph LR
     end
 
     subgraph gincommon_only["Single wiring point — no service builds its own logger/registry/tracer"]
-        gc1["platform-gincommon/v2 v2.0.0\nZap logging · Prometheus registry · OTel tracer provider\nall constructed ONCE via gincommon.Config in cmd/server/main.go\nand cmd/reconciler/main.go — every adapter/service receives\nthe already-built Logger/Registerer, never builds its own"]
+        gc1["platform-gincommon/v2 v2.1.0\nZap logging · Prometheus registry · OTel tracer provider\nall constructed ONCE via gincommon.Config in cmd/server/main.go\nand cmd/reconciler/main.go — every adapter/service receives\nthe already-built Logger/Registerer, never builds its own"]
     end
 
     subgraph prom["Prometheus  →  /metrics on dedicated METRICS_PORT (never shares a listener)"]
