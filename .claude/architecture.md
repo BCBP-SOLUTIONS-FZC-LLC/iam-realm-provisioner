@@ -143,7 +143,7 @@ require (
 )
 ```
 
-Module: `github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.9.
+Module: `github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.10.
 
 **Not a dependency of any other IAM service:** `Nerzal/gocloak` — RP-INV-1 requires this to be the *only* package in the entire platform holding a Keycloak admin credential. `.github/scripts/arch-lint.sh` greps every `*.go` file outside `internal/adapter/outbound/keycloak/` for a `Nerzal/gocloak` import and fails CI if found.
 

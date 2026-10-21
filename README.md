@@ -3,7 +3,7 @@
 The Realm Provisioner Service — the **single writer to the Keycloak Admin API** (RP-INV-1) and the system of record for tenant identity lifecycle in the IAM subsystem. It provisions and tears down Keycloak realms and users, migrates trial tenants into dedicated realms, configures per-tenant SAML/OIDC identity providers (secrets held only in OpenBao, never Postgres), and drives the tenant lifecycle state machine (trial → active → suspended → offboarded) via seven scheduled reconciler jobs.
 
 **Repository:** `github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`
-**Module:** Go 1.26.9 · private module · deployed as three binaries from one image (`cmd/server`, `cmd/reconciler`, `cmd/migrate`)
+**Module:** Go 1.26.10 · private module · deployed as three binaries from one image (`cmd/server`, `cmd/reconciler`, `cmd/migrate`)
 **Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.23 Approved** — names frozen at v1.0 sign-off (`docs/lld/iam-lld-realm-provisioner-service.md`)
 
 ---
@@ -376,7 +376,7 @@ Every job is idempotent per tenant (safe to re-run) and batched (`RECONCILER_BAT
 
 ### Prerequisites
 
-- Go 1.26.9+
+- Go 1.26.10+
 - Docker (Postgres, Floci, Keycloak, OpenBao — `make docker-up`)
 - `GOPRIVATE=github.com/BCBP-SOLUTIONS-FZC-LLC/*` (`GONOSUMDB` too) and an SSH key registered with the BCBP org
 
@@ -743,7 +743,7 @@ Before the first production deploy, work through the eleven one-time platform/op
 | `iam-realm-provisioner-reconciler` | `/iam-realm-provisioner-reconciler` | One-shot reconciler (`cmd/reconciler`), dispatched via `--job=<name>` by the 7 K8s CronJobs. |
 | `migrate` | `/migrate` | Schema migration (`cmd/migrate`) — run by the Helm pre-install/pre-upgrade hook Job before replicas roll, so they start with `RUN_MIGRATIONS=false`. |
 
-Two-stage `Dockerfile`: `golang:1.26.9-bookworm` builder, runtime is `gcr.io/distroless/static-debian12:nonroot` (no shell, non-root) — only the three compiled binaries and `deploy/keycloak/realm-template.json` are copied in, never the source tree (`api/asyncapi.yaml` is compiled in via `//go:embed`). `EXPOSE 8080 9090`.
+Two-stage `Dockerfile`: `golang:1.26.10-bookworm` builder, runtime is `gcr.io/distroless/static-debian12:nonroot` (no shell, non-root) — only the three compiled binaries and `deploy/keycloak/realm-template.json` are copied in, never the source tree (`api/asyncapi.yaml` is compiled in via `//go:embed`). `EXPOSE 8080 9090`.
 
 ### Helm chart
 
