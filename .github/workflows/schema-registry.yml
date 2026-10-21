@@ -156,7 +156,27 @@ jobs:
             echo "::warning title=Freeze Override::SCHEMA_FREEZE set on ${ENVIRONMENT} but force=true — proceeding."
           fi
 
+      # Until the staging environment's AWS secrets/variables are provisioned,
+      # every push to main would otherwise fail at Configure AWS credentials.
+      # Skip the registry steps with a warning instead (same gate as pr-check);
+      # production keeps failing loudly when unconfigured.
+      - name: Check AWS credentials configured
+        id: aws_check
+        env:
+          HAS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          HAS_SECRET: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          HAS_REGION: ${{ vars.AWS_REGION }}
+          HAS_REGISTRY: ${{ vars.GLUE_REGISTRY_TENANT_NAME }}
+        run: |
+          if [ -n "$HAS_KEY" ] && [ -n "$HAS_SECRET" ] && [ -n "$HAS_REGION" ] && [ -n "$HAS_REGISTRY" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Staging AWS not configured::Skipping staging schema registration — AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY secrets and AWS_REGION/GLUE_REGISTRY_TENANT_NAME variables must all be set on the staging environment."
+          fi
+
       - name: Configure AWS credentials
+        if: steps.aws_check.outputs.configured == 'true'
         uses: aws-actions/configure-aws-credentials@v6.2.3
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -186,6 +206,7 @@ jobs:
       # file under this repo's internal/eventschema/ (and never will). Ignore
       # those two names in the output below. See docs/runbook-schema-registry.md.
       - name: Detect orphaned schemas
+        if: steps.aws_check.outputs.configured == 'true'
         run: |
           AWS_REGION="${{ vars.AWS_REGION }}" schema-gov prune \
             --registry "${{ vars.GLUE_REGISTRY_TENANT_NAME }}" \
@@ -205,6 +226,7 @@ jobs:
       # published them. This keeps the capability wired but dormant, not
       # deleted, so it activates correctly once a production Prometheus exists.
       - name: Assess event usage
+        if: steps.aws_check.outputs.configured == 'true'
         env:
           PROMETHEUS_URL: ${{ vars.PROMETHEUS_URL }}
         run: |
@@ -223,6 +245,7 @@ jobs:
             --output      ${{ runner.temp }}/schema-usage-metrics.json
 
       - name: Enforce usage → lifecycle
+        if: steps.aws_check.outputs.configured == 'true'
         run: |
           schema-gov enforce-lifecycle \
             --usage-file ${{ runner.temp }}/schema-usage-metrics.json \
@@ -234,6 +257,7 @@ jobs:
       # diffs the 9 staged files — O&M's two schemas are never in this loop
       # because it iterates the local file list, not Glue's.
       - name: Diff schemas against registry
+        if: steps.aws_check.outputs.configured == 'true'
         env:
           REGISTRY_NAME: ${{ vars.GLUE_REGISTRY_TENANT_NAME }}
           AWS_REGION: ${{ vars.AWS_REGION }}
@@ -310,6 +334,7 @@ jobs:
       # Only registers the 9 staged schemas — never O&M's
       # TenantCreated/TrialStarted, which this service has no file for.
       - name: Register schemas
+        if: steps.aws_check.outputs.configured == 'true'
         env:
           SCHEMA_FREEZE: ${{ vars.SCHEMA_FREEZE }}
           SCHEMA_FREEZE_EXPIRES_AT: ${{ vars.SCHEMA_FREEZE_EXPIRES_AT }}
@@ -323,6 +348,7 @@ jobs:
             $FORCE_FLAG
 
       - name: Update schema changelog
+        if: steps.aws_check.outputs.configured == 'true'
         env:
           SCHEMA_GOV_IMAGE: ${{ env.SCHEMA_GOV_IMAGE }}
         run: |
