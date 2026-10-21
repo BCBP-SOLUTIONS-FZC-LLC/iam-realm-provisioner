@@ -15,7 +15,7 @@
 # would be silently denied the moment this policy is applied.
 #
 # Rules summary:
-#   1. existingCallerNamespaces (e.g. iam, envoy-gateway-system) → all paths
+#   1. existingCallerNamespaces (e.g. iam, gateway) → all paths
 #      (mirrors the NetworkPolicy same-namespace and ingressController rules)
 #   2. billing namespace / commercial-billing SA → RP-3/RP-4/RP-11 only
 apiVersion: security.istio.io/v1beta1
@@ -34,7 +34,7 @@ spec:
   rules:
     # ── Existing callers (rule 3 of the CD-19 alignment spec) ──────────────
     # Admit all principals from namespaces that already hold NetworkPolicy
-    # ingress access on the API port (iam, envoy-gateway-system, etc.).
+    # ingress access on the API port (iam, gateway, etc.).
     # Path is unrestricted here — the NetworkPolicy already enforces L4.
     {{- range .Values.commercialCallers.istio.existingCallerNamespaces }}
     - from:

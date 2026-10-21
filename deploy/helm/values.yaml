@@ -389,11 +389,11 @@ commercialCallers:
     # to the API port via the NetworkPolicy ingress rules (excluding billing,
     # which gets a path-restricted rule below). An Istio ALLOW policy denies
     # every request that matches no rule, so without this list the existing
-    # callers (Core/O&M in iam, Signup BFF via envoy-gateway-system) would
+    # callers (Core/O&M in iam, Envoy Gateway / Signup BFF in gateway) would
     # lose access the moment the AuthorizationPolicy is rendered.
     # Typical values (set per environment):
     #   - iam               (Core / iam-org-membership, same-namespace rule)
-    #   - envoy-gateway-system (Signup BFF / gateway, ingressControllerNamespaceSelector)
+    #   - gateway           (Envoy Gateway proxy + Signup BFF, ingressControllerNamespaceSelector)
     existingCallerNamespaces: []
 
 # NetworkPolicy — enabled by default (§13). Public API traffic (RP-1..RP-16)
@@ -402,12 +402,12 @@ commercialCallers:
 networkPolicy:
   enabled: true
   ingressControllerNamespaceSelector:
-    kubernetes.io/metadata.name: envoy-gateway-system
+    kubernetes.io/metadata.name: gateway
   ingressControllerPodSelector: {}
   metricsIngress:
     enabled: true
     namespaceSelector:
-      kubernetes.io/metadata.name: monitoring
+      kubernetes.io/metadata.name: observability
     podSelector:
       app.kubernetes.io/name: prometheus
   additionalIngressRules: []

@@ -15,7 +15,7 @@ scrape_configs:
     honor_labels: true          # ← required (ops checklist item 7)
     static_configs:
       - targets:
-          - pushgateway.monitoring.svc.cluster.local:9091
+          - pushgateway.observability.svc.cluster.local:9091
     metric_relabel_configs:
       # Keep only this service's metrics to avoid scraping other pushers.
       - source_labels: [service]

@@ -15,9 +15,8 @@ commercialCallers:
     enabled: false   # no Istio CRDs in dev — AuthorizationPolicy is not rendered
     existingCallerNamespaces:
       - iam                    # Core / iam-org-membership (same-namespace rule)
-      - envoy-gateway-system   # Envoy Gateway proxy (ingressControllerNamespaceSelector)
-      - gateway                # Signup BFF pod-to-pod (IAM HLD §10.8, see additionalIngressRules)
-      - monitoring             # Prometheus scrape port 9090 (metricsIngress rule)
+      - gateway                # Envoy Gateway proxy (ingressControllerNamespaceSelector) + Signup BFF pod-to-pod (IAM HLD §10.8, see additionalIngressRules)
+      - observability          # Prometheus scrape port 9090 (metricsIngress rule)
 
 # Admit the Signup BFF (gateway ns) at L4 in dev so local integration tests
 # can exercise the RP-2 / trial-signup path from a Signup BFF pod directly.

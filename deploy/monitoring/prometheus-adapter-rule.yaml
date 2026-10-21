@@ -7,7 +7,7 @@
 # given deployment).
 #
 # Deploy into the namespace where prometheus-adapter runs (typically kube-system
-# or monitoring). This rule fragment is generic (matches any service's
+# or observability). This rule fragment is generic (matches any service's
 # platform_http_requests_total) — merge with any existing prometheus-adapter
 # ConfigMap rather than replacing it; every gincommon-based IAM service shares
 # this same fragment.
@@ -27,7 +27,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: prometheus-adapter-config
-  namespace: monitoring   # adjust to match your prometheus-adapter deployment namespace
+  namespace: observability   # adjust to match your prometheus-adapter deployment namespace
   labels:
     app.kubernetes.io/name: prometheus-adapter
     app.kubernetes.io/component: metrics

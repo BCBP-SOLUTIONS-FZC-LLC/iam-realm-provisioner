@@ -20,28 +20,27 @@ commercialCallers:
     # namespace listed here gets a blanket ALLOW on all paths — same scope the
     # NetworkPolicy already grants at L4.
     #
-    #   iam                 — Core / iam-org-membership (same-namespace rule)
-    #   envoy-gateway-system — Envoy Gateway proxy (ingressControllerNamespaceSelector)
-    #   gateway             — Signup BFF pod-to-pod via Istio mesh (see NetworkPolicy
-    #                         additionalIngressRules below; distinct from the
-    #                         envoy-gateway-system ingress-controller rule, which covers
-    #                         externally-routed traffic, not direct mesh calls)
-    #   monitoring          — Prometheus scraping port 9090; Istio sidecar intercepts
-    #                         all inbound ports so /metrics traffic would be denied
-    #                         without this entry even though the NetworkPolicy admits
-    #                         monitoring only on port 9090
+    #   iam           — Core / iam-org-membership (same-namespace rule)
+    #   gateway       — Envoy Gateway proxy (ingressControllerNamespaceSelector,
+    #                   externally-routed traffic) and the Signup BFF's pod-to-pod
+    #                   mesh calls (see NetworkPolicy additionalIngressRules below)
+    #                   — one entry covers both
+    #   observability — Prometheus scraping port 9090; Istio sidecar intercepts
+    #                   all inbound ports so /metrics traffic would be denied
+    #                   without this entry even though the NetworkPolicy admits
+    #                   observability only on port 9090
     existingCallerNamespaces:
       - iam
-      - envoy-gateway-system
       - gateway
-      - monitoring
+      - observability
 
 # CD-19: admit the Signup BFF (gateway namespace) at L4 for direct pod-to-pod
-# Istio-mesh calls. The ingressControllerNamespaceSelector rule above admits the
-# Envoy proxy (envoy-gateway-system) for externally-routed traffic; Signup BFF
-# calls to RP-2 and the trial-signup endpoint travel pod-to-pod over the mesh,
-# so the NetworkPolicy source is "gateway", not "envoy-gateway-system".
-# monitoring is admitted on port 9090 via networkPolicy.metricsIngress — no
+# Istio-mesh calls. The Envoy Gateway proxy (externally-routed traffic) also
+# runs in the platform "gateway" namespace and is admitted by the
+# ingressControllerNamespaceSelector rule; this explicit rule keeps the Signup
+# BFF's direct RP-2 / trial-signup calls admitted even if
+# ingressControllerPodSelector is later narrowed to the Envoy proxy pods.
+# observability is admitted on port 9090 via networkPolicy.metricsIngress — no
 # additional rule needed.
 networkPolicy:
   additionalIngressRules:
