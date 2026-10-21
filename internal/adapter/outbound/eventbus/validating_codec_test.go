@@ -60,8 +60,8 @@ func TestValidatingCodec_Encode_ValidPayloadPasses(t *testing.T) {
 	c, err := NewValidatingCodec(NoopCodec{})
 	require.NoError(t, err)
 
-	payload := []byte(`{"tenant_id":"11111111-1111-1111-1111-111111111111","realm":"trial","keycloak_user_id":"22222222-2222-2222-2222-222222222222"}`)
-	out, _, err := c.Encode(context.Background(), "TrialTenantProvisioned", payload)
+	payload := []byte(`{"tenant_id":"11111111-1111-1111-1111-111111111111","owner_user_id":"22222222-2222-2222-2222-222222222222","slug":"acme","name":"Acme","plan":"starter","signup_type":"trial","realm":"trial","realm_type":"shared"}`)
+	out, _, err := c.Encode(context.Background(), "TenantIdentityProvisioned", payload)
 	require.NoError(t, err)
 	assert.Equal(t, payload, out)
 }
@@ -103,20 +103,20 @@ func TestValidatingCodec_Encode_MissingRequiredFieldFailsClosed(t *testing.T) {
 	c, err := NewValidatingCodec(NoopCodec{})
 	require.NoError(t, err)
 
-	// keycloak_user_id is required and missing.
-	payload := []byte(`{"tenant_id":"11111111-1111-1111-1111-111111111111","realm":"trial"}`)
-	_, _, err = c.Encode(context.Background(), "TrialTenantProvisioned", payload)
+	// owner_user_id is required and missing.
+	payload := []byte(`{"tenant_id":"11111111-1111-1111-1111-111111111111","slug":"acme","name":"Acme","plan":"starter","signup_type":"trial","realm":"trial","realm_type":"shared"}`)
+	_, _, err = c.Encode(context.Background(), "TenantIdentityProvisioned", payload)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "TrialTenantProvisioned")
+	assert.Contains(t, err.Error(), "TenantIdentityProvisioned")
 }
 
 func TestValidatingCodec_Encode_WrongConstValueFailsClosed(t *testing.T) {
 	c, err := NewValidatingCodec(NoopCodec{})
 	require.NoError(t, err)
 
-	// realm must be the const "trial" for this event type.
-	payload := []byte(`{"tenant_id":"11111111-1111-1111-1111-111111111111","realm":"dedicated","keycloak_user_id":"22222222-2222-2222-2222-222222222222"}`)
-	_, _, err = c.Encode(context.Background(), "TrialTenantProvisioned", payload)
+	// direct_signup must be the const true for this event type.
+	payload := []byte(`{"tenant_id":"11111111-1111-1111-1111-111111111111","realm":"tenant-acme","plan":"pro","direct_signup":false}`)
+	_, _, err = c.Encode(context.Background(), "DirectPaidSignup", payload)
 	require.Error(t, err)
 }
 
@@ -124,14 +124,14 @@ func TestValidatingCodec_Encode_MalformedJSONFailsClosed(t *testing.T) {
 	c, err := NewValidatingCodec(NoopCodec{})
 	require.NoError(t, err)
 
-	_, _, err = c.Encode(context.Background(), "TrialTenantProvisioned", []byte(`not json`))
+	_, _, err = c.Encode(context.Background(), "TenantIdentityProvisioned", []byte(`not json`))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not JSON")
 }
 
 // TestValidatingCodec_Encode_UnregisteredEventTypePassesThrough confirms a
 // consumed-only event type (no entry in eventschema.ByEventType, since that
-// map holds only this service's 10 produced events) is treated as a no-op
+// map holds only this service's 9 produced events) is treated as a no-op
 // pass-through rather than rejected.
 func TestValidatingCodec_Encode_UnregisteredEventTypePassesThrough(t *testing.T) {
 	c, err := NewValidatingCodec(NoopCodec{})

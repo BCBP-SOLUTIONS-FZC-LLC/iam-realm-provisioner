@@ -286,7 +286,7 @@ groups:
           runbook: "docs/observability/runbooks.md#iamrealmprovisioneroutboxstuck"
           summary: iam-realm-provisioner outbox events moved to the dead-letter table
           description: >-
-            One or more produced tenant-lifecycle events (TrialTenantProvisioned,
+            One or more produced tenant-lifecycle events (TenantIdentityProvisioned,
             TenantRealmReady, TenantConverted, etc.) exhausted MaxAttempts and
             were moved to outbox_dead_letters. Check the outbox runner logs
             for SNS publish errors and verify SNS_TOPIC_TENANT_ARN

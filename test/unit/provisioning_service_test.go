@@ -53,9 +53,9 @@ func TestProvisionTrial_Success(t *testing.T) {
 	assert.Equal(t, domain.RealmStrategyShared, row.Strategy)
 	assert.Equal(t, domain.RealmStatusActive, row.Status)
 
-	// TenantIdentityProvisioned first (the BFF-2 signup backstop), carrying
-	// the request's tenant fields verbatim, then TrialTenantProvisioned.
-	require.Len(t, pub.events, 2)
+	// Exactly one TenantIdentityProvisioned event (the BFF-2 signup
+	// backstop), carrying the request's tenant fields verbatim.
+	require.Len(t, pub.events, 1)
 	assert.Equal(t, domain.EventTenantIdentityProvisioned, pub.events[0].Type)
 	identity, ok := pub.events[0].Data.(domain.TenantIdentityProvisionedPayload)
 	require.True(t, ok)
@@ -64,13 +64,6 @@ func TestProvisionTrial_Success(t *testing.T) {
 		SignupType: "trial", Realm: "trial", RealmType: "shared",
 	}, identity)
 	assert.Equal(t, domain.SystemActorID, pub.events[0].Actor)
-
-	assert.Equal(t, domain.EventTrialTenantProvisioned, pub.events[1].Type)
-	payload, ok := pub.events[1].Data.(domain.TrialTenantProvisionedPayload)
-	require.True(t, ok)
-	assert.Equal(t, tenantID, payload.TenantID)
-	assert.Equal(t, "trial", payload.Realm)
-	assert.Equal(t, kcUserID, payload.KeycloakUserID)
 }
 
 // Keycloak-effect-first (§9.1): a Keycloak failure must NOT leave a local
@@ -309,7 +302,7 @@ func TestProvisionTrial_EmailConflict_SameTenant_ResolvesAsIdempotentSuccess(t *
 	row, err := realms.FindByTenantID(context.Background(), tenantID)
 	require.NoError(t, err, "local commit must still land on a resolved conflict")
 	assert.Equal(t, domain.RealmStatusActive, row.Status)
-	require.Len(t, pub.events, 2)
+	require.Len(t, pub.events, 1)
 	assert.Equal(t, existingID, pub.events[0].Data.(domain.TenantIdentityProvisionedPayload).OwnerUserID,
 		"the resolved existing user is the tenant's owner")
 	assert.Equal(t, domain.OpStatusSucceeded, idem.rows["key-conflict-1"].Status, "a resolved conflict must complete as a success, not a failed operation")
@@ -416,7 +409,7 @@ func TestProvisionTrial_IdempotentReplay(t *testing.T) {
 
 	assert.Equal(t, 1, calls, "Keycloak must be called exactly once — the replay must not re-execute")
 	assert.Equal(t, first, second)
-	assert.Len(t, pub.events, 2, "only the first call's events should ever be enqueued across both calls")
+	assert.Len(t, pub.events, 1, "only one event should ever be enqueued across both calls")
 }
 
 // A duplicate call still in_progress (concurrent request) must surface as
@@ -538,25 +531,6 @@ func TestProvisionTrial_EventEnqueueFails_MarksIdempotencyFailed(t *testing.T) {
 	require.Error(t, err)
 	assert.Empty(t, pub.events)
 	assert.Equal(t, domain.OpStatusFailed, idem.rows["key-enqueue-fail"].Status)
-}
-
-// The TrialTenantProvisioned enqueue (the second of two) failing propagates
-// even though TenantIdentityProvisioned was already enqueued — the whole
-// RunInTx rolls back, so neither event is published.
-func TestProvisionTrial_SecondEventEnqueueFails_MarksIdempotencyFailed(t *testing.T) {
-	svc, kc, _, idem, pub := newProvisioningTestService(t)
-	tenantID := uuid.New()
-	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
-	pub.EnqueueErr = errors.New("outbox unavailable")
-	pub.FailFromCall = 2
-
-	_, err := svc.ProvisionTrial(context.Background(), "key-enqueue-fail-2", service.ProvisionTrialRequest{
-		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
-	})
-	require.Error(t, err)
-	require.Len(t, pub.events, 1)
-	assert.Equal(t, domain.EventTenantIdentityProvisioned, pub.events[0].Type)
-	assert.Equal(t, domain.OpStatusFailed, idem.rows["key-enqueue-fail-2"].Status)
 }
 
 // The local-commit tx's realms.Upsert failing (after a successful Keycloak

@@ -14,7 +14,7 @@
 # schema-register`, not just under CI's ubuntu-latest. A new schema needs
 # one line added below. Unlike iam-org-membership (two Glue registries,
 # membership/tenant lanes), this service has exactly one registry and one
-# lane — its own 10 produced events — so there is no lane argument.
+# lane — its own 9 produced events — so there is no lane argument.
 #
 # Usage: stage-produced-event-schemas.sh DEST
 set -euo pipefail
@@ -24,7 +24,6 @@ SRC="${SCHEMA_SRC:-internal/eventschema}"
 
 name_for() {
   case "$1" in
-    trial_tenant_provisioned) echo TrialTenantProvisioned ;;
     tenant_identity_provisioned) echo TenantIdentityProvisioned ;;
     tenant_realm_ready)       echo TenantRealmReady ;;
     tenant_converted)         echo TenantConverted ;;

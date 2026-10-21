@@ -2,7 +2,7 @@
 
 This document describes the internal structure, dependency rules, and runtime data flows of `iam-realm-provisioner`.
 
-`iam-realm-provisioner` is a **private Go service** (`github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.10) deployed as a containerised microservice (HPA 2–4 replicas), refining **IAM HLD v1.53 §5.2** (LLD **v1.23**, `docs/lld/iam-lld-realm-provisioner-service.md`; where LLD and HLD disagree, HLD is authoritative). It is the **single writer to the Keycloak Admin API** across the entire IAM subsystem (RP-INV-1, HLD §4.2/§5.2) and the system of record for the small amount of local state — realm identity, IdP config, reconciliation and idempotency ledgers — needed to make that writing safe, idempotent, and replayable. Org & Membership owns the application-side `tenants` row; this service owns Keycloak-side realm reality and its `tenant_realms` mirror (RP-D6) — neither writes the other's store. It ships as **two binaries from one image**: `cmd/server` (the mesh-only `/api/v1/internal` API, RP-1..RP-17, three inbound SQS consumers, and the transactional outbox runner) and `cmd/reconciler` (a single binary dispatched by `--job=<name>`, covering RP-C1..RP-C4 plus two operational prune jobs, each its own Kubernetes CronJob). The service sits on **neither of the platform's two hot paths** (HLD §4.3) — work is bursty, coarse-grained tenant-lifecycle operations, where correctness, auditability, and idempotency matter more than latency.
+`iam-realm-provisioner` is a **private Go service** (`github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.9) deployed as a containerised microservice (HPA 2–4 replicas), refining **IAM HLD v1.53 §5.2** (LLD **v1.23**, `docs/lld/iam-lld-realm-provisioner-service.md`; where LLD and HLD disagree, HLD is authoritative). It is the **single writer to the Keycloak Admin API** across the entire IAM subsystem (RP-INV-1, HLD §4.2/§5.2) and the system of record for the small amount of local state — realm identity, IdP config, reconciliation and idempotency ledgers — needed to make that writing safe, idempotent, and replayable. Org & Membership owns the application-side `tenants` row; this service owns Keycloak-side realm reality and its `tenant_realms` mirror (RP-D6) — neither writes the other's store. It ships as **two binaries from one image**: `cmd/server` (the mesh-only `/api/v1/internal` API, RP-1..RP-17, three inbound SQS consumers, and the transactional outbox runner) and `cmd/reconciler` (a single binary dispatched by `--job=<name>`, covering RP-C1..RP-C4 plus two operational prune jobs, each its own Kubernetes CronJob). The service sits on **neither of the platform's two hot paths** (HLD §4.3) — work is bursty, coarse-grained tenant-lifecycle operations, where correctness, auditability, and idempotency matter more than latency.
 
 **Does not own:** tenants-as-business-entities, memberships, roles, invitations (Org & Membership); JWT issuance / login (Keycloak itself); delegation, tender ACL, group-mapping, or the plan/department catalogues (sibling services extracted from Core); any per-user table (there is none — Keycloak is the sole store of user identity and credentials); secret material in Postgres (IdP secrets live only in OpenBao).
 
@@ -38,13 +38,13 @@ graph TD
     end
 
     subgraph eventschema_grp["Embedded Schemas  —  internal/eventschema/"]
-        eventschema["*.json\nJSON Schema Draft-07 for the 10 published events\nasyncapi_drift_test.go vs api/asyncapi.yaml"]
+        eventschema["*.json\nJSON Schema Draft-07 for the 9 published events\nasyncapi_drift_test.go vs api/asyncapi.yaml"]
     end
 
     subgraph core["Core  —  internal/core/"]
         service["service/\nProvisioningService · LifecycleService\nIdpService · RealmConfigService · MfaService"]
         port["port/\nKeycloakAdmin · TenantRealmRepository · IdpConfigRepository\nIdpValidationRepository · ReconciliationRepository\nIdempotencyStore · Inbox · InboxPruner · EventPublisher · TxRunner\nOpenBaoClient · OrgMembershipClient · ObjectStore\nSubscriptionLapseReader (RP-C3) · TokenServiceClient (§2.5)"]
-        domain["domain/\nTenantRealm · IdpConfig · IdpConfigValidation\nProvisioningOperation · RealmConfigReconciliation\nErrorCode catalogue · 10 event payload types"]
+        domain["domain/\nTenantRealm · IdpConfig · IdpConfigValidation\nProvisioningOperation · RealmConfigReconciliation\nErrorCode catalogue · 9 event payload types"]
     end
 
     subgraph pkg["Shared Packages  —  pkg/"]
@@ -244,7 +244,7 @@ sequenceDiagram
         SVC -->> H: 502 keycloak_unavailable (no local commit, retryable)
     else user created
         KC -->> SVC: keycloak_user_id (sub)
-        SVC ->>+ DB: RunInTx { UPSERT tenant_realms(strategy='shared'),<br/>outbox.Enqueue(TenantIdentityProvisioned, TrialTenantProvisioned) }
+        SVC ->>+ DB: RunInTx { UPSERT tenant_realms(strategy='shared'),<br/>outbox.Enqueue(TenantIdentityProvisioned) }
         DB -->>- SVC: committed
         SVC ->> DB: idempotency.Complete(idempotencyKey, result)
         SVC -->>- H: ProvisionTrialResult{realm:'trial', strategy:'shared', keycloak_user_id}
@@ -334,7 +334,7 @@ sequenceDiagram
         TX ->>+ DB: BEGIN (SET LOCAL app.tenant_id, RLS-6)
         TX ->> DB: UPSERT tenant_realms(tenant_id, realm='trial', strategy='shared', status='active')
         DB -->> TX: row committed-pending
-        TX ->>+ OB: Enqueue — INSERT outbox_events(TrialTenantProvisioned{tenant_id, realm, keycloak_user_id})
+        TX ->>+ OB: Enqueue — INSERT outbox_events(TenantIdentityProvisioned{tenant_id, owner_user_id, slug, name, plan, ...})
         OB -->>- TX: inserted
         TX ->> DB: COMMIT
         DB -->>- TX: committed — local row + outbox row durable together (CONS-1)
@@ -348,7 +348,7 @@ sequenceDiagram
     Note over Runner,SNS: Outbox runner polls every OUTBOX_POLL_INTERVAL (500 ms)<br/>and publishes independently — not part of the request's latency budget
     Runner ->>+ OB: SELECT ... WHERE published_at IS NULL FOR UPDATE SKIP LOCKED
     OB -->>- Runner: unpublished batch
-    Runner ->>+ SNS: Publish(TopicArn=iam.tenant.events, TrialTenantProvisioned envelope)
+    Runner ->>+ SNS: Publish(TopicArn=iam.tenant.events, TenantIdentityProvisioned envelope)
     SNS -->>- Runner: MessageID
     Runner ->> OB: UPDATE outbox_events SET published_at = now()
 
@@ -396,7 +396,7 @@ sequenceDiagram
 
         RP ->>+ PG: RunInTx {
         RP ->> PG: UPSERT tenant_realms(tenant_id, realm='trial', strategy='shared', status='active')
-        RP ->>+ OB: outbox.Enqueue(TenantIdentityProvisioned{...}, TrialTenantProvisioned{tenant_id, realm:'trial', keycloak_user_id})
+        RP ->>+ OB: outbox.Enqueue(TenantIdentityProvisioned{tenant_id, owner_user_id, slug, name, plan, signup_type:'trial', realm:'trial', realm_type:'shared'})
         OB -->>- RP: inserted
         RP ->> PG: }  COMMIT
         PG -->>- RP: committed (local row + outbox row atomic, RP-EVT-1)
@@ -405,17 +405,17 @@ sequenceDiagram
         RP -->> SG: 201 {tenant_id, realm:'trial', strategy:'shared',<br/>keycloak_user_id(sub), email_verification_sent:true}
     end
 
-    Note over SG,OM: O&M's own tenants row was already created synchronously via O&M's I-1<br/>(caller-supplied tenant_id, RP-6) BEFORE this call — TrialTenantProvisioned settles/reconciles it,<br/>it does not create it.
+    Note over SG,OM: O&M's own tenants row was already created synchronously via O&M's I-1<br/>(caller-supplied tenant_id, RP-6) BEFORE this call — normally. If that I-1 never landed,<br/>O&M's backstop creates the tenant from TenantIdentityProvisioned (RP-D16).
 
     Note over Runner,SQS: Outbox runner polls OUTBOX_POLL_INTERVAL (500 ms), publishes independently of the request
     Runner ->>+ OB: SELECT unpublished WHERE published_at IS NULL FOR UPDATE SKIP LOCKED
-    OB -->>- Runner: TrialTenantProvisioned envelope
+    OB -->>- Runner: TenantIdentityProvisioned envelope
     Runner ->>+ SNS: Publish(TopicArn=iam.tenant.events,<br/>MessageAttributes{EventType, TenantID, Source, EventID})
     SNS -->>- Runner: MessageID
     Runner ->> OB: UPDATE outbox_events SET published_at = now()
 
     SNS ->>+ SQS: fan-out by subscription filter policy
-    SQS -->>- OM: TrialTenantProvisioned message
+    SQS -->>- OM: TenantIdentityProvisioned message
 
     OM ->> OM: processed_events dedup (event_id, consumer='orgm')<br/>settle tenants row: confirm keycloak_realm='trial', link keycloak_user_id
     OM ->> SQS: DeleteMessage (ACK)
@@ -532,7 +532,7 @@ sequenceDiagram
     participant SNS as SNS — single topic iam.tenant.events<br/>(events.NewSNSPublisher, NOT a RoutingPublisher)
     participant OMQ as SQS tenant-orgm-q / tenant-audit-q / tenant-notification-q / tenant-authz-q<br/>(O&M's own subscriptions — this service never self-consumes)
 
-    Note over SVC,OB: Phase 1 — Atomic write + event enqueue (RP-EVT-1 / CONS-1)<br/>Every one of the 10 published events shares its RunInTx with the local state change that caused it
+    Note over SVC,OB: Phase 1 — Atomic write + event enqueue (RP-EVT-1 / CONS-1)<br/>Every one of the 9 published events shares its RunInTx with the local state change that caused it
 
     SVC ->>+ TX: RunInTx(ctx, func(txCtx))
     TX ->>+ DB: UPSERT/UPDATE tenant_realms (or keycloak_idp_configs, record_version optimistic lock)
@@ -562,7 +562,7 @@ sequenceDiagram
         end
     end
 
-    SNS ->>+ OMQ: fan-out by per-event SNS subscription filter policy<br/>(10 event types — TrialTenantProvisioned, TenantIdentityProvisioned, TenantRealmReady, TenantConverted,<br/>DirectPaidSignup, TrialExpired, TrialReactivated, TenantSuspended,<br/>TenantOffboarded, TenantReactivated{source=operator})
+    SNS ->>+ OMQ: fan-out by per-event SNS subscription filter policy<br/>(9 event types — TenantIdentityProvisioned, TenantRealmReady, TenantConverted,<br/>DirectPaidSignup, TrialExpired, TrialReactivated, TenantSuspended,<br/>TenantOffboarded, TenantReactivated{source=operator})
     deactivate OMQ
     Note over OMQ: O&M settles tenants row · Audit · Notification · AuthZ cache invalidation
 
@@ -594,7 +594,7 @@ sequenceDiagram
     Note over Q1,C3: A message that keeps failing: deliveries 1-4 → handler, 5th → platform-events forwards it to -dlq<br/>(WithDLQForwarding, platform_dlq_messages_total++) before SQS's own RedrivePolicy would
 ```
 
-**Published: `iam.tenant.events`, 10 event types** — `TrialTenantProvisioned`, `TenantIdentityProvisioned`, `TenantRealmReady`, `TenantConverted`, `DirectPaidSignup`, `TrialExpired`, `TrialReactivated`, `TenantSuspended`, `TenantOffboarded`, `TenantReactivated{source=operator}`. O&M produces `TenantCreated`/`TrialStarted` on the *same* topic (co-producer, disjoint schema names, RP-D5). `TenantOffboarded` is emitted **only after** the S3 export has succeeded and the realm has been deleted (`export_s3_key` always references a durable object, RP-EVT-4); O&M consumes it for its own GDPR wipe and this service does not re-emit it. The envelope carries `{id (UUID v7), source=iam-realm-provisioner, tenant_id, trace_id, specversion, time, subject, actor, dataschema, data}` — `tenant_id` lives on the envelope, never inside `data`.
+**Published: `iam.tenant.events`, 9 event types** — `TenantIdentityProvisioned`, `TenantRealmReady`, `TenantConverted`, `DirectPaidSignup`, `TrialExpired`, `TrialReactivated`, `TenantSuspended`, `TenantOffboarded`, `TenantReactivated{source=operator}`. O&M produces `TenantCreated`/`TrialStarted` on the *same* topic (co-producer, disjoint schema names, RP-D5). `TenantOffboarded` is emitted **only after** the S3 export has succeeded and the realm has been deleted (`export_s3_key` always references a durable object, RP-EVT-4); O&M consumes it for its own GDPR wipe and this service does not re-emit it. The envelope carries `{id (UUID v7), source=iam-realm-provisioner, tenant_id, trace_id, specversion, time, subject, actor, dataschema, data}` — `tenant_id` lives on the envelope, never inside `data`.
 
 **Consumed — 3 inbound SQS queues**, naming pattern `<topic-short>-<consumer-short>-q` (consumer short-name `realm`), each its own `-dlq` (`maxReceiveCount = 5`), deduped via `processed_events` composite PK `(event_id, consumer)` with `consumer ∈ {membership, tenant, billing}`:
 
@@ -857,7 +857,7 @@ The `touch_row()` `BEFORE UPDATE` trigger (attached only to these two tables) bu
 | RP-1 / RP-2 provision | Keycloak Admin API | fail-closed | `502 keycloak_unavailable`; no local commit; retry with same `Idempotency-Key` |
 | RP-3 / RP-4 convert / revert | Keycloak Admin API | fail-closed | compensating `DeleteRealmIfExists`; no local dedicated row |
 | Invite (O&M → RP-5) | Keycloak Admin API | fail-closed | `502` → O&M `503 realm_provisioner_unavailable`; no invitation |
-| MFA reset (O&M → RP-10) | Keycloak Admin API | fail-closed | `502` → O&M `503`; no `MFAReset` (no reconciler, unlike RP-16) |
+| MFA reset (O&M → RP-9) | Keycloak Admin API | fail-closed | `502` → O&M `503`; no `MFAReset` (no reconciler, unlike RP-16) |
 | Realm-config (O&M → RP-8) | Keycloak Admin API | fail-open + durable reconcile | `pending` row, RP-C4 converges (RP-INV-6) |
 | Session revoke (O&M → RP-16) | Keycloak Admin API | fail-open on O&M's side | RP still fail-closed at the Keycloak call; O&M commits regardless (AUTH-8 TTL backstop) |
 | User delete (O&M → RP-15) | Keycloak Admin API | fail-closed / idempotent | `502` retryable; user-not-found → 204 |
@@ -925,7 +925,7 @@ Two-stage Dockerfile: a Go builder stage compiles the binaries, the runtime stag
 | `processed-events-prune` | `30 4 * * *` | Prune `processed_events` past `PROCESSED_EVENTS_TTL_DAYS` |
 | `ledger-prune` | `0 5 * * *` | Prune `provisioning_operations` past `PROVISIONING_OPERATIONS_TTL_DAYS` (30) and `rls_violation_log` past `RLS_VIOLATION_LOG_TTL_DAYS` (90), in batched deletes |
 
-**Migrate hook.** `templates/migrate-job.yaml` runs `/migrate` before the Deployment's pods roll (`pre-install,pre-upgrade`), so replicas run with `RUN_MIGRATIONS=false`. Hook ordering: the Secret (weight -10), then a hook-scoped NetworkPolicy allowing DNS + Postgres egress (weight -5 — the namespace is default-deny), then the Job (weight 0). The Job runs as the namespace's `default` ServiceAccount with no token mounted, because the chart's own ServiceAccount does not exist yet during a first install's pre-install hooks.
+**Migrate hook.** `templates/migrate-job.yaml` runs `/migrate` before the Deployment's pods roll (`pre-install,pre-upgrade`), so replicas run with `RUN_MIGRATIONS=false`. Hook ordering: the Secret (weight -9), then a hook-scoped NetworkPolicy allowing DNS + Postgres egress (weight -5 — the namespace is default-deny), then the Job (weight 0). The Job runs as the namespace's `default` ServiceAccount with no token mounted, because the chart's own ServiceAccount does not exist yet during a first install's pre-install hooks.
 
 `terminationGracePeriodSeconds = 75` — see [Graceful shutdown](#observability-stack) for the drain sequence it covers. HPA: 2–4 replicas on CPU (70%) + memory (80%). PDB `minAvailable: 1`. Resources (server): CPU 250m/1, Memory 256Mi/512Mi.
 
@@ -986,7 +986,7 @@ Before a downstream service subscribes to `iam.tenant.events`, verify the follow
 - [ ] Use an `ON CONFLICT DO NOTHING`-style insert — do not return an error on duplicate delivery, since SNS→SQS is at-least-once (FAIL-3)
 
 **Ordering**
-- [ ] Do not assume SNS preserves delivery order — a `TrialTenantProvisioned` and a later `TenantConverted` for the same tenant can theoretically be redelivered out of order; handle via upsert-style projections, not insert-only
+- [ ] Do not assume SNS preserves delivery order — a `TenantIdentityProvisioned` and a later `TenantConverted` for the same tenant can theoretically be redelivered out of order; handle via upsert-style projections, not insert-only
 
 **Infrastructure**
 - [ ] Configure a DLQ on the SQS subscription queue with `maxReceiveCount ≤ 5` — matches all three of this service's own inbound queues (`membership-realm-q`, `tenant-realm-q`, `billing-realm-q`)
@@ -1000,14 +1000,14 @@ Before a downstream service subscribes to `iam.tenant.events`, verify the follow
 
 ## Schema lifecycle
 
-Unlike a service whose event set is under active, ongoing deprecation-and-versioning churn, this service's event surface was **frozen at LLD v1.0 sign-off** (§25 Frozen Name Inventory — "the identifiers below are frozen: schema/table/column names, enum spellings, event `type` names and payload field names, endpoint paths, queue names, the `consumer` discriminator, and the metric-name prefix. A change to any of these after sign-off is a **breaking change**"). `api/asyncapi.yaml` currently carries **no `x-lifecycle` annotations** — there is no `active`/`deprecated`/`retired` state machine and no dual-publish migration protocol in this repo, because none of the 10 published events has ever needed to evolve past its frozen v1.0 shape. This is a statement of what exists today, not a tooling gap: if a breaking change is ever required post-freeze, it follows LLD §7.3.1's evolution discipline (new Glue schema name/version + new AsyncAPI message + major version bump) — at which point adopting an `x-lifecycle` annotation convention would be the natural next step, not before.
+Unlike a service whose event set is under active, ongoing deprecation-and-versioning churn, this service's event surface was **frozen at LLD v1.0 sign-off** (§25 Frozen Name Inventory — "the identifiers below are frozen: schema/table/column names, enum spellings, event `type` names and payload field names, endpoint paths, queue names, the `consumer` discriminator, and the metric-name prefix. A change to any of these after sign-off is a **breaking change**"). `api/asyncapi.yaml` currently carries **no `x-lifecycle` annotations** — there is no `active`/`deprecated`/`retired` state machine and no dual-publish migration protocol in this repo, because none of the 9 published events has ever needed to evolve past its frozen v1.0 shape. This is a statement of what exists today, not a tooling gap: if a breaking change is ever required post-freeze, it follows LLD §7.3.1's evolution discipline (new Glue schema name/version + new AsyncAPI message + major version bump) — at which point adopting an `x-lifecycle` annotation convention would be the natural next step, not before.
 
 The absence of `x-lifecycle` annotations does **not** fail CI: `schema-gov validate`'s Pass 4 only *warns* ("no x-lifecycle annotation") when a message has none — it only *errors* (gates) on an invalid status, a `deprecated` schema missing `deprecated-by`, an overdue `retire-after`, or a `retired` schema still present. So Pass 4 runs on every `schema-*.yml` workflow's `validate` step (`validate-quality.yml` itself carries no schema step — see below) and passes cleanly today; there is simply nothing for it to gate yet.
 
-The full CI/CD schema-governance pipeline — registration, orphan detection, pruning, and a quarterly health report — was added in this PR (`.github/workflows/schema-registry.yml`, `schema-prune.yml`, `schema-health-quarterly.yml`; operator runbook at `docs/runbook-schema-registry.md`). One piece of it stays deliberately **dormant, not absent**: `schema-registry.yml`'s usage-check/enforce-lifecycle steps *would* auto-classify a schema as `NEVER_SEEN` from Prometheus publish-activity data and require it be marked `deprecated`/`retired` — but `PROMETHEUS_URL` is left unset in every environment today (this service is pre-production, LLD §19.5; its 10 events are frozen, not evolving), which makes `usage-check` run with `--source disabled` and `enforce-lifecycle` a deliberate no-op. Do not read "the pipeline exists" as "lifecycle enforcement is active" — it activates only once a real production Prometheus is wired and `PROMETHEUS_URL` is set (`.claude/operations.md` §13.2.1).
+The full CI/CD schema-governance pipeline — registration, orphan detection, pruning, and a quarterly health report — was added in this PR (`.github/workflows/schema-registry.yml`, `schema-prune.yml`, `schema-health-quarterly.yml`; operator runbook at `docs/runbook-schema-registry.md`). One piece of it stays deliberately **dormant, not absent**: `schema-registry.yml`'s usage-check/enforce-lifecycle steps *would* auto-classify a schema as `NEVER_SEEN` from Prometheus publish-activity data and require it be marked `deprecated`/`retired` — but `PROMETHEUS_URL` is left unset in every environment today (this service is pre-production, LLD §19.5; its 9 events are frozen, not evolving), which makes `usage-check` run with `--source disabled` and `enforce-lifecycle` a deliberate no-op. Do not read "the pipeline exists" as "lifecycle enforcement is active" — it activates only once a real production Prometheus is wired and `PROMETHEUS_URL` is set (`.claude/operations.md` §13.2.1).
 
 What **is** enforced today:
-- **`internal/eventschema/asyncapi_drift_test.go`** — this repo's CI-enforceable substitute for a live AWS Glue Schema Registry comparison. It asserts `api/asyncapi.yaml`'s `iamTenantEvents` channel message list and `eventschema.ByEventType`'s map keys name exactly the same 10 events; `internal/eventschema/` is the one schema-governance workspace in this repo (no separate design-time-vs-runtime split the way a lifecycle-managed service might have).
+- **`internal/eventschema/asyncapi_drift_test.go`** — this repo's CI-enforceable substitute for a live AWS Glue Schema Registry comparison. It asserts `api/asyncapi.yaml`'s `iamTenantEvents` channel message list and `eventschema.ByEventType`'s map keys name exactly the same 9 events; `internal/eventschema/` is the one schema-governance workspace in this repo (no separate design-time-vs-runtime split the way a lifecycle-managed service might have).
 - **`platform-schemagov`** (`schema-gov`, a Python 3.12 CLI installed from source in CI (`pip install git+…/platform-schemagov.git@v0.4.0`, authorized by the org `GO_PRIVATE_TOKEN` secret) because the GHCR package's Actions-access allow-list doesn't include this repo and `docker pull` returns `denied`; the `ghcr.io/bcbp-solutions-fzc-llc/platform-schemagov:0.4` image is used only by local `make` targets — zero Go-code presence) validates `api/asyncapi.yaml` against the shared `iam-tenant-events` Glue registry and fails the PR on drift — `schema-registry.yml`'s `pr-check` job, triggered on a PR touching `api/asyncapi.yaml`/`internal/eventschema/` — and drives the full registration/diff/prune/health pipeline above. `validate-quality.yml` itself carries no schema step; the drift gate lives entirely in `schema-registry.yml`. `api/asyncapi.yaml` must land in the same PR as any Glue version bump.
 - Nine subjects are registered on the shared `iam-tenant-events` Glue registry (O&M registers `TenantCreated`/`TrialStarted` on the same registry — disjoint names, RP-D5, no collision risk). `schema-prune.yml` hard-blocks its `--execute` path whenever either O&M name is present in the registry — which, since this service never has a local file for them, is always — because the underlying CLI has no name-exclusion flag and `--execute` deletes every orphan candidate it finds.
 
@@ -1032,7 +1032,7 @@ STRIDE analysis of `iam-realm-provisioner`. Every row is grounded in a real mech
 | **Denial of Service** | The in-process outbox runner goroutine starves the 3 SQS consumer loops or vice versa under sustained load | Outbox runner (in-process, shares CPU with the server) | `OUTBOX_BATCH_SIZE` (default 50, `FOR UPDATE SKIP LOCKED`) caps per-cycle work; `outbox_events` is durable regardless of runner availability, so a starved runner delays publish, it never loses an event; `OUTBOX_DRAIN_TIMEOUT` bounds how long shutdown waits for the current batch |
 | **Denial of Service** | A caller replays or floods the same `Idempotency-Key` | `provisioning_operations` ledger | `in_progress` serialises concurrent duplicates of the same key to `409 operation_in_progress`; a `succeeded` key replays the stored result with **no** second Keycloak call (IDEMP-3), so a flood of the same key never multiplies Keycloak load |
 | **Elevation of Privilege** | A non-HTTP code path (SQS consumer, CronJob) touches a tenant-scoped table without a bound GUC | Background workers | Every tenant-scoped repository call outside `GUCBridgeMiddleware` either runs on the app pool inside a `RunInTx` that itself binds the GUC, or explicitly uses the separate `sysPool` (`BYPASSRLS`, no `GUCProvider`) for cross-tenant sweeps — there is no third path that reaches a tenant-scoped table with neither |
-| **Elevation of Privilege** | A downstream consumer treats one of the 10 published events as an authorization grant rather than a point-in-time fact | Downstream consumers of `iam.tenant.events` | Consumer conformance checklist (above): events are at-least-once, may arrive out of order, and reflect a snapshot that can be superseded before consumption — a decision-critical access change must re-read authoritative state, not trust the payload alone |
+| **Elevation of Privilege** | A downstream consumer treats one of the 9 published events as an authorization grant rather than a point-in-time fact | Downstream consumers of `iam.tenant.events` | Consumer conformance checklist (above): events are at-least-once, may arrive out of order, and reflect a snapshot that can be superseded before consumption — a decision-critical access change must re-read authoritative state, not trust the payload alone |
 
 **Out of scope (platform controls):** JWT issuance, MFA credential validation at login time, Keycloak session management — owned by Keycloak itself at runtime. Role assignments, department/plan catalogues — owned by Org & Membership and sibling services. AWS account-level IAM, VPC, and SNS topic policies — owned by platform infrastructure.
 
@@ -1077,7 +1077,7 @@ graph LR
         arch["ARCHITECTURE.md\nembeds mermaid blocks + prose"]
         claude[".claude/CLAUDE.md + siblings\narchitecture.md · database-schema.md\napi-caching-events.md · request-flows.md · operations.md"]
         readme["README.md\nmental model · API/event overview · onboarding"]
-        asyncapi_yaml["api/asyncapi.yaml\nAsyncAPI 3.0 — iam-tenant-events SNS contract\n(10 published + 6 consumed)"]
+        asyncapi_yaml["api/asyncapi.yaml\nAsyncAPI 3.0 — iam-tenant-events SNS contract\n(9 published + 6 consumed)"]
         swag_annot["@Summary/@Router annotations\non all 17 RP-1..RP-17 handlers +\ncmd/server/swagger_info.go"]
         lld["docs/lld/iam-lld-realm-provisioner-service.md\nfrozen LLD v1.23"]
     end

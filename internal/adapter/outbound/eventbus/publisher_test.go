@@ -47,14 +47,19 @@ func TestPublisher_Enqueue_HappyPath_InsertsIntoOutbox(t *testing.T) {
 
 	tenantID := uuid.New()
 	event := &domain.Event{
-		Type:     domain.EventTrialTenantProvisioned,
+		Type:     domain.EventTenantIdentityProvisioned,
 		TenantID: tenantID,
 		Subject:  tenantID.String(),
 		Actor:    domain.SystemActorID,
-		Data: domain.TrialTenantProvisionedPayload{
-			TenantID:       tenantID,
-			Realm:          "trial",
-			KeycloakUserID: uuid.New(),
+		Data: domain.TenantIdentityProvisionedPayload{
+			TenantID:    tenantID,
+			OwnerUserID: uuid.New(),
+			Slug:        "acme",
+			Name:        "Acme",
+			Plan:        "starter",
+			SignupType:  domain.SignupTypeTrial,
+			Realm:       "trial",
+			RealmType:   string(domain.RealmStrategyShared),
 		},
 	}
 
@@ -72,14 +77,19 @@ func TestPublisher_Enqueue_RequiresOpenTx(t *testing.T) {
 	p := New(domain.Source, NoopCodec{})
 	tenantID := uuid.New()
 	err := p.Enqueue(context.Background(), &domain.Event{
-		Type:     domain.EventTrialTenantProvisioned,
+		Type:     domain.EventTenantIdentityProvisioned,
 		TenantID: tenantID,
 		Subject:  tenantID.String(),
 		Actor:    domain.SystemActorID,
-		Data: domain.TrialTenantProvisionedPayload{
-			TenantID:       tenantID,
-			Realm:          "trial",
-			KeycloakUserID: uuid.New(),
+		Data: domain.TenantIdentityProvisionedPayload{
+			TenantID:    tenantID,
+			OwnerUserID: uuid.New(),
+			Slug:        "acme",
+			Name:        "Acme",
+			Plan:        "starter",
+			SignupType:  domain.SignupTypeTrial,
+			Realm:       "trial",
+			RealmType:   string(domain.RealmStrategyShared),
 		},
 	})
 	require.Error(t, err)
@@ -96,11 +106,11 @@ func TestPublisher_Enqueue_CodecRejectionNeverTouchesOutbox(t *testing.T) {
 
 	tenantID := uuid.New()
 	event := &domain.Event{
-		Type:     domain.EventTrialTenantProvisioned,
+		Type:     domain.EventTenantIdentityProvisioned,
 		TenantID: tenantID,
 		Subject:  tenantID.String(),
 		Actor:    domain.SystemActorID,
-		Data:     domain.TrialTenantProvisionedPayload{TenantID: tenantID},
+		Data:     domain.TenantIdentityProvisionedPayload{TenantID: tenantID},
 	}
 
 	err := p.Enqueue(pgadapter.WithTx(context.Background(), tx), event)

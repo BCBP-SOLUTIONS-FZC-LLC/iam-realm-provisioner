@@ -47,9 +47,8 @@ func TestProvisionTrial_Happy(t *testing.T) {
 	if body.Realm != "trial" || body.Strategy != "shared" || body.KeycloakUserID != kcUserID || !body.EmailVerificationSent {
 		t.Fatalf("unexpected result: %+v", body)
 	}
-	if len(d.tx.pub.events) != 2 || d.tx.pub.events[0].Type != domain.EventTenantIdentityProvisioned ||
-		d.tx.pub.events[1].Type != domain.EventTrialTenantProvisioned {
-		t.Fatalf("expected TenantIdentityProvisioned+TrialTenantProvisioned events, got %+v", d.tx.pub.events)
+	if len(d.tx.pub.events) != 1 || d.tx.pub.events[0].Type != domain.EventTenantIdentityProvisioned {
+		t.Fatalf("expected one TenantIdentityProvisioned event, got %+v", d.tx.pub.events)
 	}
 }
 

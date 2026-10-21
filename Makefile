@@ -137,7 +137,7 @@ help:
 	@echo "  make extract-schemas  - derive internal/eventschema/*.json from api/asyncapi.yaml"
 	@echo "  make schema-validate  - validate AsyncAPI + event schemas — 8 passes (no AWS required)"
 	@echo "  make schema-diff      - diff two schema files: CURRENT=<path> PROPOSED=<path>"
-	@echo "  make schema-register  - register this service's 10 event schemas to Glue (requires AWS, or Floci for local dev)"
+	@echo "  make schema-register  - register this service's 9 event schemas to Glue (requires AWS, or Floci for local dev)"
 	@echo "  make schema-verify    - pre-deploy check: each produced schema definition registered + AVAILABLE (requires AWS)"
 	@echo "  make schema-prune     - dry-run: list orphaned Glue schemas (requires AWS; excludes O&M's TenantCreated/TrialStarted)"
 	@echo ""
@@ -435,7 +435,7 @@ extract-schemas:
 # (1) structure, (2) draft-07, (3) enum drift, (4) lifecycle annotations,
 # (5) open-schema guard, (6) consumer strict-mode, (7) coverage, (8) AsyncAPI structure.
 # No AWS credentials needed. Pass 4 only warns (does not fail) on schemas with
-# no x-lifecycle annotation — this service's 10 events are frozen (LLD §25)
+# no x-lifecycle annotation — this service's 9 events are frozen (LLD §25)
 # and deliberately carry none yet (see ARCHITECTURE.md).
 .PHONY: schema-validate
 schema-validate: extract-schemas
@@ -461,7 +461,7 @@ schema-diff:
 	  --proposed    "$(PROPOSED)" \
 	  --schema-name "$(or $(SCHEMA_NAME),$(notdir $(basename $(PROPOSED))))"
 
-# schema-register: register this service's 10 event schemas to Glue (requires
+# schema-register: register this service's 9 event schemas to Glue (requires
 # AWS credentials, or Floci for local dev — already registered automatically
 # by scripts/init-floci.sh on `make docker-up`, so this target is mainly for
 # CI/real-AWS use). Only ever registers the files present under

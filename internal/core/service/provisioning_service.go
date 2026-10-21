@@ -335,7 +335,7 @@ type ProvisionTrialResult struct {
 
 // ProvisionTrial implements RP-1 (§8.1): create the trial user in the
 // shared realm, stamp tenant_id, trigger verification email, and emit
-// TenantIdentityProvisioned + TrialTenantProvisioned. Keycloak-effect-first, then local commit (§9.1).
+// TenantIdentityProvisioned. Keycloak-effect-first, then local commit (§9.1).
 // Idempotent via idempotencyKey (§9.2).
 func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey string, req ProvisionTrialRequest) (out *ProvisionTrialResult, err error) {
 	existing, found, err := s.idempotency.Begin(ctx, idempotencyKey, req.TenantID, domain.OpProvisionTrial)
@@ -396,17 +396,8 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 		if !ok {
 			return nil
 		}
-		if err := pub.Enqueue(ctx, tenantIdentityProvisionedEvent(ctx, req.TenantID, kcUserID,
-			req.TenantSlug, req.TenantName, req.Plan, domain.SignupTypeTrial, s.sharedRealm, domain.RealmStrategyShared)); err != nil {
-			return err
-		}
-		return pub.Enqueue(ctx, &domain.Event{
-			Type: domain.EventTrialTenantProvisioned, TenantID: req.TenantID,
-			Subject: "tenants/" + req.TenantID.String(),
-			Data: domain.TrialTenantProvisionedPayload{
-				TenantID: req.TenantID, Realm: s.sharedRealm, KeycloakUserID: kcUserID,
-			},
-		})
+		return pub.Enqueue(ctx, tenantIdentityProvisionedEvent(ctx, req.TenantID, kcUserID,
+			req.TenantSlug, req.TenantName, req.Plan, domain.SignupTypeTrial, s.sharedRealm, domain.RealmStrategyShared))
 	})
 	if err != nil {
 		s.failIdempotency(ctx, idempotencyKey)
@@ -421,8 +412,8 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 }
 
 // tenantIdentityProvisionedEvent builds the TenantIdentityProvisioned event
-// RP-1 and RP-2 enqueue first in their commit transaction (§7.5, BFF-2
-// signup backstop). slug/name/plan are passed through exactly as received —
+// (§7.5, BFF-2 signup backstop): RP-1's only event, and the first of RP-2's
+// four in its commit transaction. slug/name/plan are passed through exactly as received —
 // O&M's I-1 keeps whichever of this event or the BFF's own call lands
 // first, so the two must never differ.
 func tenantIdentityProvisionedEvent(ctx context.Context, tenantID, ownerUserID uuid.UUID, slug, name, plan, signupType, realm string, realmType domain.RealmStrategy) *domain.Event {

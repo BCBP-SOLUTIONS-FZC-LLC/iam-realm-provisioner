@@ -15,10 +15,10 @@ name: Schema Health Quarterly Review
 # Lifecycle lint runs schema-gov validate (Pass 4) via the platform-schemagov
 # Docker image — the same check enforced in CI on every push. Pass 4 currently
 # only WARNS (does not fail) for this service: api/asyncapi.yaml carries no
-# x-lifecycle annotations by design (the 10 events were frozen at LLD v1.0
+# x-lifecycle annotations by design (the 9 events were frozen at LLD v1.0
 # sign-off and none has ever needed to evolve past its frozen shape — see
 # ARCHITECTURE.md). Expect "no x-lifecycle annotation" warnings below for all
-# 10 of this service's events; that is the current, intentional state, not a
+# 9 of this service's events; that is the current, intentional state, not a
 # violation to fix.
 #
 # The version-accumulation scan below lists every schema in the registry,
@@ -149,7 +149,7 @@ jobs:
             if [ "${LATEST:-0}" -gt "${THRESHOLD}" ] 2>/dev/null; then
               CANDIDATES="${CANDIDATES}  ⚠  ${_name}  v${LATEST}  (threshold: ${THRESHOLD})\n"
               CANDIDATE_COUNT=$((CANDIDATE_COUNT + 1))
-              printf '::warning title=Version Accumulation::%s has reached Glue version %d (threshold: %d). Consider compaction — see x-version-governance in api/asyncapi.yaml (if %s is one of this service'"'"'s 10 events — TenantCreated/TrialStarted belong to iam-org-membership).\n' \
+              printf '::warning title=Version Accumulation::%s has reached Glue version %d (threshold: %d). Consider compaction — see x-version-governance in api/asyncapi.yaml (if %s is one of this service'"'"'s 9 events — TenantCreated/TrialStarted belong to iam-org-membership).\n' \
                 "${_name}" "${LATEST}" "${THRESHOLD}" "${_name}"
             else
               printf '  ✔  %-36s  v%s\n' "${_name}" "${LATEST}"
@@ -178,7 +178,7 @@ jobs:
             if [ "${LIFECYCLE_EXIT}" -eq 0 ]; then
               printf '✅ No lifecycle *errors* — this service currently carries no `x-lifecycle`\n'
               printf 'annotations at all (frozen event set, LLD v1.0 §25), so expect "no x-lifecycle\n'
-              printf 'annotation" *warnings* for all 10 events in the full output below; that is\n'
+              printf 'annotation" *warnings* for all 9 events in the full output below; that is\n'
               printf 'intentional, not a regression.\n\n'
             else
               printf '❌ **Violations found** — see full output below. Fix before next release.\n\n'

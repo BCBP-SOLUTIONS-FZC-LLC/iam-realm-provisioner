@@ -23,11 +23,10 @@ const SystemActorID = "00000000-0000-0000-0000-0000000000a1"
 // CommercialSystemUUID (pkg/requestctx/principals.go).
 const CommercialActorID = "00000000-0000-0000-0000-0000000000c1"
 
-// The 10 frozen published event type names (§25, §7.5) — the values of the
+// The 9 frozen published event type names (§25, §7.5) — the values of the
 // envelope `type` field, and the Glue schema names registered in the shared
 // `iam-tenant-events` registry.
 const (
-	EventTrialTenantProvisioned    = "TrialTenantProvisioned"
 	EventTenantIdentityProvisioned = "TenantIdentityProvisioned"
 	EventTenantRealmReady          = "TenantRealmReady"
 	EventTenantConverted           = "TenantConverted"
@@ -71,14 +70,6 @@ type Event struct {
 	IPAddress string
 	UserAgent string
 	Data      any
-}
-
-// TrialTenantProvisionedPayload is the frozen payload for
-// TrialTenantProvisioned (§25, §7.5) — emitted by RP-1.
-type TrialTenantProvisionedPayload struct {
-	TenantID       uuid.UUID `json:"tenant_id"`
-	Realm          string    `json:"realm"`
-	KeycloakUserID uuid.UUID `json:"keycloak_user_id"`
 }
 
 // TenantIdentityProvisionedPayload is the frozen payload for

@@ -10,7 +10,7 @@ import (
 
 func TestNoopCodec_PassesThroughUnchanged(t *testing.T) {
 	payload := []byte(`{"tenant_id":"11111111-1111-1111-1111-111111111111"}`)
-	out, versionID, err := NoopCodec{}.Encode(context.Background(), "TrialTenantProvisioned", payload)
+	out, versionID, err := NoopCodec{}.Encode(context.Background(), "TenantIdentityProvisioned", payload)
 	require.NoError(t, err)
 	assert.Equal(t, payload, out)
 	assert.Empty(t, versionID)

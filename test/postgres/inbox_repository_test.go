@@ -196,7 +196,7 @@ func TestInboxRepository_ProcessOnce_InjectsTxBoundPublisher(t *testing.T) {
 		require.True(t, inTx, "fn runs inside the claim transaction")
 		p, ok := port.EventPublisherFromContext(txCtx)
 		require.True(t, ok, "an inbox built with a publisher injects it")
-		return p.Enqueue(txCtx, &domain.Event{Type: domain.EventTrialTenantProvisioned, TenantID: tenantID})
+		return p.Enqueue(txCtx, &domain.Event{Type: domain.EventTenantIdentityProvisioned, TenantID: tenantID})
 	}
 
 	dup, err := inbox.ProcessOnce(ctx, domain.ConsumerTenant, eventID, domain.EventTrialStarted, emit)

@@ -41,7 +41,7 @@ sequenceDiagram
         TX ->>+ DB: BEGIN (SET LOCAL app.tenant_id, RLS-6)
         TX ->> DB: UPSERT tenant_realms(tenant_id, realm='trial', strategy='shared', status='active')
         DB -->> TX: row committed-pending
-        TX ->>+ OB: Enqueue — INSERT outbox_events(TrialTenantProvisioned{tenant_id, realm, keycloak_user_id})
+        TX ->>+ OB: Enqueue — INSERT outbox_events(TenantIdentityProvisioned{tenant_id, owner_user_id, slug, name, plan, ...})
         OB -->>- TX: inserted
         TX ->> DB: COMMIT
         DB -->>- TX: committed — local row + outbox row durable together (CONS-1)
@@ -55,7 +55,7 @@ sequenceDiagram
     Note over Runner,SNS: Outbox runner polls every OUTBOX_POLL_INTERVAL (500 ms)<br/>and publishes independently — not part of the request's latency budget
     Runner ->>+ OB: SELECT ... WHERE published_at IS NULL FOR UPDATE SKIP LOCKED
     OB -->>- Runner: unpublished batch
-    Runner ->>+ SNS: Publish(TopicArn=iam.tenant.events, TrialTenantProvisioned envelope)
+    Runner ->>+ SNS: Publish(TopicArn=iam.tenant.events, TenantIdentityProvisioned envelope)
     SNS -->>- Runner: MessageID
     Runner ->> OB: UPDATE outbox_events SET published_at = now()
 
