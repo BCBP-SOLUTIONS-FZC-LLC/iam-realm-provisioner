@@ -74,7 +74,7 @@ make swag-check         # Fails if docs/swagger/ is stale relative to handler an
 
 ## Architecture
 
-Clean Architecture — dependencies point inward; outer layers never import inner layers. Three composition roots ship from one Docker image: `cmd/server/main.go` (HTTP API + 3 SQS consumers + outbox runner), `cmd/reconciler/main.go` (CronJob dispatcher, `--job=<name>`) and `cmd/migrate/main.go` (the Helm pre-install/pre-upgrade migrate Job). Full directory tree, shared library dependencies (`platform-gincommon/v2` v2.0.0, `platform-events/v2` v2.1.0, `platform-pgcommon/v2` v2.0.2 — all latest, incorporated like `iam-org-membership` — `Nerzal/gocloak` v13.9.0), RoutingPublisher-vs-single-topic wiring, and `go-arch-lint` dependency rules (including the two CI-enforced invariants beyond the layering check — RP-INV-1 and RLS-6) are in **[`.claude/architecture.md`](architecture.md)**.
+Clean Architecture — dependencies point inward; outer layers never import inner layers. Three composition roots ship from one Docker image: `cmd/server/main.go` (HTTP API + 3 SQS consumers + outbox runner), `cmd/reconciler/main.go` (CronJob dispatcher, `--job=<name>`) and `cmd/migrate/main.go` (the Helm pre-install/pre-upgrade migrate Job). Full directory tree, shared library dependencies (`platform-gincommon/v2` v2.1.0, `platform-events/v2` v2.1.0, `platform-pgcommon/v2` v2.0.2 — all latest, incorporated like `iam-org-membership` — `Nerzal/gocloak` v13.9.0), RoutingPublisher-vs-single-topic wiring, and `go-arch-lint` dependency rules (including the two CI-enforced invariants beyond the layering check — RP-INV-1 and RLS-6) are in **[`.claude/architecture.md`](architecture.md)**.
 
 ## Key Files to Know
 
