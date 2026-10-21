@@ -449,6 +449,14 @@ ingress:
 
   securityPolicy:
     enabled: false
+    # Merge this route policy with the Gateway-level SecurityPolicy instead of
+    # replacing it, so the gateway's JWT + ext_authz (AuthZ Enrichment's
+    # trusted identity headers) stay in force on these routes. StrategicMerge |
+    # JSONMerge; requires Envoy Gateway >= v1.8. Set "" only on an older
+    # gateway (where the unknown field would be pruned or rejected) — and on
+    # such a gateway do not enable this policy at all: it would replace the
+    # gateway policy.
+    mergeType: StrategicMerge
     cors:
       enabled: false
       allowOrigins: []
