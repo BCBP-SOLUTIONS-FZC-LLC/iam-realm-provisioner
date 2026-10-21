@@ -49,7 +49,7 @@ sequenceDiagram
         SVC -->> H: 502 keycloak_unavailable (no local commit, retryable)
     else user created
         KC -->> SVC: keycloak_user_id (sub)
-        SVC ->>+ DB: RunInTx { UPSERT tenant_realms(strategy='shared'),<br/>outbox.Enqueue(TenantIdentityProvisioned, TrialTenantProvisioned) }
+        SVC ->>+ DB: RunInTx { UPSERT tenant_realms(strategy='shared'),<br/>outbox.Enqueue(TenantIdentityProvisioned) }
         DB -->>- SVC: committed
         SVC ->> DB: idempotency.Complete(idempotencyKey, result)
         SVC -->>- H: ProvisionTrialResult{realm:'trial', strategy:'shared', keycloak_user_id}

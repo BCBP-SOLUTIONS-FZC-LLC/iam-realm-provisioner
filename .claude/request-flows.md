@@ -76,8 +76,7 @@ POST /tenants/provision-trial {tenant_id, tenant_name, tenant_slug, admin_email,
     tenant_realms.Upsert{tenant_id, realm_name:"trial", strategy:"shared", status:"active",
       service_account_principal_id, service_account_keycloak_client_id}
     outbox.Enqueue(TenantIdentityProvisioned{tenant_id, owner_user_id:keycloak_user_id, slug, name, plan,
-      signup_type:"trial", realm:"trial", realm_type:"shared"})   -- BFF-2 backstop, first (RP-D16)
-    outbox.Enqueue(TrialTenantProvisioned{tenant_id, realm:"trial", keycloak_user_id})
+      signup_type:"trial", realm:"trial", realm_type:"shared"})   -- BFF-2 backstop, RP-1's only event (RP-D16)
   idempotency.Complete(key, marshaled result)
   -> 201 {tenant_id, realm:"trial", strategy:"shared", keycloak_user_id, email_verification_sent:true}
 ```

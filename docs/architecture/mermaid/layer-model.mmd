@@ -21,13 +21,13 @@ graph TD
     end
 
     subgraph eventschema_grp["Embedded Schemas  —  internal/eventschema/"]
-        eventschema["*.json\nJSON Schema Draft-07 for the 10 published events\nasyncapi_drift_test.go vs api/asyncapi.yaml"]
+        eventschema["*.json\nJSON Schema Draft-07 for the 9 published events\nasyncapi_drift_test.go vs api/asyncapi.yaml"]
     end
 
     subgraph core["Core  —  internal/core/"]
         service["service/\nProvisioningService · LifecycleService\nIdpService · RealmConfigService · MfaService"]
         port["port/\nKeycloakAdmin · TenantRealmRepository · IdpConfigRepository\nIdpValidationRepository · ReconciliationRepository\nIdempotencyStore · Inbox · InboxPruner · EventPublisher · TxRunner\nOpenBaoClient · OrgMembershipClient · ObjectStore\nSubscriptionLapseReader (RP-C3) · TokenServiceClient (§2.5)"]
-        domain["domain/\nTenantRealm · IdpConfig · IdpConfigValidation\nProvisioningOperation · RealmConfigReconciliation\nErrorCode catalogue · 10 event payload types"]
+        domain["domain/\nTenantRealm · IdpConfig · IdpConfigValidation\nProvisioningOperation · RealmConfigReconciliation\nErrorCode catalogue · 9 event payload types"]
     end
 
     subgraph pkg["Shared Packages  —  pkg/"]

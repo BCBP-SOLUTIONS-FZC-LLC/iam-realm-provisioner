@@ -51,7 +51,17 @@ func TestInboundPipeline_DLQForwardingAgainstFloci(t *testing.T) {
 			Image:        "floci/floci:2.1.0",
 			ExposedPorts: []string{"4566/tcp"},
 			Env:          map[string]string{"FLOCI_DEFAULT_REGION": "ap-south-1", "FLOCI_DEFAULT_ACCOUNT_ID": "000000000000"},
-			WaitingFor:   wait.ForLog("Ready.").WithStartupTimeout(60 * time.Second),
+			// "Ready." alone is not enough: under a loaded parallel run the
+			// mapped port can accept a connection before floci serves it, and
+			// the first SQS call is reset. Also poll a real SQS call until it
+			// answers 200.
+			WaitingFor: wait.ForAll(
+				wait.ForLog("Ready."),
+				wait.ForHTTP("/").WithPort("4566/tcp").WithMethod(http.MethodPost).
+					WithHeaders(map[string]string{"Content-Type": "application/x-amz-json-1.0", "X-Amz-Target": "AmazonSQS.ListQueues"}).
+					WithBody(strings.NewReader("{}")).
+					WithPollInterval(200*time.Millisecond),
+			).WithDeadline(60 * time.Second),
 		},
 		Started: true,
 	})

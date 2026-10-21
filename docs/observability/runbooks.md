@@ -105,7 +105,7 @@ Common starting points:
 
 ### IAMRealmProvisionerOutboxStuck
 
-**Meaning.** Produced tenant-lifecycle events (`TrialTenantProvisioned`, `TenantRealmReady`, `TenantConverted`, ...) exhausted `OUTBOX_MAX_ATTEMPTS` (5) and moved to `outbox_dead_letters`. O&M, AuthZ Enrichment and Audit Log never received them, so their projections are behind this service.
+**Meaning.** Produced tenant-lifecycle events (`TenantIdentityProvisioned`, `TenantRealmReady`, `TenantConverted`, ...) exhausted `OUTBOX_MAX_ATTEMPTS` (5) and moved to `outbox_dead_letters`. O&M, AuthZ Enrichment and Audit Log never received them, so their projections are behind this service.
 
 **Triage.**
 1. `SELECT id, event_type, tenant_id, attempts, last_error, failed_at FROM outbox_dead_letters ORDER BY failed_at DESC LIMIT 20;`

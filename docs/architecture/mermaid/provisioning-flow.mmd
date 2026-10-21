@@ -28,7 +28,7 @@ sequenceDiagram
 
         RP ->>+ PG: RunInTx {
         RP ->> PG: UPSERT tenant_realms(tenant_id, realm='trial', strategy='shared', status='active')
-        RP ->>+ OB: outbox.Enqueue(TenantIdentityProvisioned{...}, TrialTenantProvisioned{tenant_id, realm:'trial', keycloak_user_id})
+        RP ->>+ OB: outbox.Enqueue(TenantIdentityProvisioned{tenant_id, owner_user_id, slug, name, plan, signup_type:'trial', realm:'trial', realm_type:'shared'})
         OB -->>- RP: inserted
         RP ->> PG: }  COMMIT
         PG -->>- RP: committed (local row + outbox row atomic, RP-EVT-1)
@@ -37,17 +37,17 @@ sequenceDiagram
         RP -->> SG: 201 {tenant_id, realm:'trial', strategy:'shared',<br/>keycloak_user_id(sub), email_verification_sent:true}
     end
 
-    Note over SG,OM: O&M's own tenants row was already created synchronously via O&M's I-1<br/>(caller-supplied tenant_id, RP-6) BEFORE this call — TrialTenantProvisioned settles/reconciles it,<br/>it does not create it.
+    Note over SG,OM: O&M's own tenants row was already created synchronously via O&M's I-1<br/>(caller-supplied tenant_id, RP-6) BEFORE this call — normally. If that I-1 never landed,<br/>O&M's backstop creates the tenant from TenantIdentityProvisioned (RP-D16).
 
     Note over Runner,SQS: Outbox runner polls OUTBOX_POLL_INTERVAL (500 ms), publishes independently of the request
     Runner ->>+ OB: SELECT unpublished WHERE published_at IS NULL FOR UPDATE SKIP LOCKED
-    OB -->>- Runner: TrialTenantProvisioned envelope
+    OB -->>- Runner: TenantIdentityProvisioned envelope
     Runner ->>+ SNS: Publish(TopicArn=iam.tenant.events,<br/>MessageAttributes{EventType, TenantID, Source, EventID})
     SNS -->>- Runner: MessageID
     Runner ->> OB: UPDATE outbox_events SET published_at = now()
 
     SNS ->>+ SQS: fan-out by subscription filter policy
-    SQS -->>- OM: TrialTenantProvisioned message
+    SQS -->>- OM: TenantIdentityProvisioned message
 
     OM ->> OM: processed_events dedup (event_id, consumer='orgm')<br/>settle tenants row: confirm keycloak_realm='trial', link keycloak_user_id
     OM ->> SQS: DeleteMessage (ACK)

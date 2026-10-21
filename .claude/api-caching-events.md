@@ -10,7 +10,7 @@ Middleware chain (`router.go`): 1 MB body-size cap → `gincommon.ObservabilityM
 
 | # | Method & Path | AuthZ | Idempotency-Key | Purpose |
 |---|---|---|---|---|
-| RP-1 | `POST /tenants/provision-trial` | system | required | Create a trial user in the shared realm, stamp `tenant_id`, trigger `VERIFY_EMAIL`. `plan` ∈ `starter`\|`pro`\|`enterprise`. Emits `TenantIdentityProvisioned` + `TrialTenantProvisioned`. |
+| RP-1 | `POST /tenants/provision-trial` | system | required | Create a trial user in the shared realm, stamp `tenant_id`, trigger `VERIFY_EMAIL`. `plan` ∈ `starter`\|`pro`\|`enterprise`. Emits `TenantIdentityProvisioned`. |
 | RP-2 | `POST /tenants/provision-direct` | system | required | Provision a **dedicated** realm straight away (no shared-realm intermediate): create realm from template, register OIDC clients, create admin user. Emits `TenantIdentityProvisioned` + `TenantRealmReady` + `DirectPaidSignup` + `TenantConverted{direct_signup:true}`. |
 | RP-3 | `POST /tenants/:id/convert` | system | required | Trial → dedicated conversion: create dedicated realm, migrate every trial user (preserving `sub`, copying TOTP, flagging WebAuthn re-enrollment), force-logout the shared realm. Emits `TenantRealmReady` + `TenantConverted{direct_signup:false}`. Post-commit, revokes the old shared-realm credential via TS-2 (`RevokeCredential`); a failed revoke is logged and does not fail the conversion. |
 | RP-4 | `POST /tenants/:id/revert-conversion` | system | required | Undo Convert within the 7-day reversal window: migrate users back to the shared realm, delete the dedicated realm, re-mint the tenant's `platform-automation` client back in the shared realm (§2.5 — the dedicated realm's client died with the realm), extend the trial. Emits `TrialReactivated`. `409 revert_window_expired` past the window. Named callers: Billing (on fraud/chargeback dispute; which Stripe signal triggers it is a Billing-side decision, CD-10). |
@@ -70,13 +70,12 @@ Every mutating endpoint above marked "required" enforces `RequireIdempotencyKey`
 
 ## Events
 
-### Produced — `iam-tenant-events` SNS topic, 10 event types (§25, §7.5)
+### Produced — `iam-tenant-events` SNS topic, 9 event types (§25, §7.5)
 
 Envelope `source = "iam-realm-provisioner"`. Cron-originated events (RP-C1/RP-C3) use the sentinel actor `SystemActorID = "00000000-0000-0000-0000-0000000000a1"`.
 
 | Event | Producer | Key payload fields |
 |---|---|---|
-| `TrialTenantProvisioned` | RP-1 | `tenant_id`, `realm`, `keycloak_user_id` |
 | `TenantIdentityProvisioned` | RP-1, RP-2 | `tenant_id`, `owner_user_id`, `slug`, `name`, `plan`, `signup_type` (`trial`\|`direct_paid`), `realm`, `realm_type` (`shared`\|`dedicated`) — BFF-2 signup backstop: O&M runs I-1 if the tenant is missing (RP-D16) |
 | `TenantRealmReady` | RP-2, RP-3 | `tenant_id`, `realm`, `keycloak_shard`, `oidc_clients[]` |
 | `TenantConverted` | RP-2 (`direct_signup:true`), RP-3 (`direct_signup:false`) | `tenant_id`, `realm`, `plan`, `billing_subscription_id?`, `users_migrated`, `direct_signup` |
@@ -87,7 +86,7 @@ Envelope `source = "iam-realm-provisioner"`. Cron-originated events (RP-C1/RP-C3
 | `TenantOffboarded` | RP-C3 (post-export-confirmed delete) | `tenant_id`, `realm`, `export_s3_key`, `offboarded_at` |
 | `TenantReactivated` | RP-10 (dedicated-strategy reactivate) | `tenant_id`, `realm`, `source`, `reason?` |
 
-Every payload is validated against an embedded JSON Schema (`internal/eventschema/*.json`, `ByEventType`) at outbox-enqueue time (shape only — wire encoding via the Glue codec happens later, at SNS-publish time, with the version UUID `GlueCodec` resolved once at startup by definition — `glue:GetSchemaByDefinition`, never "latest", no refresher). `internal/eventschema/asyncapi_drift_test.go` asserts `api/asyncapi.yaml`'s `iamTenantEvents` channel names exactly these 10 events and no others.
+Every payload is validated against an embedded JSON Schema (`internal/eventschema/*.json`, `ByEventType`) at outbox-enqueue time (shape only — wire encoding via the Glue codec happens later, at SNS-publish time, with the version UUID `GlueCodec` resolved once at startup by definition — `glue:GetSchemaByDefinition`, never "latest", no refresher). `internal/eventschema/asyncapi_drift_test.go` asserts `api/asyncapi.yaml`'s `iamTenantEvents` channel names exactly these 9 events and no others.
 
 ### Consumed — 3 SQS queues, 5 distinct event types (§7.1)
 
@@ -113,4 +112,4 @@ These are documented in `api/asyncapi.yaml` (three `sqsTenant*` server entries) 
 
 ### AsyncAPI & Schema Drift
 
-`api/asyncapi.yaml` — design-time source of truth, embedded via `api/embed.go`, served live at `/asyncapi` and `/asyncapi.yaml` (gated by `DOCS_ENABLED`/`DOCS_AUTH_TOKEN` in production). Declares 7 servers (the SNS topic + 3 inbound SQS queues + 3 downstream Commercial consumer SQS queue references for cross-team visibility, CD-26), 4 channels, and per-message schemas. Two complementary schema-governance layers now exist: `internal/eventschema/asyncapi_drift_test.go` is a fast, no-AWS CI check — it structurally parses the `iamTenantEvents` channel's `messages:` block out of the YAML and asserts its key set equals `eventschema.ByEventType`'s map keys exactly — and `.github/workflows/schema-registry.yml`/`schema-prune.yml`/`schema-health-quarterly.yml` (the `platform-schemagov` CLI) validate/diff/register this service's 10 schemas against the shared `iam-tenant-events` Glue registry for real. See `docs/runbook-schema-registry.md` and `.claude/operations.md` §13.2.1.
+`api/asyncapi.yaml` — design-time source of truth, embedded via `api/embed.go`, served live at `/asyncapi` and `/asyncapi.yaml` (gated by `DOCS_ENABLED`/`DOCS_AUTH_TOKEN` in production). Declares 7 servers (the SNS topic + 3 inbound SQS queues + 3 downstream Commercial consumer SQS queue references for cross-team visibility, CD-26), 4 channels, and per-message schemas. Two complementary schema-governance layers now exist: `internal/eventschema/asyncapi_drift_test.go` is a fast, no-AWS CI check — it structurally parses the `iamTenantEvents` channel's `messages:` block out of the YAML and asserts its key set equals `eventschema.ByEventType`'s map keys exactly — and `.github/workflows/schema-registry.yml`/`schema-prune.yml`/`schema-health-quarterly.yml` (the `platform-schemagov` CLI) validate/diff/register this service's 9 schemas against the shared `iam-tenant-events` Glue registry for real. See `docs/runbook-schema-registry.md` and `.claude/operations.md` §13.2.1.

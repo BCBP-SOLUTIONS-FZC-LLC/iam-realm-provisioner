@@ -94,16 +94,16 @@ func TestGlueCodec_Encode_UsesCachedVersionID(t *testing.T) {
 	versionID := uuid.New().String()
 	g := &GlueCodec{
 		registryName: "iam-tenant-events",
-		versionCache: map[string]string{"TrialTenantProvisioned": versionID},
+		versionCache: map[string]string{"TenantIdentityProvisioned": versionID},
 	}
 
 	payload := []byte(`{"tenant_id":"x"}`)
-	encoded, gotVersion, err := g.Encode(context.Background(), "TrialTenantProvisioned", payload)
+	encoded, gotVersion, err := g.Encode(context.Background(), "TenantIdentityProvisioned", payload)
 	require.NoError(t, err)
 	assert.Equal(t, versionID, gotVersion)
 	assert.Equal(t, byte(0x03), encoded[0])
 
-	decoded, err := g.Decode(context.Background(), "TrialTenantProvisioned", encoded)
+	decoded, err := g.Decode(context.Background(), "TenantIdentityProvisioned", encoded)
 	require.NoError(t, err)
 	assert.JSONEq(t, string(payload), string(decoded))
 }
@@ -162,11 +162,11 @@ func newTestGlueClient(t *testing.T, url string) *glue.Client {
 
 func TestGlueCodec_fetchVersionID_Success(t *testing.T) {
 	versionID := uuid.New().String()
-	srv := newFakeGlueServer(t, map[string]string{"TrialTenantProvisioned": versionID}, nil)
+	srv := newFakeGlueServer(t, map[string]string{"TenantIdentityProvisioned": versionID}, nil)
 	defer srv.Close()
 
 	g := &GlueCodec{client: newTestGlueClient(t, srv.URL), registryName: "iam-tenant-events", definitions: eventschema.ByEventType}
-	got, err := g.fetchVersionID(context.Background(), "TrialTenantProvisioned")
+	got, err := g.fetchVersionID(context.Background(), "TenantIdentityProvisioned")
 	require.NoError(t, err)
 	assert.Equal(t, versionID, got)
 }
@@ -189,7 +189,7 @@ func TestGlueCodec_fetchVersionID_NilSchemaVersionIDErrors(t *testing.T) {
 	defer srv.Close()
 
 	g := &GlueCodec{client: newTestGlueClient(t, srv.URL), registryName: "iam-tenant-events", definitions: eventschema.ByEventType}
-	_, err := g.fetchVersionID(context.Background(), "TrialTenantProvisioned")
+	_, err := g.fetchVersionID(context.Background(), "TenantIdentityProvisioned")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "nil SchemaVersionId")
 }

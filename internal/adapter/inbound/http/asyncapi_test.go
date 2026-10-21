@@ -35,7 +35,7 @@ func TestAsyncAPIHandler_RendersEmbeddedSpec(t *testing.T) {
 	assert.Contains(t, body, "<!DOCTYPE html>")
 	assert.Contains(t, body, "AsyncAPI",
 		"rendered doc must reference AsyncAPI in the title/body")
-	assert.Contains(t, body, "TrialTenantProvisioned",
+	assert.Contains(t, body, "TenantIdentityProvisioned",
 		"rendered doc must list this service's own produced events")
 	assert.Contains(t, body, "TrialStarted",
 		"rendered doc must list consumed events owned by iam-org-membership")
@@ -120,7 +120,7 @@ func TestWalkYAML(t *testing.T) {
 sns:
   messageAttributes:
     EventType:
-      value: TrialTenantProvisioned
+      value: TenantIdentityProvisioned
     other:
       value: ignored
 `)
@@ -132,7 +132,7 @@ sns:
 		assert.Equal(t, "", walkYAML(node))
 	})
 	t.Run("document node unwrapped and found", func(t *testing.T) {
-		assert.Equal(t, "TrialTenantProvisioned", walkYAML(node, "sns", "messageAttributes", "EventType", "value"))
+		assert.Equal(t, "TenantIdentityProvisioned", walkYAML(node, "sns", "messageAttributes", "EventType", "value"))
 	})
 	t.Run("key not found", func(t *testing.T) {
 		assert.Equal(t, "", walkYAML(node, "sns", "messageAttributes", "Missing", "value"))

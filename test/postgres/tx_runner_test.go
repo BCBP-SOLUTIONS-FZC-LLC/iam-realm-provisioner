@@ -51,7 +51,7 @@ func TestTxRunner(t *testing.T) {
 
 			ctxPub, ok := port.EventPublisherFromContext(txCtx)
 			require.True(t, ok, "RunInTx must inject an EventPublisher when TxRunner was constructed with one")
-			return ctxPub.Enqueue(txCtx, &domain.Event{Type: domain.EventTrialTenantProvisioned, TenantID: tenantID})
+			return ctxPub.Enqueue(txCtx, &domain.Event{Type: domain.EventTenantIdentityProvisioned, TenantID: tenantID})
 		})
 		require.NoError(t, err)
 

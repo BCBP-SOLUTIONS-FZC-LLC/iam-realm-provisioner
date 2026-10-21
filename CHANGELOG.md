@@ -8,7 +8,11 @@ This service has never been deployed to any environment — there is no released
 
 ### Added
 
-- **New produced event `TenantIdentityProvisioned`** on `iam-tenant-events` (LLD v1.32, RP-D16) — the server-side signup backstop for Signup BFF open question BFF-2, requested by Org & Membership. RP-1 and RP-2 enqueue it **first** in their commit transaction with `tenant_id`, `owner_user_id` (the admin's Keycloak `sub`), `slug`, `name`, `plan` (request values verbatim), `signup_type` (`trial`|`direct_paid`), `realm`, `realm_type` (`shared`|`dedicated`). O&M consumes it and runs its idempotent I-1 when the BFF's own call never landed. No admin email/name on the bus. Open schema, Glue version 1. This service now produces **10** events (was 9); `TrialTenantProvisioned` is still emitted.
+- **New produced event `TenantIdentityProvisioned`** on `iam-tenant-events` (LLD v1.32–v1.33, RP-D16) — the server-side signup backstop for Signup BFF open question BFF-2, requested by Org & Membership. It is RP-1's only event and RP-2's first (ahead of `TenantRealmReady`/`DirectPaidSignup`/`TenantConverted`) in the commit transaction, with `tenant_id`, `owner_user_id` (the admin's Keycloak `sub`), `slug`, `name`, `plan` (request values verbatim), `signup_type` (`trial`|`direct_paid`), `realm`, `realm_type` (`shared`|`dedicated`). O&M consumes it and runs its idempotent I-1 when the BFF's own call never landed. No admin email/name on the bus. Open schema, Glue version 1.
+
+### Removed
+
+- **`TrialTenantProvisioned`** (LLD v1.33): `TenantIdentityProvisioned` replaces it — its payload is a strict superset (`keycloak_user_id` == `owner_user_id`). Removed in the same change set from O&M (consumer, schema extract, `tenant-orgm-q` filter) and Audit Log (`tenant.trial_provisioned` replaced by `tenant.identity_provisioned`, iam-audit-log PR #5); HLD v1.56 records the replacement. Nothing was deployed, so there is no migration. The service still produces **9** events. Any `TrialTenantProvisioned` schema already registered in a non-production Glue registry is now an orphan for `schema-prune`.
 
 ### Changed
 
@@ -17,7 +21,7 @@ This service has never been deployed to any environment — there is no released
 
 ### Deploy note
 
-- Register the new schema before rolling out (`make schema-register` / `schema-registry.yml`, then `make schema-verify`): `GlueCodec` resolves every produced schema at startup and the pod will not become ready without it. `scripts/pre-deploy-check.sh` now expects 10 schemas.
+- Register the new schema before rolling out (`make schema-register` / `schema-registry.yml`, then `make schema-verify`): `GlueCodec` resolves every produced schema at startup and the pod will not become ready without it. `scripts/pre-deploy-check.sh` still expects 9 schemas.
 
 ---
 
@@ -150,7 +154,7 @@ Initial build of the Realm Provisioner Service — the single writer to the Keyc
 - **Keycloak admin adapter** (`internal/adapter/outbound/keycloak/`) — the sole implementation of the `KeycloakAdmin` port (RP-INV-1 single-writer invariant, enforced in CI). Realm creation from template, OIDC client registration, user creation/migration/deletion, session revocation, MFA realm-role sync, IdP create/update/delete, realm enable/disable/export.
 - **OpenBao adapter** (`internal/adapter/outbound/openbao/`) — Kubernetes-auth-backed KV v2 client for SAML/OIDC IdP secrets at the frozen path `secret/data/iam/realm-provisioner/idp/<tenant_id>/<idp_alias>`. No IdP secret material is ever persisted to Postgres.
 - **Postgres schema** (`internal/adapter/outbound/postgres/migrations/`) — `tenant_realms`, `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`, `pending_audit_entries` (6 tenant-scoped tables, `FORCE ROW LEVEL SECURITY`); `outbox_events` (via `platform-events`' `outbox.ApplySchema`) and `processed_events` (RLS-exempt).
-- **Transactional outbox + 9 produced events** on `iam-tenant-events`: `TrialTenantProvisioned`, `TenantRealmReady`, `TenantConverted`, `DirectPaidSignup`, `TrialExpired`, `TrialReactivated`, `TenantSuspended`, `TenantOffboarded`, `TenantReactivated`.
+- **Transactional outbox + 9 produced events** on `iam-tenant-events`: `TenantIdentityProvisioned`, `TenantRealmReady`, `TenantConverted`, `DirectPaidSignup`, `TrialExpired`, `TrialReactivated`, `TenantSuspended`, `TenantOffboarded`, `TenantReactivated`.
 - **3 SQS consumers**: `membership-realm-q` (`DepartmentMembershipGranted`, `DepartmentMembershipLevelChanged`, `TenantRoleGranted`, `TenantRoleRevoked` → MFA realm-role sync), `tenant-realm-q` (`TrialStarted` → trial timer record), `billing-realm-q` (`TenantReactivated` → billing-driven reactivation). Wired through `platform-events` (`NewSQSConsumerWithClient`, Glue-decode codec, per-queue `WithConcurrency`). Deduped via the local `processed_events` ledger (`Envelope.ID` + `INSERT ON CONFLICT DO NOTHING` in the same `RunInTx` as the projection write — `platform-events` has no processed-events API; this matches `iam-org-membership`). Unknown event types are silently ack'd, counted, and marked processed so a producer adding a type cannot storm the queue.
 - **6 reconciler jobs** (`cmd/reconciler`, dispatched via `--job=<name>`): `trial-expiry` and `trial-hard-delete` (RP-C1/RP-C2), `subscription-lapse` (RP-C3, two-phase suspend→offboard against O&M's I-16 `GET /api/v1/internal/subscription-lapses`), `realm-config-reconcile` (RP-C4), plus `outbox-prune` and `processed-events-prune` retention hygiene jobs.
 - **`tenant_realms.suspension_source`** (`billing_lapse`|`operator`) — durable record of why a realm was suspended, backing RP-C3's offboard-phase retention query; set by RP-14 (`operator`) and RP-C3's suspend phase (`billing_lapse`), cleared by RP-10's reactivate.
