@@ -19,6 +19,10 @@ This service has never been deployed to any environment — there is no released
 - **RP-1 validates `plan`** ∈ `starter`|`pro`|`enterprise` (`400 INVALID_REQUEST`), matching RP-2 — the new event's schema enums `plan`, so an unchecked value would pass Keycloak and then fail enqueue-time validation.
 - **RP-2 keeps the created admin user's `sub`** (previously discarded from `CreateInvitedUser` and the same-tenant email-conflict resolve) to populate `owner_user_id`.
 
+### Fixed
+
+- **Token Service 409s are classified again** (LLD v1.34). Token Service now sends RFC 9457 problems (`application/problem+json`, UPPER_SNAKE `errorCode`), but `tokenservice.Client` still decoded the legacy `{"error":"…"}` field and compared it with lowercase codes. The field was always empty, so every TS-1 409 became the retryable `service_account_rotation_in_flight`, and an optimistic-lock conflict or a revoked/expired `rotation_id` replay was retried as if transient. The client now decodes with `platform-gincommon`'s `problem.FromResponse` and maps `ROTATION_IN_FLIGHT` / `OPTIMISTIC_LOCK_CONFLICT` / `CREDENTIAL_REPLAY_REVOKED` / `CREDENTIAL_REPLAY_EXPIRED`. A non-problem body or unknown code still falls back to rotation-in-flight. TS 400/422 error text now carries the problem's `errorCode`. The O&M and Audit Log clients read no error bodies, so they are unchanged.
+
 ### Deploy note
 
 - Register the new schema before rolling out (`make schema-register` / `schema-registry.yml`, then `make schema-verify`): `GlueCodec` resolves every produced schema at startup and the pod will not become ready without it. `scripts/pre-deploy-check.sh` still expects 9 schemas.
