@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -594,4 +595,48 @@ func TestReplayOrConflict_CorruptedStoredResult_DecodeError(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decode stored result")
+}
+
+// A tenant_id whose row trial-hard-delete or orphaned-signup-reap tombstoned
+// is hidden from FindByTenantID, and its idempotency ledger was scrubbed, so
+// only the tombstone check stops RP-1 from re-creating the Keycloak user
+// (§8.1, LLD v1.38).
+func TestProvisionTrial_TombstonedTenant_Returns409(t *testing.T) {
+	svc, kc, realms, idem, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	deletedAt := time.Now().UTC()
+	realms.rows[tenantID] = &domain.TenantRealm{
+		TenantID: tenantID, RealmName: "trial", Strategy: domain.RealmStrategyShared,
+		Status: domain.RealmStatusDeleted, DeletedAt: &deletedAt,
+	}
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) {
+		t.Fatal("must not call Keycloak for a removed tenant")
+		return uuid.Nil, nil
+	}
+
+	_, err := svc.ProvisionTrial(context.Background(), "key-tombstoned", service.ProvisionTrialRequest{
+		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X", Plan: "starter",
+	})
+	var de *domain.Error
+	require.ErrorAs(t, err, &de)
+	assert.Equal(t, domain.ErrTenantOffboarded, de.Code)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["key-tombstoned"].Status)
+	assert.NotNil(t, realms.rows[tenantID].DeletedAt, "the tombstone stays")
+}
+
+// The guard fails closed: if the tombstone lookup itself fails, RP-1 does
+// not proceed to Keycloak on the assumption that the tenant is new.
+func TestProvisionTrial_TombstoneLookupFails_NoKeycloakCall(t *testing.T) {
+	svc, kc, realms, idem, _ := newProvisioningTestService(t)
+	realms.IsTombstonedErr = errors.New("db down")
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) {
+		t.Fatal("must not call Keycloak when the tombstone check failed")
+		return uuid.Nil, nil
+	}
+
+	_, err := svc.ProvisionTrial(context.Background(), "key-tombstone-err", service.ProvisionTrialRequest{
+		TenantID: uuid.New(), AdminEmail: "x@example.com", AdminName: "X", Plan: "starter",
+	})
+	require.Error(t, err)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["key-tombstone-err"].Status)
 }

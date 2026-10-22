@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -216,4 +217,32 @@ func TestKeycloakAdmin_ServiceAccountClient_ClientJWTOverlap(t *testing.T) {
 	require.False(t, ok, "the removed key must stop authenticating once the keys cache is cleared")
 	ok, _ = clientCredentialsTokenViaJWT(t, baseURL, realmName, clientID, key2)
 	require.True(t, ok, "the surviving key must be unaffected by revoking the other")
+}
+
+// DeleteServiceAccountClientIfExists is the trial-teardown step that
+// trial-hard-delete and orphaned-signup-reap share (§8.7, LLD v1.38). Their
+// retry model depends on it treating an absent client as success, both
+// after a first delete and for a client that was never minted.
+func TestKeycloakAdmin_DeleteServiceAccountClientIfExists_Idempotent(t *testing.T) {
+	t.Parallel()
+	admin := setupKeycloak(t)
+	ctx := context.Background()
+	realmName := "tenant-" + uuid.NewString()[:8]
+	require.NoError(t, admin.CreateRealmFromTemplate(ctx, realmName, "v1"))
+	t.Cleanup(func() { _ = admin.DeleteRealmIfExists(ctx, realmName) })
+
+	clientID := fmt.Sprintf("platform-automation-%s", uuid.NewString())
+	jwks := startJWKSTestServer(t, mustGenerateTestJWKSKey(t, "key1"))
+	_, created, err := admin.CreateServiceAccountClient(ctx, realmName, clientID, jwks.url)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	require.NoError(t, admin.DeleteServiceAccountClientIfExists(ctx, realmName, clientID))
+	require.NoError(t, admin.DeleteServiceAccountClientIfExists(ctx, realmName, clientID), "a repeat delete is a no-op")
+	require.NoError(t, admin.DeleteServiceAccountClientIfExists(ctx, realmName, "platform-automation-never-minted"))
+
+	// Gone for real: minting the same name again creates a fresh client.
+	_, created, err = admin.CreateServiceAccountClient(ctx, realmName, clientID, jwks.url)
+	require.NoError(t, err)
+	assert.True(t, created, "the deleted client must not still exist")
 }

@@ -169,6 +169,10 @@ func (fakeTokenService) RevokeCredential(context.Context, uuid.UUID, uuid.UUID) 
 	return nil
 }
 
+func (fakeTokenService) RevokeAllCredentials(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
 func (fakeTokenService) JWKSURLFor(tenantID uuid.UUID) string {
 	return "http://token-service.e2e-test/api/v1/internal/tenants/" + tenantID.String() + "/service-accounts/platform-automation/jwks.json"
 }

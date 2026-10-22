@@ -43,6 +43,11 @@ func (noopEventPublisher) PublishBatch(context.Context, []events.Envelope[json.R
 
 type fakeJobsKeycloakAdmin struct {
 	HardDeleteUsersInRealmFn func(ctx context.Context, realmName string, tenantID uuid.UUID) error
+	// DeleteServiceAccountClientIfExistsFn backs the trial-teardown client
+	// delete; nil records the call and succeeds (the absent-client case is
+	// success in the real adapter too).
+	DeleteServiceAccountClientIfExistsFn func(ctx context.Context, realmName, clientID string) error
+	deletedClients                       []string
 }
 
 var _ port.KeycloakAdmin = (*fakeJobsKeycloakAdmin)(nil)
@@ -130,7 +135,11 @@ func (f *fakeJobsKeycloakAdmin) ClearServiceAccountKeysCache(ctx context.Context
 	panic("not implemented")
 }
 func (f *fakeJobsKeycloakAdmin) DeleteServiceAccountClientIfExists(ctx context.Context, realmName, clientID string) error {
-	panic("not implemented")
+	f.deletedClients = append(f.deletedClients, realmName+"/"+clientID)
+	if f.DeleteServiceAccountClientIfExistsFn != nil {
+		return f.DeleteServiceAccountClientIfExistsFn(ctx, realmName, clientID)
+	}
+	return nil
 }
 
 // noopLogger discards everything — these tests assert on DB state and

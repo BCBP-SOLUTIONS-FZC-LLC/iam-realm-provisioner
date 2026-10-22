@@ -66,6 +66,14 @@ type TokenServiceClient interface {
 	// credential so it can no longer authenticate. Must run after TS-1 and
 	// before the old shared-realm Keycloak client is deleted.
 	RevokeCredential(ctx context.Context, tenantID, principalID uuid.UUID) error
+	// RevokeAllCredentials calls TS-2 for every not-yet-revoked credential
+	// version (active and rotating) of principalID, so Token Service deletes
+	// all of its OpenBao material and stops scheduling rotations for it.
+	// Used by orphaned-signup-reap, whose tenant never reaches O&M and so
+	// never gets the TenantMembershipsPurged that otherwise drives Token
+	// Service's own cleanup (§8.7). Idempotent: an unknown principal (404)
+	// or an already-revoked version is success.
+	RevokeAllCredentials(ctx context.Context, tenantID, principalID uuid.UUID) error
 	// ReadPrincipal calls TS-3 to read principal + credential-version
 	// metadata (RP-18) — never a secret.
 	ReadPrincipal(ctx context.Context, tenantID, principalID uuid.UUID) (*ReadPrincipalResult, error)

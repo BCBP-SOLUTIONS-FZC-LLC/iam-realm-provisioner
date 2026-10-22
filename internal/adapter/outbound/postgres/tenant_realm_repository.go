@@ -75,9 +75,13 @@ func (r *TenantRealmRepository) IsTombstoned(ctx context.Context, tenantID uuid.
 
 // Upsert inserts a new tenant_realms row, or updates the mutable columns of
 // an existing one keyed by tenant_id (RP-1/RP-2 first-touch semantics, §4.2).
+// It never resurrects a tombstone. The DO UPDATE only applies while
+// deleted_at IS NULL, and a conflict with a soft-deleted row (no row
+// written) is ErrTenantOffboarded. This backs up the service-level guard
+// (rejectRemovedTenant), which a concurrent reap could race.
 func (r *TenantRealmRepository) Upsert(ctx context.Context, t *domain.TenantRealm) error {
 	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
-		_, err := tx.Exec(ctx, `
+		tag, err := tx.Exec(ctx, `
 			INSERT INTO tenant_realms (tenant_id, realm_name, strategy, keycloak_shard, status,
 				realm_template_version, trial_ends_at, converted_at, disabled_at, suspension_source, exported_at, export_s3_key,
 				service_account_principal_id, service_account_keycloak_client_id)
@@ -97,17 +101,25 @@ func (r *TenantRealmRepository) Upsert(ctx context.Context, t *domain.TenantReal
 				service_account_principal_id = EXCLUDED.service_account_principal_id,
 				service_account_keycloak_client_id = EXCLUDED.service_account_keycloak_client_id,
 				record_version = tenant_realms.record_version + 1,
-				updated_at = now()`,
+				updated_at = now()
+			WHERE tenant_realms.deleted_at IS NULL`,
 			t.TenantID, t.RealmName, t.Strategy, t.KeycloakShard, t.Status,
 			t.RealmTemplateVersion, t.TrialEndsAt, t.ConvertedAt, t.DisabledAt, t.SuspensionSource, t.ExportedAt, t.ExportS3Key,
 			t.ServiceAccountPrincipalID, t.ServiceAccountKeycloakClientID)
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return domain.NewError(domain.ErrTenantOffboarded, "tenant has been removed and cannot be re-provisioned")
+		}
+		return nil
 	})
 }
 
 // Update performs an optimistic-locked UPDATE keyed on tenant_id +
 // record_version (§9.6) — 0 rows affected means a concurrent writer won,
-// surfaced as ErrOptimisticLockConflict.
+// surfaced as ErrOptimisticLockConflict. A tombstoned row (deleted_at set)
+// is never updated, so a stale copy cannot revive it.
 func (r *TenantRealmRepository) Update(ctx context.Context, t *domain.TenantRealm) error {
 	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
 		tag, err := tx.Exec(ctx, `
@@ -117,7 +129,7 @@ func (r *TenantRealmRepository) Update(ctx context.Context, t *domain.TenantReal
 				disabled_at = $9, suspension_source = $10, exported_at = $11, export_s3_key = $12,
 				service_account_principal_id = $13, service_account_keycloak_client_id = $14,
 				record_version = record_version + 1, updated_at = now()
-			WHERE tenant_id = $1 AND record_version = $15`,
+			WHERE tenant_id = $1 AND record_version = $15 AND deleted_at IS NULL`,
 			t.TenantID, t.RealmName, t.Strategy, t.KeycloakShard, t.Status,
 			t.RealmTemplateVersion, t.TrialEndsAt, t.ConvertedAt, t.DisabledAt, t.SuspensionSource, t.ExportedAt,
 			t.ExportS3Key, t.ServiceAccountPrincipalID, t.ServiceAccountKeycloakClientID, t.RecordVersion)

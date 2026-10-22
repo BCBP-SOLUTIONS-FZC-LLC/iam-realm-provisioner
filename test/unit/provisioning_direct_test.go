@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -683,4 +684,26 @@ func TestCreateInvitedUser_IdempotencyCompleteFailure_LoggedNotPropagated(t *tes
 	require.NoError(t, err)
 	assert.NotNil(t, result)
 	assert.GreaterOrEqual(t, logger.warnCalls, 1)
+}
+
+func TestProvisionDirect_TombstonedTenant_Returns409(t *testing.T) {
+	svc, kc, realms, idem, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	deletedAt := time.Now().UTC()
+	realms.rows[tenantID] = &domain.TenantRealm{
+		TenantID: tenantID, RealmName: "trial", Strategy: domain.RealmStrategyShared,
+		Status: domain.RealmStatusDeleted, DeletedAt: &deletedAt,
+	}
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error {
+		t.Fatal("must not call Keycloak for a removed tenant")
+		return nil
+	}
+
+	_, err := svc.ProvisionDirect(context.Background(), "pd-tombstoned", service.ProvisionDirectRequest{
+		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A", Plan: "pro",
+	})
+	var de *domain.Error
+	require.ErrorAs(t, err, &de)
+	assert.Equal(t, domain.ErrTenantOffboarded, de.Code)
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["pd-tombstoned"].Status)
 }

@@ -57,8 +57,10 @@ const orphanedSignupPredicate = `
 // fails RP-1 with 409 USER_EMAIL_CONFLICT.
 //
 // A row matching orphanedSignupPredicate and older than ORPHAN_SIGNUP_AFTER
-// (default 48h) is reaped exactly like RP-C2 hard-deletes an expired trial:
-// the tenant's users are hard-deleted from the shared realm, then its PII is
+// (default 48h) is reaped the way RP-C2 hard-deletes an expired trial. Its
+// users and its platform-automation client are deleted from the shared realm,
+// and its Token Service credentials are revoked, which RP-C2 leaves to O&M's
+// TenantMembershipsPurged; an orphan never gets that event. Then its PII is
 // scrubbed and the row soft-deleted (scrubAndTombstoneTenantRealm, §15.2).
 // No event is emitted — trial-hard-delete emits none either, and O&M has no
 // tenant to apply one to (its EVT-17 rule would retry it into the DLQ). Each
@@ -132,20 +134,27 @@ func listOrphanedSignupCandidates(ctx context.Context, jctx *Context) ([]uuid.UU
 	return out, err
 }
 
-// reapOrphanedSignup re-checks and locks the row, hard-deletes its users,
-// then scrubs and tombstones it — all in one sysPool transaction. It
-// returns reaped=false (and touches nothing) when the row no longer matches
-// orphanedSignupPredicate. A Keycloak failure rolls the transaction back,
-// leaving the row for the next run; HardDeleteUsersInRealm is idempotent, so
-// a retried transaction is safe.
+// reapOrphanedSignup runs in one sysPool transaction. It re-checks and locks
+// the row, then:
+//  1. hard-deletes the tenant's users,
+//  2. deletes its shared-realm platform-automation client,
+//  3. revokes its Token Service credentials,
+//  4. scrubs and tombstones the row.
+//
+// It returns reaped=false, and touches nothing, when the row no longer matches
+// orphanedSignupPredicate. Any failed step rolls the transaction back and
+// leaves the whole tenant for the next run. Every step treats "already gone"
+// as success, so a retry converges.
 func reapOrphanedSignup(ctx context.Context, jctx *Context, tenantID uuid.UUID) (reaped bool, err error) {
 	err = runInTxWithSysPool(ctx, jctx.SysPool, func(ctx context.Context, tx pgcommon.Tx) error {
 		reaped = false
 		var realmName string
+		var clientID *string
+		var principalID *uuid.UUID
 		scanErr := tx.QueryRow(ctx, `
-			SELECT realm_name FROM tenant_realms
+			SELECT realm_name, service_account_keycloak_client_id, service_account_principal_id FROM tenant_realms
 			WHERE tenant_id = $1 AND `+orphanedSignupPredicate+`
-			FOR UPDATE`, tenantID, jctx.OrphanSignupAfter.Seconds()).Scan(&realmName)
+			FOR UPDATE`, tenantID, jctx.OrphanSignupAfter.Seconds()).Scan(&realmName, &clientID, &principalID)
 		if errors.Is(scanErr, pgcommon.ErrNoRows) {
 			return nil
 		}
@@ -153,6 +162,12 @@ func reapOrphanedSignup(ctx context.Context, jctx *Context, tenantID uuid.UUID) 
 			return scanErr
 		}
 		if err := jctx.Keycloak.HardDeleteUsersInRealm(ctx, realmName, tenantID); err != nil {
+			return err
+		}
+		if err := deleteSharedAutomationClient(ctx, jctx, realmName, tenantID, clientID); err != nil {
+			return err
+		}
+		if err := revokeAutomationCredentials(ctx, jctx, tenantID, principalID); err != nil {
 			return err
 		}
 		if err := scrubAndTombstoneTenantRealm(ctx, tx, tenantID); err != nil {

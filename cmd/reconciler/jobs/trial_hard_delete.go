@@ -39,7 +39,7 @@ func listHardDeleteCandidates(ctx context.Context, jctx *Context) ([]tenantRealm
 	var out []tenantRealmRow
 	err := runInTxWithSysPool(ctx, jctx.SysPool, func(ctx context.Context, tx pgcommon.Tx) error {
 		rows, err := tx.Query(ctx, `
-			SELECT tenant_id, realm_name FROM tenant_realms
+			SELECT tenant_id, realm_name, service_account_keycloak_client_id FROM tenant_realms
 			WHERE strategy = 'shared' AND status = 'disabled' AND deleted_at IS NULL
 			  AND disabled_at < now() - ($1::int * interval '1 day')
 			ORDER BY disabled_at ASC
@@ -50,7 +50,7 @@ func listHardDeleteCandidates(ctx context.Context, jctx *Context) ([]tenantRealm
 		defer rows.Close()
 		for rows.Next() {
 			var r tenantRealmRow
-			if err := rows.Scan(&r.TenantID, &r.RealmName); err != nil {
+			if err := rows.Scan(&r.TenantID, &r.RealmName, &r.ClientID); err != nil {
 				return err
 			}
 			out = append(out, r)
@@ -62,6 +62,14 @@ func listHardDeleteCandidates(ctx context.Context, jctx *Context) ([]tenantRealm
 
 func hardDeleteTrialTenant(ctx context.Context, jctx *Context, row tenantRealmRow) error {
 	if err := jctx.Keycloak.HardDeleteUsersInRealm(ctx, row.RealmName, row.TenantID); err != nil {
+		return err
+	}
+	// The shared realm outlives the trial, so its per-tenant automation
+	// client must go too. Token Service drops the principal on O&M's
+	// TenantMembershipsPurged (trial-cleanup), so it is not called here. A
+	// failure leaves the row 'disabled' for the next run; both Keycloak
+	// steps are idempotent.
+	if err := deleteSharedAutomationClient(ctx, jctx, row.RealmName, row.TenantID, row.ClientID); err != nil {
 		return err
 	}
 	if jctx.SysPool == nil {
@@ -98,4 +106,5 @@ func scrubAndTombstoneTenantRealm(ctx context.Context, tx pgcommon.Tx, tenantID 
 type tenantRealmRow struct {
 	TenantID  uuid.UUID
 	RealmName string
+	ClientID  *string // service_account_keycloak_client_id
 }
