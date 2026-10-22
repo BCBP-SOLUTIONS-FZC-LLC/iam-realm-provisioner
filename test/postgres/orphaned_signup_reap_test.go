@@ -78,8 +78,12 @@ func reapJobContext(sysPool *pgcommon.Pool, kc port.KeycloakAdmin) *jobs.Context
 	}
 }
 
+// Not t.Parallel: the subtests assert exact deltas of the process-wide
+// iam_realm_provisioner_orphaned_signup_reap_total counter, which
+// TestOrphanedSignupReap_AutomationTeardown (parallel, same package) also
+// increments. Go runs every non-parallel top-level test before resuming the
+// parallel ones, so no other reap can move the counter while this runs.
 func TestOrphanedSignupReap(t *testing.T) {
-	t.Parallel()
 	registerReapMetrics()
 	_, rawPool := setupTestDB(t)
 	sysPool := setupSysPool(t, rawPool)
