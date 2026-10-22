@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -261,6 +262,37 @@ func (c *Client) RevokeCredential(ctx context.Context, tenantID, principalID uui
 		}
 	}
 	return nil
+}
+
+// RevokeAllCredentials revokes every not-yet-revoked credential version of
+// principalID (TS-3 lookup, then TS-2 per version) — the teardown
+// counterpart of RevokeCredential, which retires only the rotating version
+// at conversion. A principal Token Service does not know (TS-3 404, e.g.
+// already purged) or a version that vanished between the read and the
+// revoke (TS-2 404) counts as done, so a retried teardown converges.
+func (c *Client) RevokeAllCredentials(ctx context.Context, tenantID, principalID uuid.UUID) error {
+	principal, err := c.ReadPrincipal(ctx, tenantID, principalID)
+	if isPrincipalNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("tokenservice: RevokeAllCredentials TS-3 lookup: %w", err)
+	}
+	for _, cred := range principal.Credentials {
+		if cred.Status == "revoked" {
+			continue
+		}
+		if err := c.revokeVersion(ctx, tenantID, principalID, cred.Version); err != nil && !isPrincipalNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// isPrincipalNotFound reports classifyStatus's 404 mapping.
+func isPrincipalNotFound(err error) bool {
+	var de *domain.Error
+	return errors.As(err, &de) && de.Code == domain.ErrServiceAccountNotProvisioned
 }
 
 // revokeVersion calls TS-2 POST .../credentials/:version/revoke for a single

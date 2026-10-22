@@ -161,17 +161,13 @@ func mintRotationID(idempotencyKey string) uuid.UUID {
 	return uuid.NewSHA1(platformAutomationRotationNamespace, []byte(idempotencyKey))
 }
 
-// dedicatedPlatformAutomationClientID is the literal Keycloak client name
-// used once a tenant has its own dedicated realm (§2.5) — frozen on the
-// Token Service side (domain.KeycloakClientPlatformAutomation there).
-const dedicatedPlatformAutomationClientID = "platform-automation"
+// dedicatedPlatformAutomationClientID / sharedPlatformAutomationClientID
+// name the platform-automation Keycloak client (§2.5). They live in domain
+// so the reconciler's trial teardown derives the same names.
+const dedicatedPlatformAutomationClientID = domain.DedicatedPlatformAutomationClientID
 
-// sharedPlatformAutomationClientID returns the tenant-scoped Keycloak
-// client name used in the shared trial realm (RP-1) — a shared realm
-// cannot hold two clients named identically, so each trial tenant's
-// automation client is suffixed with its own tenant id (§2.5).
 func sharedPlatformAutomationClientID(tenantID uuid.UUID) string {
-	return dedicatedPlatformAutomationClientID + "-" + tenantID.String()
+	return domain.SharedPlatformAutomationClientID(tenantID)
 }
 
 // bestEffortDeleteServiceAccountClient deletes clientID in realmName as
@@ -313,6 +309,36 @@ func marshalIdempotencyResult(ctx context.Context, log port.SlogStyleLogger, op 
 	return body
 }
 
+// rejectRemovedTenant is RP-1/RP-2's guard against reusing a tenant_id whose
+// identity this service already removed. It covers two cases:
+//   - an offboarded row that is still visible (status exported/deleted,
+//     RP-INV-5);
+//   - a tombstoned row that FindByTenantID hides (deleted_at set by
+//     trial-hard-delete or orphaned-signup-reap, §8.7).
+//
+// Both are terminal. The tombstone case matters because the scrub also
+// deleted the tenant's provisioning_operations, so an RP-1 retry with the
+// original Idempotency-Key is not a replay. Without this guard it would
+// re-create the Keycloak user. Fails closed: a failed tombstone lookup is
+// returned rather than letting provisioning proceed.
+func (s *ProvisioningService) rejectRemovedTenant(ctx context.Context, tenantID uuid.UUID) error {
+	existing, err := s.realms.FindByTenantID(ctx, tenantID)
+	if err == nil {
+		if existing.IsOffboarded() {
+			return domain.NewError(domain.ErrTenantOffboarded, "tenant has been offboarded and cannot be re-provisioned")
+		}
+		return nil
+	}
+	tombstoned, terr := s.realms.IsTombstoned(ctx, tenantID)
+	if terr != nil {
+		return terr
+	}
+	if tombstoned {
+		return domain.NewError(domain.ErrTenantOffboarded, "tenant has been removed and cannot be re-provisioned")
+	}
+	return nil
+}
+
 // ProvisionTrialRequest is the RP-1 request body (§5.2).
 type ProvisionTrialRequest struct {
 	TenantID           uuid.UUID
@@ -349,11 +375,11 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 	// already-succeeded key does not inflate the attempt count.
 	defer func() { metrics.ProvisionTotal.WithLabelValues("trial", outcome(err)).Inc() }()
 
-	// Guard: reject re-provisioning an offboarded (exported/deleted) tenant
-	// before touching Keycloak (RP-1, §8.1, ErrTenantOffboarded).
-	if existing, ferr := s.realms.FindByTenantID(ctx, req.TenantID); ferr == nil && existing.IsOffboarded() {
+	// Guard: reject re-provisioning an offboarded or removed tenant before
+	// touching Keycloak (RP-1, §8.1, ErrTenantOffboarded).
+	if err := s.rejectRemovedTenant(ctx, req.TenantID); err != nil {
 		s.failIdempotency(ctx, idempotencyKey)
-		return nil, domain.NewError(domain.ErrTenantOffboarded, "tenant has been offboarded and cannot be re-provisioned")
+		return nil, err
 	}
 
 	kcUserID, err := s.keycloak.CreateTrialUser(ctx, port.CreateUserRequest{
@@ -486,11 +512,11 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 	}
 	defer func() { metrics.ProvisionTotal.WithLabelValues("direct", outcome(err)).Inc() }()
 
-	// Guard: reject re-provisioning an offboarded (exported/deleted) tenant
-	// before touching Keycloak (RP-2, §8.2, ErrTenantOffboarded).
-	if existing, ferr := s.realms.FindByTenantID(ctx, req.TenantID); ferr == nil && existing.IsOffboarded() {
+	// Guard: reject re-provisioning an offboarded or removed tenant before
+	// touching Keycloak (RP-2, §8.2, ErrTenantOffboarded).
+	if err := s.rejectRemovedTenant(ctx, req.TenantID); err != nil {
 		s.failIdempotency(ctx, idempotencyKey)
-		return nil, domain.NewError(domain.ErrTenantOffboarded, "tenant has been offboarded and cannot be re-provisioned")
+		return nil, err
 	}
 
 	realmName := dedicatedRealmName(req.TenantSlug)

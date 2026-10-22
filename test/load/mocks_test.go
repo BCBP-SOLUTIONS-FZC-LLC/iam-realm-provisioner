@@ -180,6 +180,9 @@ func (loadTokenServiceClient) IssueOrRotateCredential(context.Context, uuid.UUID
 func (loadTokenServiceClient) RevokeCredential(context.Context, uuid.UUID, uuid.UUID) error {
 	return nil
 }
+func (loadTokenServiceClient) RevokeAllCredentials(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
 func (loadTokenServiceClient) ReadPrincipal(context.Context, uuid.UUID, uuid.UUID) (*port.ReadPrincipalResult, error) {
 	return nil, nil
 }

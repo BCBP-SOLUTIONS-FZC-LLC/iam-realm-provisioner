@@ -659,3 +659,76 @@ func TestRevokeCredential_TS2ServerErrorPropagates(t *testing.T) {
 	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrTokenServiceUnavailable, derr.Code)
 }
+
+// RevokeAllCredentials retires every live version (active and rotating) and
+// skips an already-revoked one: the orphaned-signup-reap teardown (§8.7).
+func TestRevokeAllCredentials_RevokesEveryLiveVersion(t *testing.T) {
+	tenantID, principalID := uuid.New(), uuid.New()
+	var revoked []string
+	mux := http.NewServeMux()
+	base := fmt.Sprintf("/api/v1/internal/tenants/%s/service-accounts/%s", tenantID, principalID)
+	mux.HandleFunc(base, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, `{"principal_id":"%s","tenant_id":"%s","keycloak_client_id":"platform-automation-x",
+			"principal_type":"platform_automation","status":"active","record_version":3,
+			"credentials":[
+				{"version":1,"status":"revoked","openbao_path":"x/v1","issued_at":"2026-08-01T00:00:00Z"},
+				{"version":2,"status":"rotating","openbao_path":"x/v2","issued_at":"2026-09-01T00:00:00Z"},
+				{"version":3,"status":"active","openbao_path":"x/v3","issued_at":"2026-10-01T00:00:00Z"}
+			]}`, principalID, tenantID)
+	})
+	for _, v := range []string{"1", "2", "3"} {
+		mux.HandleFunc(base+"/credentials/"+v+"/revoke", func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, http.MethodPost, r.Method)
+			assert.Equal(t, tenantID.String(), r.Header.Get("x-tenant-id"))
+			revoked = append(revoked, v)
+			if v == "3" {
+				w.WriteHeader(http.StatusNotFound) // vanished meanwhile — counts as done
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprint(w, `{}`)
+		})
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	require.NoError(t, New(srv.URL, noopLogger{}).RevokeAllCredentials(context.Background(), tenantID, principalID))
+	assert.Equal(t, []string{"2", "3"}, revoked, "the already-revoked version is skipped")
+}
+
+// An unknown principal (TS-3 404, e.g. already purged) is success: a retried
+// teardown converges.
+func TestRevokeAllCredentials_UnknownPrincipal_IsSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	require.NoError(t, New(srv.URL, noopLogger{}).RevokeAllCredentials(context.Background(), uuid.New(), uuid.New()))
+}
+
+func TestRevokeAllCredentials_ServerErrors_Propagate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	err := New(srv.URL, noopLogger{}).RevokeAllCredentials(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TS-3 lookup")
+
+	tenantID, principalID := uuid.New(), uuid.New()
+	mux := http.NewServeMux()
+	base := fmt.Sprintf("/api/v1/internal/tenants/%s/service-accounts/%s", tenantID, principalID)
+	mux.HandleFunc(base, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintf(w, `{"principal_id":"%s","tenant_id":"%s","credentials":[{"version":1,"status":"active","openbao_path":"x","issued_at":"2026-10-01T00:00:00Z"}]}`, principalID, tenantID)
+	})
+	mux.HandleFunc(base+"/credentials/1/revoke", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	})
+	srv2 := httptest.NewServer(mux)
+	defer srv2.Close()
+	err = New(srv2.URL, noopLogger{}).RevokeAllCredentials(context.Background(), tenantID, principalID)
+	var de *domain.Error
+	require.ErrorAs(t, err, &de)
+	assert.Equal(t, domain.ErrTokenServiceUnavailable, de.Code)
+}

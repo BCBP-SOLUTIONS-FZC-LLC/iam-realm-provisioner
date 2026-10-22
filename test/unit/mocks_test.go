@@ -143,6 +143,7 @@ type mockTenantRealmRepository struct {
 	UpsertErr        error
 	UpdateErr        error
 	CountsByShardErr error
+	IsTombstonedErr  error
 }
 
 func newMockTenantRealmRepository() *mockTenantRealmRepository {
@@ -152,7 +153,8 @@ func newMockTenantRealmRepository() *mockTenantRealmRepository {
 var _ port.TenantRealmRepository = (*mockTenantRealmRepository)(nil)
 
 func (m *mockTenantRealmRepository) FindByTenantID(ctx context.Context, tenantID uuid.UUID) (*domain.TenantRealm, error) {
-	if r, ok := m.rows[tenantID]; ok {
+	// Mirrors the Postgres repository: a tombstone (DeletedAt set) is hidden.
+	if r, ok := m.rows[tenantID]; ok && r.DeletedAt == nil {
 		cp := *r
 		return &cp, nil
 	}
@@ -190,6 +192,9 @@ func (m *mockTenantRealmRepository) ListSuspendedPastRetention(ctx context.Conte
 	return out, nil
 }
 func (m *mockTenantRealmRepository) IsTombstoned(ctx context.Context, tenantID uuid.UUID) (bool, error) {
+	if m.IsTombstonedErr != nil {
+		return false, m.IsTombstonedErr
+	}
 	r, ok := m.rows[tenantID]
 	return ok && r.DeletedAt != nil, nil
 }
@@ -456,6 +461,7 @@ type mockTokenServiceClient struct {
 	RegisterPrincipalFn       func(ctx context.Context, tenantID uuid.UUID, req port.RegisterPrincipalRequest) (*port.RegisterPrincipalResult, error)
 	IssueOrRotateCredentialFn func(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error)
 	RevokeCredentialFn        func(ctx context.Context, tenantID, principalID uuid.UUID) error
+	RevokeAllCredentialsFn    func(ctx context.Context, tenantID, principalID uuid.UUID) error
 	ReadPrincipalFn           func(ctx context.Context, tenantID, principalID uuid.UUID) (*port.ReadPrincipalResult, error)
 	JWKSURLForFn              func(tenantID uuid.UUID) string
 }
@@ -470,6 +476,9 @@ func (m *mockTokenServiceClient) IssueOrRotateCredential(ctx context.Context, te
 }
 func (m *mockTokenServiceClient) RevokeCredential(ctx context.Context, tenantID, principalID uuid.UUID) error {
 	return m.RevokeCredentialFn(ctx, tenantID, principalID)
+}
+func (m *mockTokenServiceClient) RevokeAllCredentials(ctx context.Context, tenantID, principalID uuid.UUID) error {
+	return m.RevokeAllCredentialsFn(ctx, tenantID, principalID)
 }
 func (m *mockTokenServiceClient) ReadPrincipal(ctx context.Context, tenantID, principalID uuid.UUID) (*port.ReadPrincipalResult, error) {
 	return m.ReadPrincipalFn(ctx, tenantID, principalID)

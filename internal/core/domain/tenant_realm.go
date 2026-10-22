@@ -6,6 +6,20 @@ import (
 	"github.com/google/uuid"
 )
 
+// DedicatedPlatformAutomationClientID is the literal Keycloak client name of
+// a tenant's platform-automation principal once it has its own dedicated
+// realm (§2.5) — frozen on the Token Service side
+// (domain.KeycloakClientPlatformAutomation there).
+const DedicatedPlatformAutomationClientID = "platform-automation"
+
+// SharedPlatformAutomationClientID returns the tenant-scoped Keycloak client
+// name of the platform-automation principal in the shared trial realm
+// (RP-1): a shared realm cannot hold two clients named identically, so each
+// trial tenant's client is suffixed with its own tenant id (§2.5).
+func SharedPlatformAutomationClientID(tenantID uuid.UUID) string {
+	return DedicatedPlatformAutomationClientID + "-" + tenantID.String()
+}
+
 // TenantRealm mirrors the `tenant_realms` row (§4.2) — this service's
 // authoritative record of what it created in Keycloak for a tenant. It is
 // NOT a copy of Org & Membership's `tenants` row (RP-D6).

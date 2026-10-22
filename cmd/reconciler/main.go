@@ -26,6 +26,7 @@ import (
 	orgmembershipadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/orgmembership"
 	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
 	s3adapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/s3"
+	tokenserviceclient "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/tokenservice"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/events"
@@ -236,6 +237,16 @@ func run() int {
 		subscriptionLapses = orgmembershipadapter.New(omBaseURL, envDuration("ORG_MEMBERSHIP_TIMEOUT_MS", 5*time.Second), rawLog)
 	}
 
+	// TokenService is used only by orphaned-signup-reap, to revoke an
+	// orphan's automation credentials (§8.7). Like SubscriptionLapses it is
+	// optional at the process level, so an unset URL does not break the
+	// other jobs. The reaper itself requires it and defers a tenant with a
+	// registered principal when it is missing.
+	var tokenService port.TokenServiceClient
+	if tsBaseURL := envOr("TOKEN_SERVICE_BASE_URL", ""); tsBaseURL != "" {
+		tokenService = tokenserviceclient.New(tsBaseURL, rawLog)
+	}
+
 	var outboxRunner *outbox.Runner
 	if jobName == "outbox-prune" {
 		// The outbox-prune job reuses the same Runner shape as cmd/server,
@@ -262,6 +273,7 @@ func run() int {
 		Keycloak:           keycloakAdmin,
 		ObjectStore:        objectStore,
 		SubscriptionLapses: subscriptionLapses,
+		TokenService:       tokenService,
 		// GDPRScrubFn is the production §15.2 implementation: atomically
 		// deletes all tenant PII inside a BYPASSRLS sysPool transaction.
 		// See cmd/reconciler/jobs/gdpr.go for the authoritative table list.
