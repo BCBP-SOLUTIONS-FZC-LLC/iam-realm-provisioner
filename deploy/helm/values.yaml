@@ -393,8 +393,34 @@ commercialCallers:
     # lose access the moment the AuthorizationPolicy is rendered.
     # Typical values (set per environment):
     #   - iam               (Core / iam-org-membership, same-namespace rule)
-    #   - gateway           (Envoy Gateway proxy + Signup BFF, ingressControllerNamespaceSelector)
+    #   - gateway           (Envoy Gateway proxy, ingressControllerNamespaceSelector)
+    #   - observability     (Prometheus scrape on the metrics port)
+    # The Signup BFF is NOT listed here: it is admitted per pod by
+    # signupBffCaller below, never by namespace.
     existingCallerNamespaces: []
+
+# Signup BFF (Signup BFF decision BFF-1; BFF open gap A-1, option B) — calls
+# RP-1 (POST /api/v1/internal/tenants/provision-trial) and RP-2
+# (POST /api/v1/internal/tenants/provision-direct) and nothing else. It runs
+# in its own namespace (bff), never in iam or gateway. Admission is per pod,
+# not per namespace, so a future service placed in bff gets nothing without
+# its own explicit grant:
+#   - NetworkPolicy: admits only pods matching podSelector in the bff
+#     namespace to the API port. podSelector is required — an empty selector
+#     would admit the whole namespace, so the chart fails instead.
+#   - Istio AuthorizationPolicy (commercialCallers.istio.enabled): a rule for
+#     the bff-signup ServiceAccount's SPIFFE principal, limited to the exact
+#     RP-1 and RP-2 paths.
+# podSelector must match the labels on the bff-signup pods (the
+# BCBP-SOLUTIONS-FZC-LLC/bff-signup chart).
+signupBffCaller:
+  enabled: true
+  namespace: bff
+  serviceAccountName: bff-signup
+  namespaceSelector:
+    kubernetes.io/metadata.name: bff
+  podSelector:
+    app.kubernetes.io/name: bff-signup
 
 # NetworkPolicy — enabled by default (§13). Public API traffic (RP-1..RP-16)
 # reaches the "http" port via the gateway/mesh. :9090/metrics is restricted

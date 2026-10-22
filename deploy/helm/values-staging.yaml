@@ -22,9 +22,8 @@ commercialCallers:
     #
     #   iam           — Core / iam-org-membership (same-namespace rule)
     #   gateway       — Envoy Gateway proxy (ingressControllerNamespaceSelector,
-    #                   externally-routed traffic) and the Signup BFF's pod-to-pod
-    #                   mesh calls (see NetworkPolicy additionalIngressRules below)
-    #                   — one entry covers both
+    #                   externally-routed traffic). The Signup BFF runs in bff and
+    #                   is admitted per pod by signupBffCaller (values.yaml), not here
     #   observability — Prometheus scraping port 9090; Istio sidecar intercepts
     #                   all inbound ports so /metrics traffic would be denied
     #                   without this entry even though the NetworkPolicy admits
@@ -33,21 +32,3 @@ commercialCallers:
       - iam
       - gateway
       - observability
-
-# CD-19: admit the Signup BFF (gateway namespace) at L4 for direct pod-to-pod
-# Istio-mesh calls. The Envoy Gateway proxy (externally-routed traffic) also
-# runs in the platform "gateway" namespace and is admitted by the
-# ingressControllerNamespaceSelector rule; this explicit rule keeps the Signup
-# BFF's direct RP-2 / trial-signup calls admitted even if
-# ingressControllerPodSelector is later narrowed to the Envoy proxy pods.
-# observability is admitted on port 9090 via networkPolicy.metricsIngress — no
-# additional rule needed.
-networkPolicy:
-  additionalIngressRules:
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: gateway
-      ports:
-        - port: 8080
-          protocol: TCP
