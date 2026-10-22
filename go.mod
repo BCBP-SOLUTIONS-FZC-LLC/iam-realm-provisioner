@@ -3,7 +3,7 @@ module github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner
 go 1.26.10
 
 require (
-	github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2 v2.1.0
+	github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2 v2.2.1
 	github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2 v2.1.0
 	github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2 v2.0.2
 	github.com/Nerzal/gocloak/v13 v13.9.0

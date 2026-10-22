@@ -389,14 +389,14 @@ iam-realm-provisioner/
 ```
 require (
     github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2 v2.1.0
-    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2    v2.1.0
+    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2    v2.2.1
     github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2  v2.0.2
     github.com/Nerzal/gocloak/v13                           v13.9.0
     github.com/aws/aws-sdk-go-v2/service/glue               v1.171.0
 )
 ```
 
-All three platform libraries are on their **latest released** lines, incorporated the way `iam-org-membership` incorporates them. `platform-gincommon/v2` **v2.1.0** (v2.0.0 introduced the new major module path, replacing the `/` (v1) path, and added `pkg/problem` (RFC 9457 Problem Details: `problem.MustType`, `problem.Error`, `gincommon.AbortWithProblem`, `gincommon.ShouldBindJSON`) alongside all v1.6.0 features (Observability Standard identity, `InitTracingWithConfig`, `NewSpanTracer`, `MetricsHandler`, `Config.RequestTimeout`, `OTEL_EXPORTER_OTLP_ENDPOINT=none`); v2.1.0 is additive — RFC 9457 extension members (`Error.WithExtension`, `Builder.Extension`, `Problem.Extension`), not used here yet. `platform-pgcommon/v2` **v2.0.2** — pool-error-handling and RLS GUC-binding fixes over v2.0.1; all other capabilities unchanged (per-transaction `StatementTimeout`/`LockTimeout`, `MigrationDSNFromEnv`, the full SQLSTATE classifier set). `platform-events/v2` **v2.1.0** — `platform_*`-only metrics, `eventcfg` env contract, SQS DLQ publisher, `GlueDecodeCodec`, `pkg/inbox`; v2.1.0 adds `WithRetryBackoff`. The `/v2` module paths apply to every import. `aws-sdk-go-v2/service/glue` **v1.171.0** — Glue Schema Registry client (startup `GetSchemaByDefinition`); patch-level only.
+All three platform libraries are on their **latest released** lines, incorporated the way `iam-org-membership` incorporates them. `platform-gincommon/v2` **v2.1.0** (v2.0.0 introduced the new major module path, replacing the `/` (v1) path, and added `pkg/problem` (RFC 9457 Problem Details: `problem.MustType`, `problem.Error`, `gincommon.AbortWithProblem`, `gincommon.ShouldBindJSON`) alongside all v1.6.0 features (Observability Standard identity, `InitTracingWithConfig`, `NewSpanTracer`, `MetricsHandler`, `Config.RequestTimeout`, `OTEL_EXPORTER_OTLP_ENDPOINT=none`); v2.1.0 is additive — RFC 9457 extension members (`Error.WithExtension`, `Builder.Extension`, `Problem.Extension`), not used here yet. `platform-pgcommon/v2` **v2.0.2** — pool-error-handling and RLS GUC-binding fixes over v2.0.1; all other capabilities unchanged (per-transaction `StatementTimeout`/`LockTimeout`, `MigrationDSNFromEnv`, the full SQLSTATE classifier set). `platform-events/v2` **v2.2.1** — `platform_*`-only metrics, `eventcfg` env contract, SQS DLQ publisher, `GlueDecodeCodec`, `pkg/inbox`; v2.1.0 adds `WithRetryBackoff`. The `/v2` module paths apply to every import. `aws-sdk-go-v2/service/glue` **v1.171.0** — Glue Schema Registry client (startup `GetSchemaByDefinition`); patch-level only.
 
 **`platform-schemagov` is not a Go module and does not appear in `go.mod`.** It is a Python 3.12 CLI tool deployed as the Docker image `ghcr.io/bcbp-solutions-fzc-llc/platform-schemagov:0.4`, pinned in CI. It governs the schema pipeline (validate → diff → register) but has zero presence in application code. See §7.3.1.
 

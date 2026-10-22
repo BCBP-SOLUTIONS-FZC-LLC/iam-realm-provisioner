@@ -32,8 +32,8 @@ github.com/Antonboom/testifylint v1.6.4 h1:gs9fUEy+egzxkEbq9P4cpcMB6/G0DYdMeiFS8
 github.com/Antonboom/testifylint v1.6.4/go.mod h1:YO33FROXX2OoUfwjz8g+gUxQXio5i9qpVy7nXGbxDD4=
 github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c h1:udKWzYgxTojEKWjV8V+WSxDXJ4NFATAsZjh8iIbsQIg=
 github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c/go.mod h1:xomTg63KZ2rFqZQzSB4Vz2SUXa1BpHTVz9L5PTmPC4E=
-github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2 v2.1.0 h1:huBNqORFe6asW7HflkA7AApuZuPY/DABYmHxO8RIoVk=
-github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2 v2.1.0/go.mod h1:Wb1VB+D6NH9y+Wllv2NBzGFswbQNuaOVrgy1tbn2GGQ=
+github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2 v2.2.1 h1:rm9YNKkOuM5tNUz7xtQgCHePewuaV4EvFxO6rgtSnW0=
+github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2 v2.2.1/go.mod h1:mXTSMp07tXlrhnKnHhj9wwdzLY7ft0xVFNgtEbnWdaE=
 github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2 v2.1.0 h1:9QdRZbz+7I5AI5Xakrr9D7sKAqD8PCTeHLnQK2hd9n4=
 github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2 v2.1.0/go.mod h1:wB53+epzev+2uIrX/QqL+Tw6mewLVLSQd9xN+IuImX8=
 github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2 v2.0.2 h1:vGlI8ytjCTySc9W6LNEMkGp6mqxmBQB9YM6T97PGRvA=
