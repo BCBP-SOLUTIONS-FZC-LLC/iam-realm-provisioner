@@ -1,7 +1,7 @@
 graph TD
     subgraph cmd["Composition Roots  —  cmd/"]
         main["server/main.go\nwire pool + sysPool (GUCProvider = GUCSetFromContext, RLS-6)\nmigrations · outbox runner · 3 SQS consumers\ngraceful shutdown: SIGTERM → parallel drain (HTTP · consumers · in-flight RP-3), then outbox, then pools; terminationGracePeriodSeconds=75"]
-        reconciler["reconciler/main.go\nsingle binary, --job=<name> dispatch\n7 CronJobs: ledger-prune · trial-expiry · trial-hard-delete\nsubscription-lapse · realm-config-reconcile\noutbox-prune · processed-events-prune"]
+        reconciler["reconciler/main.go\nsingle binary, --job=<name> dispatch\n8 CronJobs: ledger-prune · trial-expiry · trial-hard-delete · orphaned-signup-reap\nsubscription-lapse · realm-config-reconcile\noutbox-prune · processed-events-prune"]
     end
 
     subgraph adapters_in["Inbound Adapters  —  internal/adapter/inbound/"]

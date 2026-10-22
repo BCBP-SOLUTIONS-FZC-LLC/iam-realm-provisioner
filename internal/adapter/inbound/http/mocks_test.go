@@ -182,6 +182,10 @@ func (m *fakeTenantRealmRepository) ListSuspendedPastRetention(ctx context.Conte
 	}
 	return out, nil
 }
+func (m *fakeTenantRealmRepository) IsTombstoned(ctx context.Context, tenantID uuid.UUID) (bool, error) {
+	r, ok := m.rows[tenantID]
+	return ok && r.DeletedAt != nil, nil
+}
 func (m *fakeTenantRealmRepository) CountsByShard(ctx context.Context) (map[string]int, error) {
 	out := map[string]int{}
 	for _, r := range m.rows {

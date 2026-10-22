@@ -117,14 +117,23 @@ func (s *stubMfaSyncer) SyncRequiresMfa(ctx context.Context, tenantID, userID uu
 }
 
 // fakeRealmRepo embeds the port.TenantRealmRepository interface (nil by
-// default — any method beyond FindByTenantID/Update panics if called,
-// which is intentional: tenant_consumer.go and billing_consumer.go only
-// ever call those two).
+// default — any method beyond FindByTenantID/Update/IsTombstoned panics if
+// called, which is intentional: tenant_consumer.go and billing_consumer.go
+// only ever call those).
 type fakeRealmRepo struct {
 	port.TenantRealmRepository
 	findFn      func(ctx context.Context, tenantID uuid.UUID) (*domain.TenantRealm, error)
 	updateErr   error
 	updateCalls []*domain.TenantRealm
+	// tombstonedFn backs IsTombstoned; nil means "not tombstoned".
+	tombstonedFn func(ctx context.Context, tenantID uuid.UUID) (bool, error)
+}
+
+func (f *fakeRealmRepo) IsTombstoned(ctx context.Context, tenantID uuid.UUID) (bool, error) {
+	if f.tombstonedFn == nil {
+		return false, nil
+	}
+	return f.tombstonedFn(ctx, tenantID)
 }
 
 func (f *fakeRealmRepo) FindByTenantID(ctx context.Context, tenantID uuid.UUID) (*domain.TenantRealm, error) {

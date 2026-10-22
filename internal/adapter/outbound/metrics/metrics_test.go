@@ -60,6 +60,7 @@ func TestRegister_SucceedsAndPopulatesAllVars(t *testing.T) {
 	assert.NotNil(t, RealmConfigPendingGauge)
 	assert.NotNil(t, TrialExpiryProcessedTotal)
 	assert.NotNil(t, TrialExpiryDeferredTotal)
+	assert.NotNil(t, OrphanedSignupReapTotal)
 	assert.NotNil(t, LapseProcessedTotal)
 	assert.NotNil(t, RealmExportTotal)
 	assert.NotNil(t, UserDeleteTotal)

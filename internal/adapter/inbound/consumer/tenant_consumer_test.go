@@ -237,3 +237,70 @@ func TestTenantConsumer_MarkProcessedErrorPropagates(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "dedup write failed", "the inbox claim failure propagates")
 }
+
+// TestTenantConsumer_TrialStartedForTombstonedTenant_IsDropped covers the
+// orphaned-signup-reap race (§8.7): O&M's I-1 succeeded only after the
+// reaper erased the tenant's identity, so FindByTenantID no longer sees the
+// (tombstoned) row. Retrying can never succeed, so the event must be
+// claimed and dropped — not cycled into the DLQ.
+func TestTenantConsumer_TrialStartedForTombstonedTenant_IsDropped(t *testing.T) {
+	tenantID := uuid.New()
+	repo := &fakeRealmRepo{
+		findFn: func(context.Context, uuid.UUID) (*domain.TenantRealm, error) {
+			return nil, domain.NewError(domain.ErrTenantRealmNotFound, "no tenant_realms row for this tenant")
+		},
+		tombstonedFn: func(_ context.Context, id uuid.UUID) (bool, error) {
+			require.Equal(t, tenantID, id)
+			return true, nil
+		},
+	}
+	dedup := newStubDedup()
+	c := NewTenantConsumer(repo, newFakeTxRunner(repo, dedup), stubLogger{})
+
+	env := envelope(t, domain.EventTrialStarted, domain.TrialStartedPayload{
+		TenantID: tenantID, Plan: "starter", TrialEndsAt: time.Now().UTC().Format(time.RFC3339),
+	})
+
+	require.NoError(t, c.Handle(context.Background(), env))
+	assert.Empty(t, repo.updateCalls, "an erased tenant's row must never be written")
+	assert.Len(t, dedup.marked, 1, "the event is claimed so redelivery is a no-op")
+}
+
+// A row that does not exist at all (never tombstoned) keeps the existing
+// retry behavior — only a known-erased tenant is dropped.
+func TestTenantConsumer_TrialStartedForMissingRow_StillRetries(t *testing.T) {
+	repo := &fakeRealmRepo{
+		findFn: func(context.Context, uuid.UUID) (*domain.TenantRealm, error) {
+			return nil, domain.NewError(domain.ErrTenantRealmNotFound, "no tenant_realms row for this tenant")
+		},
+	}
+	dedup := newStubDedup()
+	c := NewTenantConsumer(repo, newFakeTxRunner(repo, dedup), stubLogger{})
+
+	env := envelope(t, domain.EventTrialStarted, domain.TrialStartedPayload{
+		TenantID: uuid.New(), TrialEndsAt: time.Now().UTC().Format(time.RFC3339),
+	})
+
+	require.Error(t, c.Handle(context.Background(), env))
+	assert.Empty(t, dedup.marked)
+}
+
+func TestTenantConsumer_TombstoneCheckFailure_Retries(t *testing.T) {
+	repo := &fakeRealmRepo{
+		findFn: func(context.Context, uuid.UUID) (*domain.TenantRealm, error) {
+			return nil, domain.NewError(domain.ErrTenantRealmNotFound, "no tenant_realms row for this tenant")
+		},
+		tombstonedFn: func(context.Context, uuid.UUID) (bool, error) { return false, errors.New("db down") },
+	}
+	dedup := newStubDedup()
+	c := NewTenantConsumer(repo, newFakeTxRunner(repo, dedup), stubLogger{})
+
+	env := envelope(t, domain.EventTrialStarted, domain.TrialStartedPayload{
+		TenantID: uuid.New(), TrialEndsAt: time.Now().UTC().Format(time.RFC3339),
+	})
+
+	err := c.Handle(context.Background(), env)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tombstone")
+	assert.Empty(t, dedup.marked)
+}

@@ -18,7 +18,7 @@ The service is organised in concentric Clean Architecture layers. Inner layers h
 graph TD
     subgraph cmd["Composition Roots  —  cmd/"]
         main["server/main.go\nwire pool + sysPool (GUCProvider = GUCSetFromContext, RLS-6)\nmigrations · outbox runner · 3 SQS consumers\ngraceful shutdown: SIGTERM → parallel drain (HTTP · consumers · in-flight RP-3), then outbox, then pools; terminationGracePeriodSeconds=75"]
-        reconciler["reconciler/main.go\nsingle binary, --job=<name> dispatch\n7 CronJobs: ledger-prune · trial-expiry · trial-hard-delete\nsubscription-lapse · realm-config-reconcile\noutbox-prune · processed-events-prune"]
+        reconciler["reconciler/main.go\nsingle binary, --job=<name> dispatch\n8 CronJobs: ledger-prune · trial-expiry · trial-hard-delete · orphaned-signup-reap\nsubscription-lapse · realm-config-reconcile\noutbox-prune · processed-events-prune"]
     end
 
     subgraph adapters_in["Inbound Adapters  —  internal/adapter/inbound/"]
@@ -673,8 +673,8 @@ metric_status: proposed. Every series: {domain=iam, service=iam-realm-provisione
         db2["SlowQueryTracer — WARN log > SlowQueryThreshold"]
     end
 
-    subgraph cron["cmd/reconciler — 7 CronJobs"]
-        c1["trial-expiry · trial-hard-delete · subscription-lapse\nrealm-config-reconcile · outbox-prune · processed-events-prune · ledger-prune\nmetrics pushed to the Pushgateway, grouped by cronjob"]
+    subgraph cron["cmd/reconciler — 8 CronJobs"]
+        c1["trial-expiry · trial-hard-delete · orphaned-signup-reap · subscription-lapse\nrealm-config-reconcile · outbox-prune · processed-events-prune · ledger-prune\nmetrics pushed to the Pushgateway, grouped by cronjob"]
     end
 
     subgraph alerts["Alert routing (deploy/monitoring/app-alerts.yml)"]
@@ -834,7 +834,7 @@ The `touch_row()` `BEFORE UPDATE` trigger (attached only to these two tables) bu
 - **FAIL-1** — Dependency failures never leave partial *local* business state. A Keycloak failure aborts before `RunInTx` ever opens; a DB failure rolls back the outbox row with the business row. A partial *Keycloak* sequence (e.g. `Convert`'s multi-step realm build) is compensated via `DeleteRealmIfExists` (§9.3).
 - **FAIL-2** — Cache failures degrade latency only (an in-process token-cache miss costs one extra token-endpoint call, nothing more).
 - **FAIL-3** — Outbox delivery is at-least-once; consumer dedup makes it exactly-once at the consumer.
-- **FAIL-4** — All 7 CronJobs are safe to restart/re-run; they re-select only still-eligible rows.
+- **FAIL-4** — All 8 CronJobs are safe to restart/re-run; they re-select only still-eligible rows.
 - **FAIL-5** — Missing tenant context fails closed (RLS-2) — the app pool with no GUC returns 0 rows rather than leaking.
 - **FAIL-6** — A cross-service dependency being down never corrupts local state and never affects any other service's hot path. O&M's I-8 failure redelivers via SQS; it never silently drops an MFA requirement.
 
@@ -919,6 +919,7 @@ Two-stage Dockerfile: a Go builder stage compiles the binaries, the runtime stag
 |---|---|---|
 | `trial-expiry` | `0 2 * * *` | RP-C1: sweep local `tenant_realms` for expired shared-realm trials; call RP-12 per tenant. **Never queries O&M.** |
 | `trial-hard-delete` | `0 3 * * *` | RP-C2: past `TRIAL_GRACE_DAYS`, hard-delete shared-realm trial users and scrub the local row; atomically erases PII from `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`, `pending_audit_entries` via `NewGDPRScrubFn` (`gdpr.go`, BYPASSRLS transaction) |
+| `orphaned-signup-reap` | `17 * * * *` | §8.7 (Signup BFF gap A-3): reap RP-1 signups O&M never created a tenant for — `strategy='shared' AND status='active' AND trial_ends_at IS NULL` (no `TrialStarted`), every other lifecycle column NULL, older than `ORPHAN_SIGNUP_AFTER` (48h). Re-checks the row `FOR UPDATE`, hard-deletes the shared-realm users, then scrubs PII + soft-deletes the row exactly like RP-C2. No event. |
 | `subscription-lapse` | `0 2 * * *` | RP-C3: `cancelled → suspended → offboarded`, two phases sharing one `RECONCILER_BATCH_LIMIT` budget — suspend polls O&M's I-16 lapse list (WARN + skip if `ORG_MEMBERSHIP_BASE_URL` is unset), offboard always runs against local `suspension_source='billing_lapse'` rows past `RETENTION_DAYS`; offboard phase atomically erases PII from the same five tables via `NewGDPRScrubFn` (`gdpr.go`, BYPASSRLS transaction) |
 | `realm-config-reconcile` | `*/10 * * * *` | RP-C4: retry every `realm_config_reconciliations` row in `status='pending'`; past `RECONCILER_MAX_ATTEMPTS` (default 20) a row moves to a terminal `failed` status instead of retrying forever (poison-pill cap) |
 | `outbox-prune` | `0 4 * * *` | Prune published `outbox_events` past `OUTBOX_RETENTION_DAYS` |

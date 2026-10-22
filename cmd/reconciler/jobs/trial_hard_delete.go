@@ -73,14 +73,26 @@ func hardDeleteTrialTenant(ctx context.Context, jctx *Context, row tenantRealmRo
 	// BYPASSRLS query). All DELETEs are idempotent — safe to retry after a
 	// crash because listHardDeleteCandidates re-selects by status='disabled'.
 	return runInTxWithSysPool(ctx, jctx.SysPool, func(ctx context.Context, tx pgcommon.Tx) error {
-		if err := scrubTenantPII(ctx, tx, row.TenantID); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, `
-			UPDATE tenant_realms SET status = 'deleted', deleted_at = now(), updated_at = now()
-			WHERE tenant_id = $1`, row.TenantID)
-		return err
+		return scrubAndTombstoneTenantRealm(ctx, tx, row.TenantID)
 	})
+}
+
+// scrubAndTombstoneTenantRealm is the shared §15.2/GDPR erasure tail of
+// RP-C2 (trial-hard-delete) and orphaned-signup-reap: delete every
+// tenant-scoped PII row (scrubTenantPII) and soft-delete the tenant_realms
+// row (status='deleted', deleted_at — only tenant_id survives, for the audit
+// FK). tx must be a BYPASSRLS sysPool transaction, so the scrub and the
+// tombstone commit or roll back together. The UPDATE bumps record_version
+// (touch_row), so any writer holding a pre-tombstone copy of the row — e.g.
+// a TrialStarted consumer racing the reaper — loses its optimistic lock.
+func scrubAndTombstoneTenantRealm(ctx context.Context, tx pgcommon.Tx, tenantID uuid.UUID) error {
+	if err := scrubTenantPII(ctx, tx, tenantID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+		UPDATE tenant_realms SET status = 'deleted', deleted_at = now(), updated_at = now()
+		WHERE tenant_id = $1`, tenantID)
+	return err
 }
 
 type tenantRealmRow struct {

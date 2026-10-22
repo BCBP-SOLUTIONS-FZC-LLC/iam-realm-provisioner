@@ -59,6 +59,20 @@ func (r *TenantRealmRepository) FindByTenantID(ctx context.Context, tenantID uui
 	return out, nil
 }
 
+// IsTombstoned reports whether tenantID has a soft-deleted tenant_realms row
+// (the §15.2 tombstone that survives trial-hard-delete, orphaned-signup-reap
+// and offboarding with only tenant_id kept for the audit FK).
+func (r *TenantRealmRepository) IsTombstoned(ctx context.Context, tenantID uuid.UUID) (bool, error) {
+	var tombstoned bool
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
+		return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM tenant_realms WHERE tenant_id = $1 AND deleted_at IS NOT NULL)`, tenantID).Scan(&tombstoned)
+	})
+	if err != nil {
+		return false, err
+	}
+	return tombstoned, nil
+}
+
 // Upsert inserts a new tenant_realms row, or updates the mutable columns of
 // an existing one keyed by tenant_id (RP-1/RP-2 first-touch semantics, §4.2).
 func (r *TenantRealmRepository) Upsert(ctx context.Context, t *domain.TenantRealm) error {

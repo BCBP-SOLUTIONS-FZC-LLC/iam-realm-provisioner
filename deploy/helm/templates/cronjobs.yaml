@@ -1,10 +1,9 @@
 {{- /*
-Six reconciler CronJobs, all from ONE manifest (cmd/reconciler/main.go's own
-header comment already names this file "deploy/helm/templates/cronjobs.yaml"
-and documents "6 CronJobs", so the naming/shape is this codebase's own
-convention, not invented here): RP-C1..RP-C4 (§8.7-8.10) plus two
-maintenance jobs (outbox-prune, processed-events-prune) that this
-repo's cmd/reconciler/main.go registry already wires as --job values.
+Eight reconciler CronJobs, all from ONE manifest (cmd/reconciler/main.go's
+own header comment names this file "deploy/helm/templates/cronjobs.yaml"):
+RP-C1..RP-C4 (§8.7-8.10), orphaned-signup-reap (§8.7) and three
+maintenance jobs (outbox-prune, processed-events-prune, ledger-prune), each
+a --job value in cmd/reconciler/main.go's registry.
 
 Every CronJob runs the SAME image as the server Deployment, with `command`
 overridden to the reconciler binary and `--job=<jobName>` selecting the

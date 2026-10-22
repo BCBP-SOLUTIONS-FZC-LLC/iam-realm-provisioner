@@ -3,6 +3,7 @@ package consumer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -55,6 +56,24 @@ func (c *TenantConsumer) Handle(ctx context.Context, env events.Envelope[json.Ra
 	gucCtx := withTenantGUC(ctx, p.TenantID)
 	err = processOnce(gucCtx, c.inbox, domain.ConsumerTenant, env, func(txCtx context.Context) error {
 		row, err := c.realms.FindByTenantID(txCtx, p.TenantID)
+		if isTenantRealmNotFound(err) {
+			// A tombstoned row means this tenant's identity was already
+			// erased — typically orphaned-signup-reap beat a very late I-1
+			// (§8.7, ORPHAN_SIGNUP_AFTER), or trial-hard-delete/offboarding
+			// ran. Retrying can never succeed, so the event is acknowledged
+			// (claimed and dropped) instead of cycling into the DLQ. A row
+			// that does not exist at all keeps the retry: it is not ours to
+			// guess about.
+			tombstoned, terr := c.realms.IsTombstoned(txCtx, p.TenantID)
+			if terr != nil {
+				return fmt.Errorf("tenant consumer: check tenant_realms tombstone: %w", terr)
+			}
+			if tombstoned {
+				c.log.Warn("tenant consumer: TrialStarted for an erased tenant (reaped orphaned signup or hard-deleted trial) — dropped; O&M holds a tenant whose identity no longer exists",
+					map[string]any{"tenant_id": p.TenantID.String(), "event_id": env.ID})
+				return nil
+			}
+		}
 		if err != nil {
 			return fmt.Errorf("tenant consumer: find tenant_realms row: %w", err)
 		}
@@ -68,4 +87,11 @@ func (c *TenantConsumer) Handle(ctx context.Context, env events.Envelope[json.Ra
 		return fmt.Errorf("tenant consumer: %w", err)
 	}
 	return nil
+}
+
+// isTenantRealmNotFound reports whether err is the repository's "no live
+// tenant_realms row" signal.
+func isTenantRealmNotFound(err error) bool {
+	var de *domain.Error
+	return errors.As(err, &de) && de.Code == domain.ErrTenantRealmNotFound
 }

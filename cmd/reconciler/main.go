@@ -1,6 +1,6 @@
 // Package main is the single-binary reconciler entry point (§13.1).
 // Selects a job by --job flag or RECONCILER_JOB env var and dispatches to
-// the matching handler. Each of the 6 CronJobs in
+// the matching handler. Each of the 8 CronJobs in
 // deploy/helm/templates/cronjobs.yaml invokes this binary with a different
 // --job value.
 package main
@@ -44,6 +44,7 @@ var registry = map[string]jobs.Func{
 	"outbox-prune":           jobs.OutboxPrune,
 	"processed-events-prune": jobs.ProcessedEventsPrune,
 	"ledger-prune":           jobs.LedgerPrune,
+	"orphaned-signup-reap":   jobs.OrphanedSignupReap,
 }
 
 func main() {
@@ -65,6 +66,17 @@ func run() int {
 	fn, ok := registry[jobName]
 	if !ok {
 		die("unknown job %q — valid: %v", jobName, registryNames())
+		return 1
+	}
+
+	// ORPHAN_SIGNUP_AFTER drives a destructive sweep (it hard-deletes
+	// Keycloak users), so unlike the lenient envInt/envDuration timers a
+	// malformed or too-small value aborts that job instead of silently
+	// falling back. Other jobs ignore the setting, so they are not blocked
+	// by it.
+	orphanSignupAfter, orphanErr := parseOrphanSignupAfter(os.Getenv("ORPHAN_SIGNUP_AFTER"))
+	if orphanErr != nil && jobName == "orphaned-signup-reap" {
+		die("startup aborted: %v", orphanErr)
 		return 1
 	}
 
@@ -269,6 +281,9 @@ func run() int {
 		// realm-config setting is given up on and surfaced for operator
 		// attention instead of retrying forever.
 		MaxReconciliationAttempts: envInt("RECONCILER_MAX_ATTEMPTS", 20),
+		// orphaned-signup-reap (§8.7, Signup BFF gap A-3): age past which a
+		// signup that never received TrialStarted is reaped.
+		OrphanSignupAfter: orphanSignupAfter,
 	}
 
 	res, err := fn(ctx, jctx)
@@ -367,6 +382,24 @@ func envDuration(key string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+// parseOrphanSignupAfter validates ORPHAN_SIGNUP_AFTER: empty means
+// jobs.DefaultOrphanSignupAfter; otherwise a Go duration ("48h", "72h") no
+// smaller than jobs.MinOrphanSignupAfter. On error it still returns the
+// default, for the jobs that do not use the setting.
+func parseOrphanSignupAfter(raw string) (time.Duration, error) {
+	if raw == "" {
+		return jobs.DefaultOrphanSignupAfter, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return jobs.DefaultOrphanSignupAfter, fmt.Errorf("ORPHAN_SIGNUP_AFTER=%q is not a duration (e.g. 48h): %w", raw, err)
+	}
+	if d < jobs.MinOrphanSignupAfter {
+		return jobs.DefaultOrphanSignupAfter, fmt.Errorf("ORPHAN_SIGNUP_AFTER=%q is below the %s floor — a live signup's I-1 could still be in flight", raw, jobs.MinOrphanSignupAfter)
+	}
+	return d, nil
 }
 
 func mustEnv(key, appEnv string) string {

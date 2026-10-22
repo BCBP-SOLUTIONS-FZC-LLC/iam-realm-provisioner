@@ -76,6 +76,7 @@ Registered for the `iam` domain but not emitted by this service: `iam_auth_event
 | `iam_realm_provisioner_lapse_processed_total` | counter | `transition` | RP-C3 lapse-sweep transitions by kind (suspend\|offboard). |
 | `iam_realm_provisioner_mfa_reset_total` | counter | `result` | RP-9 MFA-reset calls by result. |
 | `iam_realm_provisioner_mfa_role_sync_total` | counter | `action` | requires-mfa realm-role sync operations by action (assign\|revoke). |
+| `iam_realm_provisioner_orphaned_signup_reap_total` | counter | `result` | orphaned-signup-reap per-tenant outcomes: signups that never received TrialStarted, by result (reaped\|skipped\|deferred). |
 | `iam_realm_provisioner_processed_events_duplicates_total` | counter | `consumer` | SQS redeliveries filtered by processed_events composite PK (IDEMP-4). |
 | `iam_realm_provisioner_provision_total` | counter | `kind`, `result` | Provisioning attempts by kind (trial\|direct\|convert) and result. |
 | `iam_realm_provisioner_realm_active_gauge` | gauge | `strategy` | Current count of active realms by strategy (shared\|dedicated). |
