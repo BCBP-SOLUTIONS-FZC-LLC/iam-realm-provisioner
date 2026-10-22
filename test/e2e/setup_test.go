@@ -169,7 +169,7 @@ func (fakeTokenService) RevokeCredential(context.Context, uuid.UUID, uuid.UUID) 
 	return nil
 }
 
-func (fakeTokenService) RevokeAllCredentials(context.Context, uuid.UUID, uuid.UUID) error {
+func (fakeTokenService) RevokePrincipal(context.Context, uuid.UUID) error {
 	return nil
 }
 

@@ -238,7 +238,7 @@ func run() int {
 	}
 
 	// TokenService is used only by orphaned-signup-reap, to revoke an
-	// orphan's automation credentials (§8.7). Like SubscriptionLapses it is
+	// orphan's automation principal with TS-7 (§8.7). Like SubscriptionLapses it is
 	// optional at the process level, so an unset URL does not break the
 	// other jobs. The reaper itself requires it and defers a tenant with a
 	// registered principal when it is missing.

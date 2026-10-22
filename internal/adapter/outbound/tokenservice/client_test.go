@@ -660,75 +660,135 @@ func TestRevokeCredential_TS2ServerErrorPropagates(t *testing.T) {
 	assert.Equal(t, domain.ErrTokenServiceUnavailable, derr.Code)
 }
 
-// RevokeAllCredentials retires every live version (active and rotating) and
-// skips an already-revoked one: the orphaned-signup-reap teardown (§8.7).
-func TestRevokeAllCredentials_RevokesEveryLiveVersion(t *testing.T) {
-	tenantID, principalID := uuid.New(), uuid.New()
-	var revoked []string
+// ── RevokePrincipal (TS-7) ───────────────────────────────────────────────
+
+func ts7Path(tenantID uuid.UUID) string {
+	return fmt.Sprintf("/api/v1/internal/tenants/%s/service-accounts/platform-automation/revoke", tenantID)
+}
+
+// One bodyless POST to TS-7 with the system identity and the path tenant;
+// a 200 (fresh revoke or an idempotent repeat) is success.
+func TestRevokePrincipal_PostsTS7(t *testing.T) {
+	tenantID := uuid.New()
+	calls := 0
 	mux := http.NewServeMux()
-	base := fmt.Sprintf("/api/v1/internal/tenants/%s/service-accounts/%s", tenantID, principalID)
-	mux.HandleFunc(base, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(ts7Path(tenantID), func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, domain.SystemActorID, r.Header.Get("x-user-id"))
+		assert.Equal(t, tenantID.String(), r.Header.Get("x-tenant-id"))
+		assert.Empty(t, r.Header.Get("Content-Type"), "no body, so no Content-Type")
+		assert.Zero(t, r.ContentLength)
 		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprintf(w, `{"principal_id":"%s","tenant_id":"%s","keycloak_client_id":"platform-automation-x",
-			"principal_type":"platform_automation","status":"active","record_version":3,
-			"credentials":[
-				{"version":1,"status":"revoked","openbao_path":"x/v1","issued_at":"2026-08-01T00:00:00Z"},
-				{"version":2,"status":"rotating","openbao_path":"x/v2","issued_at":"2026-09-01T00:00:00Z"},
-				{"version":3,"status":"active","openbao_path":"x/v3","issued_at":"2026-10-01T00:00:00Z"}
-			]}`, principalID, tenantID)
+		_, _ = fmt.Fprintf(w, `{"principal_id":"%s","tenant_id":"%s","status":"revoked","record_version":2,"revoked_versions":[1,2]}`, uuid.New(), tenantID)
 	})
-	for _, v := range []string{"1", "2", "3"} {
-		mux.HandleFunc(base+"/credentials/"+v+"/revoke", func(w http.ResponseWriter, r *http.Request) {
-			assert.Equal(t, http.MethodPost, r.Method)
-			assert.Equal(t, tenantID.String(), r.Header.Get("x-tenant-id"))
-			revoked = append(revoked, v)
-			if v == "3" {
-				w.WriteHeader(http.StatusNotFound) // vanished meanwhile — counts as done
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprint(w, `{}`)
-		})
-	}
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	require.NoError(t, New(srv.URL, noopLogger{}).RevokeAllCredentials(context.Background(), tenantID, principalID))
-	assert.Equal(t, []string{"2", "3"}, revoked, "the already-revoked version is skipped")
+	require.NoError(t, New(srv.URL, noopLogger{}).RevokePrincipal(context.Background(), tenantID))
+	assert.Equal(t, 1, calls)
 }
 
-// An unknown principal (TS-3 404, e.g. already purged) is success: a retried
-// teardown converges.
-func TestRevokeAllCredentials_UnknownPrincipal_IsSuccess(t *testing.T) {
+// Token Service's PRINCIPAL_NOT_FOUND problem is "already gone": no principal
+// was ever registered, or offboarding purged it. A retried teardown converges.
+func TestRevokePrincipal_PrincipalNotFoundProblem_IsSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
+		writeProblem(w, http.StatusNotFound, "principal-not-found", "Principal Not Found", "PRINCIPAL_NOT_FOUND")
 	}))
 	defer srv.Close()
-	require.NoError(t, New(srv.URL, noopLogger{}).RevokeAllCredentials(context.Background(), uuid.New(), uuid.New()))
+	require.NoError(t, New(srv.URL, noopLogger{}).RevokePrincipal(context.Background(), uuid.New()))
 }
 
-func TestRevokeAllCredentials_ServerErrors_Propagate(t *testing.T) {
+// Any other 404 — gin's plain-text "404 page not found" from a Token Service
+// without TS-7, or a problem with another errorCode — is NOT "already gone":
+// it would leave the principal active, so the reap fails and rolls back.
+func TestRevokePrincipal_RouteMissing404_IsAnError(t *testing.T) {
+	cases := map[string]http.HandlerFunc{
+		"plain text (route missing)": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = fmt.Fprint(w, "404 page not found")
+		},
+		"empty body": func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) },
+		"problem with another errorCode": func(w http.ResponseWriter, _ *http.Request) {
+			writeProblem(w, http.StatusNotFound, "not-found", "Not Found", "NOT_FOUND")
+		},
+	}
+	for name, h := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(h)
+			defer srv.Close()
+			err := New(srv.URL, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
+			require.ErrorIs(t, err, ErrTS7Unavailable)
+		})
+	}
+}
+
+// A 409 is retryable: ROTATION_IN_FLIGHT (the principal lock is held) and
+// OPTIMISTIC_LOCK_CONFLICT keep their own domain codes; anything else falls
+// back to rotation-in-flight.
+func TestRevokePrincipal_Conflict_MapsErrorCode(t *testing.T) {
+	cases := []struct {
+		errorCode string
+		want      domain.ErrorCode
+	}{
+		{"ROTATION_IN_FLIGHT", domain.ErrServiceAccountRotationInFlight},
+		{"OPTIMISTIC_LOCK_CONFLICT", domain.ErrOptimisticLockConflict},
+		{"SOMETHING_NEW", domain.ErrServiceAccountRotationInFlight},
+	}
+	for _, tc := range cases {
+		t.Run(tc.errorCode, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeProblem(w, http.StatusConflict, "conflict", "Conflict", tc.errorCode)
+			}))
+			defer srv.Close()
+			err := New(srv.URL, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
+			var de *domain.Error
+			require.ErrorAs(t, err, &de)
+			assert.Equal(t, tc.want, de.Code)
+			assert.Equal(t, tc.errorCode, de.Details["upstream_error"])
+		})
+	}
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
+		w.WriteHeader(http.StatusConflict)
 	}))
 	defer srv.Close()
-	err := New(srv.URL, noopLogger{}).RevokeAllCredentials(context.Background(), uuid.New(), uuid.New())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "TS-3 lookup")
-
-	tenantID, principalID := uuid.New(), uuid.New()
-	mux := http.NewServeMux()
-	base := fmt.Sprintf("/api/v1/internal/tenants/%s/service-accounts/%s", tenantID, principalID)
-	mux.HandleFunc(base, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = fmt.Fprintf(w, `{"principal_id":"%s","tenant_id":"%s","credentials":[{"version":1,"status":"active","openbao_path":"x","issued_at":"2026-10-01T00:00:00Z"}]}`, principalID, tenantID)
-	})
-	mux.HandleFunc(base+"/credentials/1/revoke", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway)
-	})
-	srv2 := httptest.NewServer(mux)
-	defer srv2.Close()
-	err = New(srv2.URL, noopLogger{}).RevokeAllCredentials(context.Background(), tenantID, principalID)
+	err := New(srv.URL, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
 	var de *domain.Error
 	require.ErrorAs(t, err, &de)
-	assert.Equal(t, domain.ErrTokenServiceUnavailable, de.Code)
+	assert.Equal(t, domain.ErrServiceAccountRotationInFlight, de.Code, "a non-problem 409 is the retryable default")
+}
+
+func TestRevokePrincipal_OtherErrors(t *testing.T) {
+	t.Run("5xx (incl. 502 SECRET_STORE_UNAVAILABLE) is token-service-unavailable", func(t *testing.T) {
+		for _, status := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusInternalServerError} {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
+			err := New(srv.URL, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
+			srv.Close()
+			var de *domain.Error
+			require.ErrorAs(t, err, &de, "status %d", status)
+			assert.Equal(t, domain.ErrTokenServiceUnavailable, de.Code)
+		}
+	})
+	t.Run("4xx surfaces the errorCode", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writeProblem(w, http.StatusForbidden, "tenant-path-mismatch", "Tenant Path Mismatch", "TENANT_PATH_MISMATCH")
+		}))
+		defer srv.Close()
+		err := New(srv.URL, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "TS-7")
+	})
+	t.Run("transport failure", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		srv.Close()
+		err := New(srv.URL, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
+		var de *domain.Error
+		require.ErrorAs(t, err, &de)
+		assert.Equal(t, domain.ErrTokenServiceUnavailable, de.Code)
+	})
+	t.Run("malformed base URL", func(t *testing.T) {
+		require.Error(t, New("http://bad\x7f", noopLogger{}).RevokePrincipal(context.Background(), uuid.New()))
+	})
 }

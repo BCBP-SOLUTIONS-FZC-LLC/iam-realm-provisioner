@@ -34,9 +34,9 @@ type Context struct {
 	Keycloak           port.KeycloakAdmin
 	ObjectStore        port.ObjectStore
 	SubscriptionLapses port.SubscriptionLapseReader // O&M's I-16 GET /subscription-lapses (§16 RP-C3)
-	// TokenService revokes an orphaned signup's automation credentials
-	// (orphaned-signup-reap, §8.7). Nil when TOKEN_SERVICE_BASE_URL is unset;
-	// the reaper then defers any tenant that has a registered principal.
+	// TokenService revokes an orphaned signup's automation principal (TS-7,
+	// orphaned-signup-reap, §8.7). Nil when TOKEN_SERVICE_BASE_URL is unset;
+	// the reaper then defers any tenant that has a recorded principal.
 	TokenService port.TokenServiceClient
 
 	Logger port.SlogStyleLogger

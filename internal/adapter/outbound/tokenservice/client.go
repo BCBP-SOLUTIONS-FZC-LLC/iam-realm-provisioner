@@ -1,6 +1,6 @@
 // Package tokenservice implements port.TokenServiceClient — this
 // service's outbound HTTP dependency on the Token Service's
-// credential-lifecycle API (TS-1/TS-3/TS-4, §2.5, RP-17/RP-18). RP mints
+// credential-lifecycle API (TS-1..TS-4 and TS-7, §2.5, RP-17/RP-18). RP mints
 // the Keycloak client (client-jwt/JWKS auth, EXT-6) and clears its cached
 // JWKS keys on rotate/revoke; Token Service generates and custodies the
 // credential material and serves its public half directly to Keycloak as
@@ -264,35 +264,59 @@ func (c *Client) RevokeCredential(ctx context.Context, tenantID, principalID uui
 	return nil
 }
 
-// RevokeAllCredentials revokes every not-yet-revoked credential version of
-// principalID (TS-3 lookup, then TS-2 per version) — the teardown
-// counterpart of RevokeCredential, which retires only the rotating version
-// at conversion. A principal Token Service does not know (TS-3 404, e.g.
-// already purged) or a version that vanished between the read and the
-// revoke (TS-2 404) counts as done, so a retried teardown converges.
-func (c *Client) RevokeAllCredentials(ctx context.Context, tenantID, principalID uuid.UUID) error {
-	principal, err := c.ReadPrincipal(ctx, tenantID, principalID)
-	if isPrincipalNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("tokenservice: RevokeAllCredentials TS-3 lookup: %w", err)
-	}
-	for _, cred := range principal.Credentials {
-		if cred.Status == "revoked" {
-			continue
-		}
-		if err := c.revokeVersion(ctx, tenantID, principalID, cred.Version); err != nil && !isPrincipalNotFound(err) {
-			return err
-		}
-	}
-	return nil
-}
+// principalNotFoundCode is the RFC 9457 errorCode Token Service sends with a
+// 404 when the tenant has no automation principal (its §17
+// PRINCIPAL_NOT_FOUND).
+const principalNotFoundCode = "PRINCIPAL_NOT_FOUND"
 
-// isPrincipalNotFound reports classifyStatus's 404 mapping.
-func isPrincipalNotFound(err error) bool {
-	var de *domain.Error
-	return errors.As(err, &de) && de.Code == domain.ErrServiceAccountNotProvisioned
+// ErrTS7Unavailable marks a TS-7 404 that is not Token Service's
+// PRINCIPAL_NOT_FOUND problem — the route itself is missing (a Token Service
+// deployed before TS-7) or something in front of it answered. Treating it as
+// "already gone" would leave the principal active, so it is an error and the
+// reap rolls back.
+var ErrTS7Unavailable = errors.New("tokenservice: TS-7 returned 404 without PRINCIPAL_NOT_FOUND — the route is missing (Token Service predates TS-7?)")
+
+// RevokePrincipal calls TS-7
+// POST /api/v1/internal/tenants/:id/service-accounts/platform-automation/revoke
+// (no body): Token Service revokes every credential version of the tenant's
+// automation principal, deletes its OpenBao material, unschedules rotation and
+// sets the principal `revoked`. 2xx (including an already-revoked principal)
+// is success. A 404 is success only when its problem errorCode is
+// PRINCIPAL_NOT_FOUND (no principal, e.g. RP-1 never registered one or
+// offboarding purged it); any other 404 is ErrTS7Unavailable. A 409 maps to
+// ErrServiceAccountRotationInFlight or ErrOptimisticLockConflict (both
+// retryable); everything else goes through classifyStatus.
+func (c *Client) RevokePrincipal(ctx context.Context, tenantID uuid.UUID) error {
+	url := fmt.Sprintf("%s/api/v1/internal/tenants/%s/service-accounts/platform-automation/revoke", c.baseURL, tenantID)
+	httpReq, err := c.newRequest(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(httpReq, tenantID) //nolint:bodyclose // closed via the shared httpx.CloseBody helper below
+	if err != nil {
+		return err
+	}
+	defer httpx.CloseBody(c.log, resp.Body)
+
+	switch resp.StatusCode {
+	case http.StatusNotFound:
+		if p, err := problem.FromResponse(resp); err == nil && p.ErrorCode == principalNotFoundCode {
+			return nil
+		}
+		return ErrTS7Unavailable
+	case http.StatusConflict:
+		var upstream string
+		if p, err := problem.FromResponse(resp); err == nil {
+			upstream = p.ErrorCode
+		}
+		code := domain.ErrServiceAccountRotationInFlight
+		if upstream == "OPTIMISTIC_LOCK_CONFLICT" {
+			code = domain.ErrOptimisticLockConflict
+		}
+		return domain.NewError(code, "token service principal revoke conflict").
+			WithDetails(map[string]any{"tenant_id": tenantID, "upstream_error": upstream})
+	}
+	return classifyStatus(resp, "TS-7")
 }
 
 // revokeVersion calls TS-2 POST .../credentials/:version/revoke for a single
