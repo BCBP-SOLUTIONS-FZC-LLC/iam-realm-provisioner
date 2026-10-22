@@ -35,3 +35,9 @@ commercialCallers:
     existingCallerNamespaces:
       - iam
       - observability
+
+# Reconciler CronJobs in the mesh (native sidecar): orphaned-signup-reap
+# calls Token Service TS-7, which admits only this chart's ServiceAccount
+# principal over mTLS.
+cronjobMesh:
+  istioInject: true
