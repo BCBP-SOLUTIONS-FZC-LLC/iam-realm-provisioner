@@ -209,7 +209,7 @@ RLS-6 (no non-`SET LOCAL` write to `app.tenant_id`) is checked separately, inlin
 | Library | Version | Purpose |
 |---|---|---|
 | `platform-gincommon/v2` | v2.1.0 | HTTP middleware (incl. `RequestTimeout`), RFC 9457 Problem Details (`pkg/problem`, `gincommon.AbortWithProblem`), Zap logging, OTel tracing (`InitTracingWithConfig`, `NewSpanTracer`), Prometheus metrics (`MetricsHandler`, Observability Standard identity) |
-| `platform-events/v2` | v2.1.0 | Transactional outbox (`eventcfg.LoadOutbox`), SNS publisher, SQS consumers (`eventcfg.LoadSQS`, DLQ forwarding), `pkg/inbox` dedup |
+| `platform-events/v2` | v2.2.1 | Transactional outbox (`eventcfg.LoadOutbox`), SNS publisher, SQS consumers (`eventcfg.LoadSQS`, DLQ forwarding), `pkg/inbox` dedup |
 | `platform-pgcommon/v2` | v2.0.2 | pgx/v5 pool, RLS GUC injection, per-tx statement timeout, migrations, error classifiers (`IsConnectionException`/`IsInsufficientResources`/`IsOperatorIntervention`/`IsSystemError`/`IsPoolClosed`) |
 | `Nerzal/gocloak/v13` | v13.9.0 | Keycloak Admin API client — used **only** inside `internal/adapter/outbound/keycloak/` (RP-INV-1) |
 
