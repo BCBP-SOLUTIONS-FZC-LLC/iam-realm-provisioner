@@ -33,6 +33,16 @@ spec:
             {{- include "iam-realm-provisioner.selectorLabels" $ | nindent 12 }}
             app.kubernetes.io/component: cronjob-{{ $job.jobName }}
           annotations:
+            {{- /* Istio: native sidecar when cronjobMesh.istioInject (ends
+            with the main container, so the Job completes); otherwise
+            explicitly no sidecar, so a namespace-wide injection label can't
+            add a classic sidecar that keeps the Job running forever. */}}
+            {{- if $.Values.cronjobMesh.istioInject }}
+            sidecar.istio.io/inject: "true"
+            sidecar.istio.io/nativeSidecar: "true"
+            {{- else }}
+            sidecar.istio.io/inject: "false"
+            {{- end }}
             {{- if $.Values.existingSecret }}
             rotationEpoch: {{ $.Values.rotationEpoch | default "0" | quote }}
             {{- else }}

@@ -157,6 +157,17 @@ spec:
         - port: {{ .Values.networkPolicy.pushgatewayPort }}
           protocol: TCP
 
+    # Allow the Istio sidecar to reach istiod (xDS config + workload
+    # certificates) whenever this chart uses the mesh: the server's
+    # AuthorizationPolicy (commercialCallers.istio.enabled) or the reconciler
+    # CronJobs' sidecar (cronjobMesh.istioInject). Without it a sidecar never
+    # becomes ready, so mTLS calls (e.g. the reaper's TS-7) fail.
+    {{- if or .Values.commercialCallers.istio.enabled .Values.cronjobMesh.istioInject }}
+    - ports:
+        - port: {{ .Values.networkPolicy.istiodPort }}
+          protocol: TCP
+    {{- end }}
+
     {{- with .Values.networkPolicy.additionalEgressRules }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

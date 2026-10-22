@@ -454,6 +454,9 @@ networkPolicy:
   databasePorts: [5432, 6432]
   # Prometheus Pushgateway, for the reconciler CronJobs' metric push.
   pushgatewayPort: 9091
+  # istiod's xDS/CA port, opened for egress whenever the mesh is used
+  # (commercialCallers.istio.enabled or cronjobMesh.istioInject).
+  istiodPort: 15012
 
 # ServiceMonitor — requires kube-prometheus-stack (monitoring.coreos.com/v1
 # CRD). PrometheusRule (alerting rules) is also gated on this flag — no
@@ -537,6 +540,19 @@ migrations:
     backoffLimit: 1
     timeout: "10m"              # MIGRATE_TIMEOUT, lock wait included
     activeDeadlineSeconds: 900  # > timeout
+
+# Istio sidecar for the reconciler CronJob pods. Default false: no sidecar
+# (explicitly — so a namespace-wide injection label cannot add a classic
+# sidecar, which never exits and would keep every Job running). Set true
+# wherever a CronJob must make an mTLS-authenticated call: the
+# orphaned-signup-reap job calls Token Service TS-7, which admits only this
+# chart's ServiceAccount principal (Token Service authorizationPolicy
+# .revokeCallerPrincipals) — a pod outside the mesh has no principal and is
+# denied. On: a native sidecar (sidecar.istio.io/nativeSidecar; Istio >= 1.20
+# on Kubernetes >= 1.29), which ends with the main container so the Job
+# completes. Mirrors iam-token-service's cronjobs.istioInject.
+cronjobMesh:
+  istioInject: false
 
 # ── Reconciler CronJobs (§8.7-8.10, templates/cronjobs.yaml) ───────────────
 # Each CronJob runs the SAME image as the Deployment (image above), with
