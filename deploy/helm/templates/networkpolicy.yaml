@@ -71,6 +71,25 @@ spec:
           protocol: TCP
     {{- end }}
 
+    # Signup BFF (signupBffCaller) — the bff-signup pods only, never the whole
+    # bff namespace (BFF-1). L4 only: the Istio AuthorizationPolicy, where
+    # enabled, limits them to RP-1 and RP-2.
+    {{- if .Values.signupBffCaller.enabled }}
+    {{- if not .Values.signupBffCaller.podSelector }}
+    {{- fail "signupBffCaller.podSelector is required: an empty selector would admit every pod in the bff namespace (BFF-1 requires pod-level admission)." }}
+    {{- end }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.signupBffCaller.namespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.signupBffCaller.podSelector | nindent 14 }}
+      ports:
+        - port: {{ .Values.service.port }}
+          protocol: TCP
+    {{- end }}
+
     {{- with .Values.networkPolicy.additionalIngressRules }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

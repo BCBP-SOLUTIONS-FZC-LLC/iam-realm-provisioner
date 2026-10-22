@@ -6,6 +6,14 @@ This service has never been deployed to any environment — there is no released
 
 ## [Unreleased — 2026-10-21]
 
+### Security
+
+- **Signup BFF admitted per pod, RP-1/RP-2 only (LLD v1.35, 2026-10-22; Signup BFF BFF-1, open gap A-1 option B).** The BFF was admitted by namespace — the whole `gateway` namespace, via `additionalIngressRules` and `existingCallerNamespaces` — although it runs in `bff`. New Helm `signupBffCaller` (default enabled): NetworkPolicy admits only `bff`-namespace pods matching `podSelector` (default `app.kubernetes.io/name: bff-signup`; an empty selector fails the render), and the Istio AuthorizationPolicy admits only `cluster.local/ns/bff/sa/bff-signup` on exact `POST …/tenants/provision-trial` and `…/provision-direct`. The `gateway` BFF rules are removed from dev/staging/prod; `gateway` stays admitted for the Envoy Gateway proxy.
+
+### Fixed
+
+- **Billing's Istio rules never matched (LLD v1.35).** A `*` in the middle of an Istio path is literal, so `/api/v1/internal/tenants/*/convert`, `*/revert-conversion` and `*/realm` denied RP-3/RP-4/RP-11 wherever the AuthorizationPolicy rendered (staging, prod). Now suffix matches (`*/convert`, `*/revert-conversion`, `*/realm`), each unique to its route.
+
 ### Added
 
 - **New produced event `TenantIdentityProvisioned`** on `iam-tenant-events` (LLD v1.32–v1.33, RP-D16) — the server-side signup backstop for Signup BFF open question BFF-2, requested by Org & Membership. It is RP-1's only event and RP-2's first (ahead of `TenantRealmReady`/`DirectPaidSignup`/`TenantConverted`) in the commit transaction, with `tenant_id`, `owner_user_id` (the admin's Keycloak `sub`), `slug`, `name`, `plan` (request values verbatim), `signup_type` (`trial`|`direct_paid`), `realm`, `realm_type` (`shared`|`dedicated`). O&M consumes it and runs its idempotent I-1 when the BFF's own call never landed. No admin email/name on the bus. Open schema, Glue version 1.
