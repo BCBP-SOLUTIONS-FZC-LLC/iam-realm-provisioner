@@ -389,12 +389,15 @@ commercialCallers:
     # to the API port via the NetworkPolicy ingress rules (excluding billing,
     # which gets a path-restricted rule below). An Istio ALLOW policy denies
     # every request that matches no rule, so without this list the existing
-    # callers (Core/O&M in iam, Envoy Gateway / Signup BFF in gateway) would
-    # lose access the moment the AuthorizationPolicy is rendered.
+    # callers (Core/O&M in iam, Prometheus in observability) would lose
+    # access the moment the AuthorizationPolicy is rendered.
     # Typical values (set per environment):
     #   - iam               (Core / iam-org-membership, same-namespace rule)
-    #   - gateway           (Envoy Gateway proxy, ingressControllerNamespaceSelector)
     #   - observability     (Prometheus scrape on the metrics port)
+    # gateway is NOT a caller: this service has no route through the Envoy
+    # Gateway (ingress.enabled: false; every API route is /api/v1/internal/*,
+    # which the public gateway never routes). List it only together with
+    # ingress.enabled — the chart fails if ingress is enabled without it.
     # The Signup BFF is NOT listed here: it is admitted per pod by
     # signupBffCaller below, never by namespace.
     existingCallerNamespaces: []
@@ -422,9 +425,12 @@ signupBffCaller:
   podSelector:
     app.kubernetes.io/name: bff-signup
 
-# NetworkPolicy — enabled by default (§13). Public API traffic (RP-1..RP-16)
-# reaches the "http" port via the gateway/mesh. :9090/metrics is restricted
-# to the monitoring namespace only.
+# NetworkPolicy — enabled by default (§13). Every API route (RP-1..RP-17) is
+# /api/v1/internal/*, reached only over the mesh by named callers (same
+# namespace, Billing, the Signup BFF pods). The ingress-controller (gateway)
+# rule is rendered only when ingress.enabled — this service has no route
+# behind the Envoy Gateway by default. :9090/metrics is restricted to the
+# observability namespace only.
 networkPolicy:
   enabled: true
   ingressControllerNamespaceSelector:
@@ -455,9 +461,11 @@ serviceMonitor:
   relabelings: []
   namespaceSelector: {}
 
-# Ingress — disabled by default; this service is normally reached only
-# through the shared Envoy gateway/mesh. Enable only if a caller sits
-# outside the cluster.
+# Ingress — disabled by default; this service is reached only over the mesh
+# (every API route is /api/v1/internal/*). Enable only if a caller sits
+# outside the cluster; enabling it also renders the NetworkPolicy rule for the
+# ingress-controller namespace, which must then be in
+# commercialCallers.istio.existingCallerNamespaces where Istio is enabled.
 ingress:
   enabled: false
   type: HTTPRoute

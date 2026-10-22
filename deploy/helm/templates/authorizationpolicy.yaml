@@ -1,6 +1,12 @@
 {{- if and .Values.commercialCallers.istio.enabled (or .Values.commercialCallers.enabled .Values.signupBffCaller.enabled) }}
 {{- if not .Values.commercialCallers.istio.existingCallerNamespaces }}
-{{- fail "commercialCallers.istio.existingCallerNamespaces is required when the Istio AuthorizationPolicy renders: it is an ALLOW policy, so every caller not listed (gateway, same-namespace IAM services, observability) would be denied." }}
+{{- fail "commercialCallers.istio.existingCallerNamespaces is required when the Istio AuthorizationPolicy renders: it is an ALLOW policy, so every caller not listed (same-namespace IAM services, observability) would be denied." }}
+{{- end }}
+{{- if .Values.ingress.enabled }}
+{{- $gw := index .Values.networkPolicy.ingressControllerNamespaceSelector "kubernetes.io/metadata.name" }}
+{{- if and $gw (not (has $gw .Values.commercialCallers.istio.existingCallerNamespaces)) }}
+{{- fail (printf "ingress.enabled routes traffic from the %s namespace, but %s is not in commercialCallers.istio.existingCallerNamespaces: the Istio ALLOW policy would deny it." $gw $gw) }}
+{{- end }}
 {{- end }}
 # Istio AuthorizationPolicy — CD-19: Commercial callers (Billing) on
 # RP-3/RP-4/RP-11, and the Signup BFF on RP-1/RP-2 (BFF-1).
@@ -15,13 +21,20 @@
 # policy explicitly admits all namespaces that already have NetworkPolicy
 # ingress access to the API port (existingCallerNamespaces) before adding the
 # path-restricted rules. Without this list, iam-system callers (Core/O&M in
-# the iam namespace), the Envoy Gateway proxy (gateway) and Prometheus
-# (observability) would be silently denied the moment this policy is applied.
+# the iam namespace) and Prometheus (observability) would be silently denied
+# the moment this policy is applied. The gateway namespace is not a caller:
+# this service has no route behind the Envoy Gateway unless ingress.enabled.
 #
 # Rules summary:
-#   1. existingCallerNamespaces (e.g. iam, gateway) → all paths
-#      (mirrors the NetworkPolicy same-namespace and ingressController rules)
+#   1. existingCallerNamespaces (e.g. iam, observability) → all paths
+#      (mirrors the NetworkPolicy same-namespace and metrics rules)
 #   2. billing namespace / commercial-billing SA → RP-3/RP-4/RP-11 only
+#   3. bff namespace / bff-signup SA → RP-1/RP-2 only (exact paths)
+#
+# Path matching: Istio supports only exact, prefix ("abc*"), suffix ("*abc")
+# and presence ("*") matches — a "*" in the MIDDLE of a path is literal.
+# Billing uses suffix matches; each suffix (/convert, /revert-conversion,
+# /realm) is unique to its route in this service.
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
@@ -38,7 +51,7 @@ spec:
   rules:
     # ── Existing callers (rule 3 of the CD-19 alignment spec) ──────────────
     # Admit all principals from namespaces that already hold NetworkPolicy
-    # ingress access on the API port (iam, gateway, etc.).
+    # ingress access on the API port (iam, observability).
     # Path is unrestricted here — the NetworkPolicy already enforces L4.
     {{- range .Values.commercialCallers.istio.existingCallerNamespaces }}
     - from:

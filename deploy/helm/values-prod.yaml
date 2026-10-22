@@ -17,14 +17,17 @@ commercialCallers:
     # NetworkPolicy already grants at L4.
     #
     #   iam           — Core / iam-org-membership (same-namespace rule)
-    #   gateway       — Envoy Gateway proxy (ingressControllerNamespaceSelector).
-    #                   The Signup BFF runs in bff and is admitted per pod by
-    #                   signupBffCaller (values.yaml), not here
     #   observability — Prometheus scraping port 9090; Istio sidecar intercepts
     #                   all inbound ports so /metrics traffic would be denied
     #                   without this entry even though the NetworkPolicy admits
     #                   observability only on port 9090
+    #
+    #   NOT gateway: this service exposes no route through the Envoy Gateway
+    #   (ingress.enabled is false and every API route is /api/v1/internal/*,
+    #   which the public gateway never routes), so the gateway namespace is
+    #   not a caller. The Signup BFF runs in bff and is admitted per pod by
+    #   signupBffCaller (values.yaml). Re-add gateway only together with
+    #   ingress.enabled — the chart fails otherwise.
     existingCallerNamespaces:
       - iam
-      - gateway
       - observability
