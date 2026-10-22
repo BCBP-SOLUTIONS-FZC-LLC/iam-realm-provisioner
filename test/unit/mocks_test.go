@@ -461,7 +461,7 @@ type mockTokenServiceClient struct {
 	RegisterPrincipalFn       func(ctx context.Context, tenantID uuid.UUID, req port.RegisterPrincipalRequest) (*port.RegisterPrincipalResult, error)
 	IssueOrRotateCredentialFn func(ctx context.Context, tenantID, principalID uuid.UUID, req port.IssueCredentialRequest) (*port.IssueCredentialResult, error)
 	RevokeCredentialFn        func(ctx context.Context, tenantID, principalID uuid.UUID) error
-	RevokeAllCredentialsFn    func(ctx context.Context, tenantID, principalID uuid.UUID) error
+	RevokePrincipalFn         func(ctx context.Context, tenantID uuid.UUID) error
 	ReadPrincipalFn           func(ctx context.Context, tenantID, principalID uuid.UUID) (*port.ReadPrincipalResult, error)
 	JWKSURLForFn              func(tenantID uuid.UUID) string
 }
@@ -477,8 +477,8 @@ func (m *mockTokenServiceClient) IssueOrRotateCredential(ctx context.Context, te
 func (m *mockTokenServiceClient) RevokeCredential(ctx context.Context, tenantID, principalID uuid.UUID) error {
 	return m.RevokeCredentialFn(ctx, tenantID, principalID)
 }
-func (m *mockTokenServiceClient) RevokeAllCredentials(ctx context.Context, tenantID, principalID uuid.UUID) error {
-	return m.RevokeAllCredentialsFn(ctx, tenantID, principalID)
+func (m *mockTokenServiceClient) RevokePrincipal(ctx context.Context, tenantID uuid.UUID) error {
+	return m.RevokePrincipalFn(ctx, tenantID)
 }
 func (m *mockTokenServiceClient) ReadPrincipal(ctx context.Context, tenantID, principalID uuid.UUID) (*port.ReadPrincipalResult, error) {
 	return m.ReadPrincipalFn(ctx, tenantID, principalID)

@@ -442,7 +442,7 @@ func (m *fakeTokenServiceClient) RevokeCredential(ctx context.Context, tenantID,
 	}
 	return nil
 }
-func (m *fakeTokenServiceClient) RevokeAllCredentials(context.Context, uuid.UUID, uuid.UUID) error {
+func (m *fakeTokenServiceClient) RevokePrincipal(context.Context, uuid.UUID) error {
 	return nil
 }
 func (m *fakeTokenServiceClient) ReadPrincipal(ctx context.Context, tenantID, principalID uuid.UUID) (*port.ReadPrincipalResult, error) {

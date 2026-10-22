@@ -21,11 +21,12 @@ import (
 )
 
 // fakeJobsTokenService is a port.TokenServiceClient whose only live method
-// is RevokeAllCredentials (the orphaned-signup-reap teardown, §8.7); every
-// other method panics so an unexpected call fails loudly.
+// is RevokePrincipal (TS-7, the orphaned-signup-reap teardown, §8.7); every
+// other method panics so an unexpected call fails loudly. revoked records the
+// tenant of every TS-7 call.
 type fakeJobsTokenService struct {
-	RevokeAllCredentialsFn func(ctx context.Context, tenantID, principalID uuid.UUID) error
-	revoked                []uuid.UUID
+	RevokePrincipalFn func(ctx context.Context, tenantID uuid.UUID) error
+	revoked           []uuid.UUID
 }
 
 var _ port.TokenServiceClient = (*fakeJobsTokenService)(nil)
@@ -39,10 +40,10 @@ func (f *fakeJobsTokenService) IssueOrRotateCredential(context.Context, uuid.UUI
 func (f *fakeJobsTokenService) RevokeCredential(context.Context, uuid.UUID, uuid.UUID) error {
 	panic("not implemented")
 }
-func (f *fakeJobsTokenService) RevokeAllCredentials(ctx context.Context, tenantID, principalID uuid.UUID) error {
-	f.revoked = append(f.revoked, principalID)
-	if f.RevokeAllCredentialsFn != nil {
-		return f.RevokeAllCredentialsFn(ctx, tenantID, principalID)
+func (f *fakeJobsTokenService) RevokePrincipal(ctx context.Context, tenantID uuid.UUID) error {
+	f.revoked = append(f.revoked, tenantID)
+	if f.RevokePrincipalFn != nil {
+		return f.RevokePrincipalFn(ctx, tenantID)
 	}
 	return nil
 }
@@ -126,7 +127,7 @@ func TestOrphanedSignupReap_AutomationTeardown(t *testing.T) {
 	}
 	usersOK := func(context.Context, string, uuid.UUID) error { return nil }
 
-	t.Run("DeletesClientAndRevokesCredentials", func(t *testing.T) {
+	t.Run("DeletesClientAndRevokesPrincipal", func(t *testing.T) {
 		clearTenantRealms(t, ctx, rawPool)
 		tenantID, principalID := uuid.New(), uuid.New()
 		seedSignupRow(t, ctx, rawPool, tenantID, old, withAutomation(principalID))
@@ -138,18 +139,18 @@ func TestOrphanedSignupReap_AutomationTeardown(t *testing.T) {
 				return nil
 			},
 		}
-		ts := &fakeJobsTokenService{RevokeAllCredentialsFn: func(_ context.Context, tid, _ uuid.UUID) error {
+		ts := &fakeJobsTokenService{RevokePrincipalFn: func(_ context.Context, tid uuid.UUID) error {
 			assert.Equal(t, tenantID, tid)
-			order = append(order, "credentials")
+			order = append(order, "principal")
 			return nil
 		}}
 
 		res, err := jobs.OrphanedSignupReap(ctx, reapCtx(kc, ts))
 		require.NoError(t, err)
 		assert.Equal(t, jobs.Result{Attempted: 1, Succeeded: 1}, res)
-		assert.Equal(t, []string{"users", "client", "credentials"}, order)
+		assert.Equal(t, []string{"users", "client", "principal"}, order)
 		assert.Equal(t, []string{"trial/" + domain.SharedPlatformAutomationClientID(tenantID)}, kc.deletedClients)
-		assert.Equal(t, []uuid.UUID{principalID}, ts.revoked)
+		assert.Equal(t, []uuid.UUID{tenantID}, ts.revoked, "one TS-7 call, by tenant")
 		status, gone := realmStatus(t, ctx, rawPool, tenantID)
 		assert.Equal(t, "deleted", status)
 		assert.True(t, gone)
@@ -161,7 +162,7 @@ func TestOrphanedSignupReap_AutomationTeardown(t *testing.T) {
 		tenantID, principalID := uuid.New(), uuid.New()
 		seedSignupRow(t, ctx, rawPool, tenantID, old, withAutomation(principalID))
 		kc := &fakeJobsKeycloakAdmin{HardDeleteUsersInRealmFn: usersOK}
-		ts := &fakeJobsTokenService{RevokeAllCredentialsFn: func(context.Context, uuid.UUID, uuid.UUID) error {
+		ts := &fakeJobsTokenService{RevokePrincipalFn: func(context.Context, uuid.UUID) error {
 			return domain.NewError(domain.ErrTokenServiceUnavailable, "down")
 		}}
 
@@ -175,7 +176,7 @@ func TestOrphanedSignupReap_AutomationTeardown(t *testing.T) {
 
 		// Next run: Keycloak's users and client are already gone (the
 		// adapters treat that as success), Token Service is back.
-		ts.RevokeAllCredentialsFn = nil
+		ts.RevokePrincipalFn = nil
 		res, err = jobs.OrphanedSignupReap(ctx, reapCtx(kc, ts))
 		require.NoError(t, err)
 		assert.Equal(t, jobs.Result{Attempted: 1, Succeeded: 1}, res)
@@ -216,6 +217,25 @@ func TestOrphanedSignupReap_AutomationTeardown(t *testing.T) {
 		assert.False(t, gone, "a principal that cannot be revoked must not be abandoned")
 		_, gone = realmStatus(t, ctx, rawPool, without)
 		assert.True(t, gone, "no principal was ever registered, so there is nothing to revoke")
+	})
+
+	// TS-7 is addressed by tenant, so with Token Service wired it is called
+	// even when no principal_id was recorded: RP-1 registers the principal
+	// (TS-4) before it records the id, and a signup that failed in between
+	// still has one at Token Service.
+	t.Run("NoPrincipalRecorded_StillCallsTS7", func(t *testing.T) {
+		clearTenantRealms(t, ctx, rawPool)
+		tenantID := uuid.New()
+		seedSignupRow(t, ctx, rawPool, tenantID, old, "")
+		kc := &fakeJobsKeycloakAdmin{HardDeleteUsersInRealmFn: usersOK}
+		ts := &fakeJobsTokenService{}
+
+		res, err := jobs.OrphanedSignupReap(ctx, reapCtx(kc, ts))
+		require.NoError(t, err)
+		assert.Equal(t, jobs.Result{Attempted: 1, Succeeded: 1}, res)
+		assert.Equal(t, []uuid.UUID{tenantID}, ts.revoked)
+		_, gone := realmStatus(t, ctx, rawPool, tenantID)
+		assert.True(t, gone)
 	})
 }
 

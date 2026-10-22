@@ -138,7 +138,7 @@ func listOrphanedSignupCandidates(ctx context.Context, jctx *Context) ([]uuid.UU
 // the row, then:
 //  1. hard-deletes the tenant's users,
 //  2. deletes its shared-realm platform-automation client,
-//  3. revokes its Token Service credentials,
+//  3. revokes its Token Service principal (TS-7),
 //  4. scrubs and tombstones the row.
 //
 // It returns reaped=false, and touches nothing, when the row no longer matches
@@ -167,7 +167,7 @@ func reapOrphanedSignup(ctx context.Context, jctx *Context, tenantID uuid.UUID) 
 		if err := deleteSharedAutomationClient(ctx, jctx, realmName, tenantID, clientID); err != nil {
 			return err
 		}
-		if err := revokeAutomationCredentials(ctx, jctx, tenantID, principalID); err != nil {
+		if err := revokeAutomationPrincipal(ctx, jctx, tenantID, principalID); err != nil {
 			return err
 		}
 		if err := scrubAndTombstoneTenantRealm(ctx, tx, tenantID); err != nil {
