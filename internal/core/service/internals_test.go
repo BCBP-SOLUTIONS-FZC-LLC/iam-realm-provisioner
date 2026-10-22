@@ -55,7 +55,7 @@ func TestNewLifecycleService_Defaults(t *testing.T) {
 }
 
 func TestNewProvisioningService_Defaults(t *testing.T) {
-	svc := NewProvisioningService(nil, nil, nil, nil, nil, "", nil)
+	svc := NewProvisioningService(nil, nil, nil, nil, nil, nil, "", nil)
 	assert.Equal(t, "trial", svc.sharedRealm)
 	assert.Equal(t, []string{"kc-shard-1"}, svc.shardIDs)
 }
@@ -67,7 +67,7 @@ func TestNewProvisioningService_Defaults(t *testing.T) {
 func TestSelectShard_LeastLoadedWithLexicographicTieBreak(t *testing.T) {
 	svc := NewProvisioningService(
 		countsRepo{counts: map[string]int{"kc-shard-1": 2, "kc-shard-2": 1, "kc-shard-3": 1}},
-		nil, nil, nil, nil, "trial",
+		nil, nil, nil, nil, nil, "trial",
 		[]string{"kc-shard-2", "kc-shard-1", "kc-shard-3"},
 	)
 
@@ -82,7 +82,7 @@ func TestSelectShard_LeastLoadedWithLexicographicTieBreak(t *testing.T) {
 func TestSelectShard_NoLoadYet_TieBreaksLexicographically(t *testing.T) {
 	svc := NewProvisioningService(
 		countsRepo{counts: map[string]int{}},
-		nil, nil, nil, nil, "trial",
+		nil, nil, nil, nil, nil, "trial",
 		[]string{"kc-shard-9", "kc-shard-1"},
 	)
 
@@ -94,7 +94,7 @@ func TestSelectShard_NoLoadYet_TieBreaksLexicographically(t *testing.T) {
 func TestSelectShard_CountsByShardFailure_Propagates(t *testing.T) {
 	svc := NewProvisioningService(
 		countsRepo{err: errors.New("db down")},
-		nil, nil, nil, nil, "trial", nil,
+		nil, nil, nil, nil, nil, "trial", nil,
 	)
 
 	_, err := svc.selectShard(context.Background())

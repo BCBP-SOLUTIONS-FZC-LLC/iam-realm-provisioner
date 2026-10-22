@@ -161,17 +161,19 @@ func clearTenantRealms(t testing.TB, ctx context.Context, rawPool *dbseed.Pool) 
 	require.NoError(t, err)
 }
 
-// assertPIITablesEmpty verifies that the five §15.2 GDPR scrub tables have no
+// assertPIITablesEmpty verifies that the four §15.2 GDPR scrub tables have no
 // rows for tenantID — used to confirm that hardDeleteTrialTenant ran the real
-// scrubTenantPII against the database rather than a no-op stub.
+// scrubTenantPII against the database rather than a no-op stub. It also
+// asserts the tenant's undelivered pending_audit_entries survived the
+// scrub (LLD v1.41): they are audit records on their way to Audit Log.
 func assertPIITablesEmpty(t testing.TB, ctx context.Context, rawPool *dbseed.Pool, tenantID uuid.UUID) {
 	t.Helper()
+	assertPendingTermsAuditKept(t, ctx, rawPool, tenantID)
 	for _, tbl := range []string{
 		"keycloak_idp_configs",
 		"keycloak_idp_config_validations",
 		"realm_config_reconciliations",
 		"provisioning_operations",
-		"pending_audit_entries",
 	} {
 		var n int
 		require.NoError(t, rawPool.QueryRow(ctx,
@@ -187,6 +189,28 @@ func seedTenantRealmForHardDelete(t testing.TB, ctx context.Context, rawPool *db
 		INSERT INTO tenant_realms (tenant_id, realm_name, strategy, status, disabled_at)
 		VALUES ($1, 'trial', 'shared', $2, $3)`, tenantID, status, disabledAt)
 	require.NoError(t, err)
+	seedPendingTermsAudit(t, ctx, rawPool, tenantID)
+}
+
+// seedPendingTermsAudit queues the owner's undelivered TermsAccepted entry
+// for tenantID, as RP-1 does (Audit Log unreachable, so still pending).
+func seedPendingTermsAudit(t testing.TB, ctx context.Context, rawPool *dbseed.Pool, tenantID uuid.UUID) {
+	t.Helper()
+	_, err := rawPool.Exec(ctx, `
+		INSERT INTO pending_audit_entries (tenant_id, idempotency_key, entry)
+		VALUES ($1, $2, '{"entry_type":"legal.terms.accepted","ip_address":"203.0.113.7"}')`,
+		tenantID, "TermsAccepted:"+tenantID.String()+":"+uuid.NewString()+":2026-09")
+	require.NoError(t, err)
+}
+
+// assertPendingTermsAuditKept: the GDPR scrub must not delete an
+// undelivered audit entry, or the 7-year terms record is lost.
+func assertPendingTermsAuditKept(t testing.TB, ctx context.Context, rawPool *dbseed.Pool, tenantID uuid.UUID) {
+	t.Helper()
+	var n int
+	require.NoError(t, rawPool.QueryRow(ctx,
+		`SELECT count(*) FROM pending_audit_entries WHERE tenant_id = $1 AND status = 'pending'`, tenantID).Scan(&n))
+	assert.Equal(t, 1, n, "the undelivered TermsAccepted entry of tenant %s must survive the scrub", tenantID)
 }
 
 func TestTrialHardDelete(t *testing.T) {

@@ -473,6 +473,11 @@ func (f *fakePendingAuditEntryRepository) Enqueue(_ context.Context, e domain.Au
 	return nil
 }
 
+func (f *fakePendingAuditEntryRepository) EnqueueOnce(_ context.Context, _ string, e domain.AuditEntry) error {
+	f.enqueued = append(f.enqueued, e)
+	return nil
+}
+
 func (f *fakePendingAuditEntryRepository) ClaimDue(context.Context, int) ([]*domain.PendingAuditEntry, error) {
 	return nil, nil
 }

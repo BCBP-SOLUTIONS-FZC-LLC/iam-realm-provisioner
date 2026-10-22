@@ -68,7 +68,7 @@ const docTemplate = `{
                         "IdempotencyKey": []
                     }
                 ],
-                "description": "Creates a dedicated realm for a direct-paid tenant using least-loaded shard placement. Keycloak-effect-first. Idempotent on Idempotency-Key reuse.",
+                "description": "Creates a dedicated realm for a direct-paid tenant using least-loaded shard placement. Keycloak-effect-first. Idempotent on Idempotency-Key reuse. Requires terms_acceptance, recorded for Audit Log as legal.terms.accepted exactly as in RP-1.",
                 "consumes": [
                     "application/json"
                 ],
@@ -134,7 +134,7 @@ const docTemplate = `{
                         "IdempotencyKey": []
                     }
                 ],
-                "description": "Creates a shared trial realm for a new tenant and seeds the admin user. Keycloak-effect-first: realm is created in Keycloak before the local row is committed. Idempotent on Idempotency-Key reuse: replays the stored result without re-provisioning.",
+                "description": "Creates a shared trial realm for a new tenant and seeds the admin user. Keycloak-effect-first: realm is created in Keycloak before the local row is committed. Idempotent on Idempotency-Key reuse: replays the stored result without re-provisioning. Requires terms_acceptance (the owner's terms-of-service acceptance): recorded for Audit Log as legal.terms.accepted in the same transaction (one record per tenant, owner and version), never put on an event. accepted_at must lie within [now-24h, now+10m].",
                 "consumes": [
                     "application/json"
                 ],
@@ -1354,7 +1354,8 @@ const docTemplate = `{
                 "plan",
                 "tenant_id",
                 "tenant_name",
-                "tenant_slug"
+                "tenant_slug",
+                "terms_acceptance"
             ],
             "properties": {
                 "admin_email": {
@@ -1387,6 +1388,14 @@ const docTemplate = `{
                 "tenant_slug": {
                     "type": "string",
                     "maxLength": 63
+                },
+                "terms_acceptance": {
+                    "description": "TermsAcceptance is required: the owner's terms acceptance (A-4).",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/http.termsAcceptanceRequest"
+                        }
+                    ]
                 }
             }
         },
@@ -1398,7 +1407,8 @@ const docTemplate = `{
                 "plan",
                 "tenant_id",
                 "tenant_name",
-                "tenant_slug"
+                "tenant_slug",
+                "terms_acceptance"
             ],
             "properties": {
                 "admin_email": {
@@ -1427,6 +1437,14 @@ const docTemplate = `{
                 "tenant_slug": {
                     "type": "string",
                     "maxLength": 63
+                },
+                "terms_acceptance": {
+                    "description": "TermsAcceptance is required: the owner's terms acceptance (A-4).",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/http.termsAcceptanceRequest"
+                        }
+                    ]
                 }
             }
         },
@@ -1455,6 +1473,37 @@ const docTemplate = `{
                 "reason": {
                     "type": "string",
                     "maxLength": 500
+                }
+            }
+        },
+        "http.termsAcceptanceRequest": {
+            "type": "object",
+            "required": [
+                "accepted_at",
+                "ip_address",
+                "user_agent",
+                "version"
+            ],
+            "properties": {
+                "accepted_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "example": "2026-10-22T09:12:04Z"
+                },
+                "ip_address": {
+                    "type": "string",
+                    "example": "203.0.113.7"
+                },
+                "user_agent": {
+                    "type": "string",
+                    "maxLength": 512,
+                    "example": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6)"
+                },
+                "version": {
+                    "type": "string",
+                    "maxLength": 32,
+                    "minLength": 1,
+                    "example": "2026-09"
                 }
             }
         },

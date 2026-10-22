@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -16,12 +17,26 @@ import (
 )
 
 type provisionTrialBody struct {
-	TenantID   uuid.UUID `json:"tenant_id"`
-	TenantName string    `json:"tenant_name"`
-	TenantSlug string    `json:"tenant_slug"`
-	AdminEmail string    `json:"admin_email"`
-	AdminName  string    `json:"admin_name"`
-	Plan       string    `json:"plan"`
+	TenantID        uuid.UUID  `json:"tenant_id"`
+	TenantName      string     `json:"tenant_name"`
+	TenantSlug      string     `json:"tenant_slug"`
+	AdminEmail      string     `json:"admin_email"`
+	AdminName       string     `json:"admin_name"`
+	Plan            string     `json:"plan"`
+	TermsAcceptance *termsBody `json:"terms_acceptance,omitempty"`
+}
+
+// termsBody is RP-1/RP-2's required terms_acceptance object.
+type termsBody struct {
+	Version    string `json:"version"`
+	AcceptedAt string `json:"accepted_at"`
+	IPAddress  string `json:"ip_address"`
+	UserAgent  string `json:"user_agent"`
+}
+
+func e2eTerms() *termsBody {
+	return &termsBody{Version: "2026-09", AcceptedAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+		IPAddress: "203.0.113.7", UserAgent: "Mozilla/5.0 (e2e)"}
 }
 
 type convertBody struct {
@@ -56,7 +71,7 @@ func TestTrialProvisionThenConvert(t *testing.T) {
 	// ── RP-1: provision-trial ───────────────────────────────────────────
 	trialReq := provisionTrialBody{
 		TenantID: tenantID, TenantName: "E2E Trial Co", TenantSlug: slug,
-		AdminEmail: email, AdminName: "Trial Admin", Plan: "starter",
+		AdminEmail: email, AdminName: "Trial Admin", Plan: "starter", TermsAcceptance: e2eTerms(),
 	}
 	var trialResult service.ProvisionTrialResult
 	resp := doJSON(t, http.MethodPost, "/api/v1/internal/tenants/provision-trial",

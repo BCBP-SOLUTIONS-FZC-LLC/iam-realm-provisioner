@@ -152,6 +152,10 @@ definitions:
       tenant_slug:
         maxLength: 63
         type: string
+      terms_acceptance:
+        allOf:
+        - $ref: '#/definitions/http.termsAcceptanceRequest'
+        description: 'TermsAcceptance is required: the owner''s terms acceptance (A-4).'
     required:
     - admin_email
     - admin_name
@@ -159,6 +163,7 @@ definitions:
     - tenant_id
     - tenant_name
     - tenant_slug
+    - terms_acceptance
     type: object
   http.provisionTrialRequest:
     properties:
@@ -182,6 +187,10 @@ definitions:
       tenant_slug:
         maxLength: 63
         type: string
+      terms_acceptance:
+        allOf:
+        - $ref: '#/definitions/http.termsAcceptanceRequest'
+        description: 'TermsAcceptance is required: the owner''s terms acceptance (A-4).'
     required:
     - admin_email
     - admin_name
@@ -189,6 +198,7 @@ definitions:
     - tenant_id
     - tenant_name
     - tenant_slug
+    - terms_acceptance
     type: object
   http.reactivateRequest:
     properties:
@@ -207,6 +217,30 @@ definitions:
         type: string
     required:
     - reason
+    type: object
+  http.termsAcceptanceRequest:
+    properties:
+      accepted_at:
+        example: "2026-10-22T09:12:04Z"
+        format: date-time
+        type: string
+      ip_address:
+        example: 203.0.113.7
+        type: string
+      user_agent:
+        example: Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6)
+        maxLength: 512
+        type: string
+      version:
+        example: 2026-09
+        maxLength: 32
+        minLength: 1
+        type: string
+    required:
+    - accepted_at
+    - ip_address
+    - user_agent
+    - version
     type: object
   service.ApplyRealmConfigResult:
     properties:
@@ -1081,6 +1115,8 @@ paths:
       - application/json
       description: Creates a dedicated realm for a direct-paid tenant using least-loaded
         shard placement. Keycloak-effect-first. Idempotent on Idempotency-Key reuse.
+        Requires terms_acceptance, recorded for Audit Log as legal.terms.accepted
+        exactly as in RP-1.
       parameters:
       - description: Direct provisioning payload
         in: body
@@ -1124,7 +1160,10 @@ paths:
       description: 'Creates a shared trial realm for a new tenant and seeds the admin
         user. Keycloak-effect-first: realm is created in Keycloak before the local
         row is committed. Idempotent on Idempotency-Key reuse: replays the stored
-        result without re-provisioning.'
+        result without re-provisioning. Requires terms_acceptance (the owner''s terms-of-service
+        acceptance): recorded for Audit Log as legal.terms.accepted in the same transaction
+        (one record per tenant, owner and version), never put on an event. accepted_at
+        must lie within [now-24h, now+10m].'
       parameters:
       - description: Trial provisioning payload
         in: body

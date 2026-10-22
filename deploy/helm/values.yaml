@@ -185,8 +185,8 @@ env:
   # validateRequiredEnv panics at startup outside dev when it is empty.
   TOKEN_SERVICE_BASE_URL: "http://iam-token-service.iam.svc.cluster.local"
 
-  # Audit Log — AL-5 direct-write ingest for TenantIdpConfigChanged (LLD
-  # §10.6/§18.7). Empty = drainer disabled (startup WARN); entries queue
+  # Audit Log — AL-5 direct-write ingest for TenantIdpConfigChanged and
+  # the owner's TermsAccepted (LLD §10.6/§18.7). Empty = drainer disabled (startup WARN); entries queue
   # durably in pending_audit_entries and deliver once this is set, e.g.
   # "http://iam-audit-log.iam.svc.cluster.local" when iam-audit-log ships.
   AUDIT_LOG_BASE_URL: ""

@@ -18,7 +18,11 @@ var gdprScrubQueries = []string{
 	`DELETE FROM keycloak_idp_config_validations WHERE tenant_id = $1`,
 	`DELETE FROM realm_config_reconciliations    WHERE tenant_id = $1`,
 	`DELETE FROM provisioning_operations         WHERE tenant_id = $1`,
-	`DELETE FROM pending_audit_entries           WHERE tenant_id = $1`,
+	// pending_audit_entries is deliberately NOT here (LLD v1.41): its rows
+	// are undelivered audit records — notably the owner's TermsAccepted,
+	// which Audit Log keeps 7 years and through erasure (compliance_7y).
+	// Deleting one here would lose the record before delivery. The drainer
+	// deletes each row once Audit Log has it, so no PII lingers after that.
 }
 
 // scrubTenantPII executes gdprScrubQueries for tenantID inside tx, which must

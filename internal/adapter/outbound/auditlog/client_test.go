@@ -187,3 +187,57 @@ func TestWriteEntry_NilMetadataIsOmitted(t *testing.T) {
 	defer srv.Close()
 	require.NoError(t, New(srv.URL, noopLogger{}).WriteEntry(context.Background(), "key-1", e))
 }
+
+// AL-5's RFC 9457 422 UNKNOWN_ENTRY_TYPE is deploy skew (Audit Log does not
+// know the type yet), surfaced as ErrAuditEntryTypeUnknown — NOT a
+// permanent rejection — so the drainer keeps and retries the row.
+func TestWriteEntry_UnknownEntryTypeIsNotAPermanentRejection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"type":"https://errors.company.com/iam-audit-log/unknown-entry-type","status":422,"errorCode":"UNKNOWN_ENTRY_TYPE"}`))
+	}))
+	defer srv.Close()
+	err := New(srv.URL, noopLogger{}).WriteEntry(context.Background(), "key-1", sampleEntry())
+	require.ErrorIs(t, err, port.ErrAuditEntryTypeUnknown)
+	assert.False(t, errors.Is(err, port.ErrAuditEntryRejected))
+
+	// Any other 422 (e.g. METADATA_TOO_LARGE) stays permanent.
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"status":422,"errorCode":"METADATA_TOO_LARGE"}`))
+	}))
+	defer srv2.Close()
+	err = New(srv2.URL, noopLogger{}).WriteEntry(context.Background(), "key-1", sampleEntry())
+	require.ErrorIs(t, err, port.ErrAuditEntryRejected)
+}
+
+// The drainer's AL-5 body for RP-1/RP-2's TermsAccepted entry, exactly as
+// Audit Log rev 0.31 expects it, under the deterministic key.
+func TestWriteEntry_TermsAcceptedSendsAL5Contract(t *testing.T) {
+	tenantID, owner := uuid.New(), uuid.New()
+	acceptedAt := time.Date(2026, 10, 22, 9, 12, 4, 0, time.UTC)
+	entry := domain.TermsAcceptedAuditEntry(tenantID, owner, domain.TermsAcceptance{
+		Version: "2026-09", AcceptedAt: acceptedAt, IPAddress: "2001:db8::7", UserAgent: "Mozilla/5.0 (Macintosh)",
+	}, domain.SignupTypeDirectPaid, "enterprise", "0af7651916cd43dd8448eb211c80319c")
+	key := domain.TermsAcceptedIdempotencyKey(tenantID, owner, "2026-09")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "TermsAccepted:"+tenantID.String()+":"+owner.String()+":2026-09", r.Header.Get("Idempotency-Key"))
+		assert.Equal(t, tenantID.String(), r.Header.Get("x-tenant-id"))
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		assert.Equal(t, map[string]any{
+			"tenant_id": tenantID.String(), "entry_type": "legal.terms.accepted", "action": "accept",
+			"actor":       map[string]any{"type": "user", "id": owner.String()},
+			"target":      map[string]any{"type": "tenant", "id": tenantID.String()},
+			"occurred_at": "2026-10-22T09:12:04Z", "source_service": "iam-realm-provisioner",
+			"source_event_type": "TermsAccepted", "ip_address": "2001:db8::7", "user_agent": "Mozilla/5.0 (Macintosh)",
+			"trace_id": "0af7651916cd43dd8448eb211c80319c",
+			"metadata": map[string]any{"terms_version": "2026-09", "accepted_at": "2026-10-22T09:12:04Z",
+				"signup_type": "direct_paid", "plan": "enterprise"},
+		}, body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	require.NoError(t, New(srv.URL, noopLogger{}).WriteEntry(context.Background(), key, entry))
+}

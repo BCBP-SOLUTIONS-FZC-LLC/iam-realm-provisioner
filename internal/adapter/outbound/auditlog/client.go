@@ -89,6 +89,26 @@ func (c *Client) WriteEntry(ctx context.Context, idempotencyKey string, entry do
 		return fmt.Errorf("auditlog: AL-5 unavailable (status %d)", resp.StatusCode)
 	default:
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody)) //nolint:errcheck // best-effort diagnostic only
-		return fmt.Errorf("%w: AL-5 status %d: %s", port.ErrAuditEntryRejected, resp.StatusCode, bytes.TrimSpace(snippet))
+		snippet = bytes.TrimSpace(snippet)
+		if resp.StatusCode == http.StatusUnprocessableEntity && problemErrorCode(snippet) == unknownEntryTypeCode {
+			return fmt.Errorf("%w: AL-5 status %d: %s", port.ErrAuditEntryTypeUnknown, resp.StatusCode, snippet)
+		}
+		return fmt.Errorf("%w: AL-5 status %d: %s", port.ErrAuditEntryRejected, resp.StatusCode, snippet)
 	}
+}
+
+// unknownEntryTypeCode is AL-5's RFC 9457 errorCode for an entry_type the
+// deployed Audit Log does not accept (Audit LLD §17).
+const unknownEntryTypeCode = "UNKNOWN_ENTRY_TYPE"
+
+// problemErrorCode returns an RFC 9457 body's errorCode member, or "" when
+// body is not a (complete) problem document.
+func problemErrorCode(body []byte) string {
+	var p struct {
+		ErrorCode string `json:"errorCode"`
+	}
+	if json.Unmarshal(body, &p) != nil {
+		return ""
+	}
+	return p.ErrorCode
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/pkg/requestctx"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/gincommon"
 )
 
 // callerActor returns the caller's UUID string for use in event and audit
@@ -52,6 +53,7 @@ type ProvisioningService struct {
 	keycloak     port.KeycloakAdmin
 	tokenService port.TokenServiceClient
 	tx           port.TxRunner
+	auditEntries port.PendingAuditEntryRepository
 	log          port.SlogStyleLogger
 	sharedRealm  string
 	shardIDs     []string
@@ -71,12 +73,15 @@ type ProvisioningService struct {
 const DefaultConvertTimeout = 10 * time.Minute
 
 // NewProvisioningService wires ProvisioningService's dependencies.
+// auditEntries receives RP-1/RP-2's TermsAccepted entry, in the same
+// transaction as tenant_realms (§10.6).
 func NewProvisioningService(
 	realms port.TenantRealmRepository,
 	idempotency port.IdempotencyStore,
 	keycloak port.KeycloakAdmin,
 	tokenService port.TokenServiceClient,
 	tx port.TxRunner,
+	auditEntries port.PendingAuditEntryRepository,
 	sharedRealm string,
 	shardIDs []string,
 ) *ProvisioningService {
@@ -88,7 +93,7 @@ func NewProvisioningService(
 	}
 	return &ProvisioningService{
 		realms: realms, idempotency: idempotency, keycloak: keycloak, tokenService: tokenService,
-		tx: tx, sharedRealm: sharedRealm, shardIDs: shardIDs, convertTimeout: DefaultConvertTimeout,
+		tx: tx, auditEntries: auditEntries, sharedRealm: sharedRealm, shardIDs: shardIDs, convertTimeout: DefaultConvertTimeout,
 	}
 }
 
@@ -339,6 +344,19 @@ func (s *ProvisioningService) rejectRemovedTenant(ctx context.Context, tenantID 
 	return nil
 }
 
+// enqueueTermsAccepted queues the tenant owner's terms acceptance for Audit
+// Log (legal.terms.accepted, §10.6) inside the caller's RunInTx, so it
+// commits or rolls back with tenant_realms. The deterministic key makes a
+// replayed or resumed signup a no-op. IP address and user agent go only
+// here, point to point — never on TenantIdentityProvisioned.
+func (s *ProvisioningService) enqueueTermsAccepted(ctx context.Context, tenantID, ownerID uuid.UUID, terms *domain.TermsAcceptance, signupType, plan string) error {
+	if s.auditEntries == nil {
+		return errors.New("provisioning: no pending_audit_entries repository wired for TermsAccepted")
+	}
+	entry := domain.TermsAcceptedAuditEntry(tenantID, ownerID, *terms, signupType, plan, gincommon.SpanTraceID(ctx))
+	return s.auditEntries.EnqueueOnce(ctx, domain.TermsAcceptedIdempotencyKey(tenantID, ownerID, terms.Version), entry)
+}
+
 // ProvisionTrialRequest is the RP-1 request body (§5.2).
 type ProvisionTrialRequest struct {
 	TenantID           uuid.UUID
@@ -348,6 +366,8 @@ type ProvisionTrialRequest struct {
 	AdminName          string
 	HashedPasswordSeed string
 	Plan               string
+	// Terms is the owner's terms-of-service acceptance (required).
+	Terms *domain.TermsAcceptance
 }
 
 // ProvisionTrialResult is the RP-1 response body (§5.2).
@@ -374,6 +394,13 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 	// Registered past the replay check so an idempotent retry of an
 	// already-succeeded key does not inflate the attempt count.
 	defer func() { metrics.ProvisionTotal.WithLabelValues("trial", outcome(err)).Inc() }()
+
+	// After the replay check: a completed key replays its stored result
+	// even once accepted_at has aged past the 24h bound.
+	if err := req.Terms.Validate(time.Now()); err != nil {
+		s.failIdempotency(ctx, idempotencyKey)
+		return nil, err
+	}
 
 	// Guard: reject re-provisioning an offboarded or removed tenant before
 	// touching Keycloak (RP-1, §8.1, ErrTenantOffboarded).
@@ -416,6 +443,9 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 			Status:                    domain.RealmStatusActive,
 			ServiceAccountPrincipalID: &principalID, ServiceAccountKeycloakClientID: &automationClientID,
 		}); err != nil {
+			return err
+		}
+		if err := s.enqueueTermsAccepted(ctx, req.TenantID, kcUserID, req.Terms, domain.SignupTypeTrial, req.Plan); err != nil {
 			return err
 		}
 		pub, ok := port.EventPublisherFromContext(ctx)
@@ -487,6 +517,8 @@ type ProvisionDirectRequest struct {
 	HashedPasswordSeed    string
 	Plan                  string
 	BillingSubscriptionID string
+	// Terms is the owner's terms-of-service acceptance (required).
+	Terms *domain.TermsAcceptance
 }
 
 // ProvisionDirectResult is the RP-2 response body (§5.2).
@@ -511,6 +543,12 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 		return replayOrConflict[ProvisionDirectResult](existing)
 	}
 	defer func() { metrics.ProvisionTotal.WithLabelValues("direct", outcome(err)).Inc() }()
+
+	// After the replay check, as in RP-1.
+	if err := req.Terms.Validate(time.Now()); err != nil {
+		s.failIdempotency(ctx, idempotencyKey)
+		return nil, err
+	}
 
 	// Guard: reject re-provisioning an offboarded or removed tenant before
 	// touching Keycloak (RP-2, §8.2, ErrTenantOffboarded).
@@ -578,6 +616,9 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 			KeycloakShard: &shard, Status: domain.RealmStatusActive, ConvertedAt: nowPtr(),
 			ServiceAccountPrincipalID: &principalID, ServiceAccountKeycloakClientID: &automationClientID,
 		}); err != nil {
+			return err
+		}
+		if err := s.enqueueTermsAccepted(ctx, req.TenantID, kcUserID, req.Terms, domain.SignupTypeDirectPaid, req.Plan); err != nil {
 			return err
 		}
 		pub, ok := port.EventPublisherFromContext(ctx)

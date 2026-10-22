@@ -20,6 +20,8 @@ type provisionDirectBody struct {
 	AdminEmail string    `json:"admin_email"`
 	AdminName  string    `json:"admin_name"`
 	Plan       string    `json:"plan"`
+
+	TermsAcceptance *termsBody `json:"terms_acceptance,omitempty"`
 }
 
 type configureIdpBody struct {
@@ -39,7 +41,7 @@ func provisionDedicatedTenant(t *testing.T) (tenantID uuid.UUID, realmName strin
 	slug := "e2e-idp-" + uuid.NewString()[:8]
 	req := provisionDirectBody{
 		TenantID: tenantID, TenantName: "E2E IdP Co", TenantSlug: slug,
-		AdminEmail: slug + "@example.com", AdminName: "Direct Admin", Plan: "pro",
+		AdminEmail: slug + "@example.com", AdminName: "Direct Admin", Plan: "pro", TermsAcceptance: e2eTerms(),
 	}
 	var result service.ProvisionDirectResult
 	resp := doJSON(t, http.MethodPost, "/api/v1/internal/tenants/provision-direct",

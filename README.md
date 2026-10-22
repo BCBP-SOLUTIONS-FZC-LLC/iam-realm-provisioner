@@ -52,8 +52,8 @@ Every mutating endpoint below marked "required" enforces `RequireIdempotencyKey`
 
 | # | Method & Path | Idempotency-Key | Purpose |
 |---|---|---|---|
-| RP-1 | `POST /tenants/provision-trial` | required | Create a trial user in the shared `trial` realm, stamp `tenant_id`, trigger `VERIFY_EMAIL`. `plan` ∈ `starter`\|`pro`\|`enterprise`. Emits `TenantIdentityProvisioned`. |
-| RP-2 | `POST /tenants/provision-direct` | required | Provision a **dedicated** realm straight away: create realm from template, register OIDC clients, create admin user. Emits `TenantIdentityProvisioned` + `TenantRealmReady` + `DirectPaidSignup` + `TenantConverted{direct_signup:true}`. |
+| RP-1 | `POST /tenants/provision-trial` | required | Create a trial user in the shared `trial` realm, stamp `tenant_id`, trigger `VERIFY_EMAIL`. `plan` ∈ `starter`\|`pro`\|`enterprise`. Requires `terms_acceptance` (see §3 below). Emits `TenantIdentityProvisioned`. |
+| RP-2 | `POST /tenants/provision-direct` | required | Provision a **dedicated** realm straight away: create realm from template, register OIDC clients, create admin user. Requires `terms_acceptance`. Emits `TenantIdentityProvisioned` + `TenantRealmReady` + `DirectPaidSignup` + `TenantConverted{direct_signup:true}`. |
 | RP-3 | `POST /tenants/:id/convert` | required | Trial → dedicated conversion: create dedicated realm, migrate every trial user (`sub`-preserving, TOTP copied, WebAuthn re-enrollment flagged), force-logout the shared realm. Emits `TenantRealmReady` + `TenantConverted{direct_signup:false}`. |
 | RP-4 | `POST /tenants/:id/revert-conversion` | required | Undo Convert within the 7-day reversal window: migrate users back, tear down the dedicated realm, and re-mint the tenant's `platform-automation` client back in the shared realm (§2.5 — the dedicated realm's client died with the realm). `409 revert_window_expired` past the window. Emits `TrialReactivated`. Named callers: Billing (on fraud/chargeback dispute, CD-10). |
 | RP-5 | `POST /tenants/:id/users` | required | Create an invited user in the tenant's current realm with `required_actions` applied verbatim. No local persistence. |
@@ -245,6 +245,19 @@ req.Header.Set("x-tenant-roles", "iam-system")
 
 Signup calls RP-1 (`provision-trial`) for a self-serve trial signup, or RP-2 (`provision-direct`) for a direct-paid signup that skips the shared realm entirely. Both are Keycloak-effect-first: a `502 keycloak_unavailable` means no local row was written — retry with the **same** `Idempotency-Key`, never a fresh one, so the retry replays cleanly once Keycloak recovers.
 
+Both require the tenant owner's terms-of-service acceptance (LLD v1.41, Signup BFF open gap A-4). The BFF stamps `accepted_at` when it validates the signup form and passes the end user's IP address and user agent:
+
+```json
+"terms_acceptance": {
+  "version": "2026-09",                     // 1-32 chars of [A-Za-z0-9._-]
+  "accepted_at": "2026-10-22T09:12:04Z",    // RFC 3339, within [now-24h, now+10m]
+  "ip_address": "203.0.113.7",              // IPv4 or IPv6
+  "user_agent": "Mozilla/5.0 (…)"           // 1-512 bytes, no control characters
+}
+```
+
+Missing or invalid → `400 INVALID_REQUEST`. RP-1/RP-2 record it as an Audit Log `legal.terms.accepted` entry (`compliance_7y`: kept 7 years, through a GDPR erasure), enqueued in `pending_audit_entries` in the same transaction as `tenant_realms` and delivered to AL-5. It is recorded **once per owner per terms version** (key `TermsAccepted:<tenant_id>:<owner sub>:<version>`): a replay, a resume after a `user_email_conflict`, or a retry with a new key — even with a different `accepted_at` — keeps the first. IP address and user agent never go on an event. Invited users (RP-5) accept nothing.
+
 ### 4. Billing — RP-3 / RP-4 / reactivate
 
 Billing drives conversion, reversal, and (non-operator-sourced) reactivation over mesh calls, not events: RP-3 `convert`, RP-4 `revert-conversion`, RP-10 `reactivate`. Billing also **produces** `TenantReactivated` on its own `billing.events` topic, consumed by `billing-realm-q` — a re-enable of a suspended dedicated realm — which is a different topic/producer from this service's own `TenantReactivated` (`source=operator`) on `iam.tenant.events`; the two are distinguished by `source`, never self-consumed.
@@ -360,9 +373,9 @@ Seven CronJobs, one Helm manifest (`deploy/helm/templates/cronjobs.yaml`), each 
 | CronJob (`--job=`) | Schedule | Purpose |
 |---|---|---|
 | `trial-expiry` | `0 2 * * *` | RP-C1: sweep `tenant_realms WHERE strategy='shared' AND status='active' AND trial_ends_at < now()` — **never queries O&M**. Calls RP-12's idempotent effect per tenant. |
-| `trial-hard-delete` | `0 3 * * *` | RP-C2: past `TRIAL_GRACE_DAYS` beyond expiry, hard-delete trial users and the `platform-automation-<tenant_id>` client from Keycloak and scrub the local row. Also atomically deletes `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`, and `pending_audit_entries` via `NewGDPRScrubFn` (`gdpr.go`, BYPASSRLS sysPool tx). |
+| `trial-hard-delete` | `0 3 * * *` | RP-C2: past `TRIAL_GRACE_DAYS` beyond expiry, hard-delete trial users and the `platform-automation-<tenant_id>` client from Keycloak and scrub the local row. Also atomically deletes `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, and `provisioning_operations` via `NewGDPRScrubFn` (never `pending_audit_entries`: undelivered audit records, LLD v1.41) (`gdpr.go`, BYPASSRLS sysPool tx). |
 | `orphaned-signup-reap` | `17 * * * *` | §8.7 (Signup BFF gap A-3): reap RP-1 signups O&M never created a tenant for — `strategy='shared' AND status='active' AND trial_ends_at IS NULL` (no `TrialStarted`), every other lifecycle column NULL, older than `ORPHAN_SIGNUP_AFTER` (48h). Re-checks the row `FOR UPDATE`, hard-deletes the shared-realm users and automation client, revokes the Token Service principal (TS-7), then scrubs PII + soft-deletes the row exactly like RP-C2. No event. |
-| `subscription-lapse` | `0 2 * * *` | RP-C3: `cancelled → suspended → offboarded`, in two phases — suspend polls O&M's I-16 lapse list (skipped with WARN if `ORG_MEMBERSHIP_BASE_URL` unset) and suspends at `cancelled_at + CANCELLED_GRACE_DAYS` (30 days); offboard always runs at `suspended_at + RETENTION_DAYS` (60 days), i.e. 90 days total from `cancelled_at`, and after deleting the Keycloak realm calls `NewGDPRScrubFn` to atomically delete the same five PII tables (`keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`, `pending_audit_entries`) — hard-fails and never emits `TenantOffboarded` if `GDPRScrubFn` is nil. Operator suspensions (`suspension_source='operator'`) are never auto-offboarded (CD-23). |
+| `subscription-lapse` | `0 2 * * *` | RP-C3: `cancelled → suspended → offboarded`, in two phases — suspend polls O&M's I-16 lapse list (skipped with WARN if `ORG_MEMBERSHIP_BASE_URL` unset) and suspends at `cancelled_at + CANCELLED_GRACE_DAYS` (30 days); offboard always runs at `suspended_at + RETENTION_DAYS` (60 days), i.e. 90 days total from `cancelled_at`, and after deleting the Keycloak realm calls `NewGDPRScrubFn` to atomically delete the same four PII tables (`keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`; never `pending_audit_entries` — undelivered audit records, LLD v1.41) — hard-fails and never emits `TenantOffboarded` if `GDPRScrubFn` is nil. Operator suspensions (`suspension_source='operator'`) are never auto-offboarded (CD-23). |
 | `realm-config-reconcile` | `*/10 * * * *` | RP-C4: retries every `realm_config_reconciliations` row in `status='pending'`; a row past `RECONCILER_MAX_ATTEMPTS` (default 20) moves to a terminal `failed` status instead of retrying forever (poison-pill cap). |
 | `outbox-prune` | `0 4 * * *` | Prunes published `outbox_events` past `OUTBOX_RETENTION_DAYS`. |
 | `processed-events-prune` | `30 4 * * *` | Prunes `processed_events` rows past `PROCESSED_EVENTS_TTL_DAYS`. |
@@ -912,7 +925,7 @@ This service sits on **no synchronous request-path dependency for any other serv
 | MFA reset (O&M → RP-9) | Keycloak Admin API | fail-closed | `502` → O&M `503`; no `MFAReset` — no reconciler |
 | Realm-config (O&M → RP-8) | Keycloak Admin API | fail-open + durable reconcile | `pending` row, RP-C4 converges (RP-INV-6) |
 | RP-6 / RP-7 IdP | OpenBao KV + Keycloak | fail-closed | No partial `keycloak_idp_configs` row |
-| RP-6 / RP-7 IdP audit entry | Audit Log AL-5 direct-write (`POST /api/v1/internal/audit-entries`) | async, retried from `pending_audit_entries` | Rows accumulate if `AUDIT_LOG_BASE_URL` unset (WARN, drainer off); 429/5xx → backoff retry; other 4xx (`metadata_too_large` is guarded at 8192 bytes before send) → `failed` (permanent park) |
+| RP-6 / RP-7 IdP audit entry; RP-1 / RP-2 `TermsAccepted` | Audit Log AL-5 direct-write (`POST /api/v1/internal/audit-entries`) | async, retried from `pending_audit_entries` | Rows accumulate if `AUDIT_LOG_BASE_URL` unset (WARN, drainer off); 429/5xx → backoff retry; 422 `UNKNOWN_ENTRY_TYPE` (Audit Log older than rev 0.31) → kept pending, retried with no budget; other 4xx (`metadata_too_large` is guarded at 8192 bytes before send) → `failed` (permanent park) |
 | Offboarding export | S3 | fail-closed | Tenant stays `suspended`; `realm_export_total{result="fail"}` is critical |
 | Outbox publish | SNS | retried, then DLQ | Local commit already happened — delay, not loss |
 | RP-C3 suspend phase | O&M's I-16 (`SubscriptionLapseReader`) | fail-open, degrade to WARN | Skips the suspend phase only if `ORG_MEMBERSHIP_BASE_URL` is unset; offboard phase still runs unconditionally |
@@ -950,7 +963,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, extending the serv
 | [`.claude/request-flows.md`](.claude/request-flows.md) | Keycloak-effect-first discipline, compensating teardown, every RP-*/RP-C* flow, idempotency mechanics, GDPR/data-lifecycle |
 | [`.claude/operations.md`](.claude/operations.md) | Security, observability, configuration, CI/CD, testing, GDPR, integration points, open items |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Detailed architecture narrative with Mermaid diagrams — layer model, write flow, RLS/GUC flow, threat model |
-| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD, v1.23 Approved — §15 GDPR scrub (five-table erasure via `NewGDPRScrubFn`), §17 error taxonomy (incl. `credential_replay_expired` TS-D22), §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
+| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD, v1.23 Approved — §15 GDPR scrub (four-table erasure via `NewGDPRScrubFn`), §17 error taxonomy (incl. `credential_replay_expired` TS-D22), §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
 | [`docs/runbook.md`](docs/runbook.md) | Full operator procedures for the headline incident scenarios |
 | [`docs/observability/`](docs/observability/README.md) | Observability Standard implementation, generated metric inventory, metric migration history, per-alert runbooks |
 
