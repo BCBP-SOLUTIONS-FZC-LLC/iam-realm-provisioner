@@ -8,6 +8,7 @@ This service has never been deployed to any environment — there is no released
 
 ### Security
 
+- **The `gateway` namespace no longer reaches this service (LLD v1.36, 2026-10-22; Signup BFF open gap A-2, option A).** `gateway` stayed in `existingCallerNamespaces` after the Signup BFF moved to `bff`, and the NetworkPolicy ingress-controller rule rendered unconditionally, so every pod in `gateway` had unrestricted access to every RP route — although this service has no route behind the Envoy Gateway (`ingress.enabled: false`; all API routes are `/api/v1/internal/*`). `gateway` is removed from dev/staging/prod; the ingress-controller rule renders only with `ingress.enabled`, and the chart fails if ingress is enabled without that namespace in `existingCallerNamespaces`.
 - **Signup BFF admitted per pod, RP-1/RP-2 only (LLD v1.35, 2026-10-22; Signup BFF BFF-1, open gap A-1 option B).** The BFF was admitted by namespace — the whole `gateway` namespace, via `additionalIngressRules` and `existingCallerNamespaces` — although it runs in `bff`. New Helm `signupBffCaller` (default enabled): NetworkPolicy admits only `bff`-namespace pods matching `podSelector` (default `app.kubernetes.io/name: bff-signup`; an empty selector fails the render), and the Istio AuthorizationPolicy admits only `cluster.local/ns/bff/sa/bff-signup` on exact `POST …/tenants/provision-trial` and `…/provision-direct`. The `gateway` BFF rules are removed from dev/staging/prod; `gateway` stays admitted for the Envoy Gateway proxy.
 
 ### Fixed

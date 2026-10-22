@@ -14,8 +14,11 @@ spec:
     - Egress
 
   ingress:
-    # Allow public API traffic (RP-1..RP-16) from the ingress controller /
-    # gateway namespace.
+    # Ingress-controller (gateway) namespace — ONLY when this service has a
+    # route behind the gateway (ingress.enabled). Every API route is
+    # /api/v1/internal/*, which the public gateway never routes, so by default
+    # the gateway namespace gets no access (BFF open gap A-2).
+    {{- if .Values.ingress.enabled }}
     - from:
         - namespaceSelector:
             matchLabels:
@@ -28,6 +31,7 @@ spec:
       ports:
         - port: {{ .Values.service.port }}
           protocol: TCP
+    {{- end }}
 
     # Allow same-namespace, mesh-internal traffic on the "http" port (e.g.
     # any internal caller reaching this service directly rather than
