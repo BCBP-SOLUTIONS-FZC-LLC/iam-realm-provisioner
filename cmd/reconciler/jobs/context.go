@@ -1,5 +1,6 @@
 // Package jobs holds the concrete reconciler bodies for the RP-C1..RP-C4
-// CronJobs (§8.7/§8.9/§8.10) plus the outbox/processed_events prune jobs.
+// CronJobs (§8.7/§8.9/§8.10), orphaned-signup-reap (§8.7), plus the
+// outbox/processed_events/ledger prune jobs.
 // Every job is package-visible so cmd/reconciler's dispatcher can wire it
 // into the --job registry without touching implementation details.
 package jobs
@@ -7,6 +8,7 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -56,6 +58,11 @@ type Context struct {
 	ProvisioningOperationsTTLDays int
 	RLSViolationLogTTLDays        int
 	MaxReconciliationAttempts     int
+	// OrphanSignupAfter is ORPHAN_SIGNUP_AFTER: the age past which
+	// orphaned-signup-reap treats a shared-realm row that never received
+	// TrialStarted as an abandoned signup (default 48h, floor
+	// MinOrphanSignupAfter).
+	OrphanSignupAfter time.Duration
 }
 
 // Result summarizes a reconciler run.

@@ -80,6 +80,7 @@ func exerciseEveryCollector() {
 	RealmConfigPendingGauge.Set(0)
 	TrialExpiryProcessedTotal.Add(0)
 	TrialExpiryDeferredTotal.Add(0)
+	OrphanedSignupReapTotal.WithLabelValues("reaped").Add(0)
 	LapseProcessedTotal.WithLabelValues("suspend").Add(0)
 	RealmExportTotal.WithLabelValues("success").Add(0)
 	UserDeleteTotal.WithLabelValues("success").Add(0)

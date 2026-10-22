@@ -62,11 +62,49 @@ func TestRun_UnknownJob_Returns1(t *testing.T) {
 	assert.Equal(t, 1, *exitCode)
 }
 
+// An invalid ORPHAN_SIGNUP_AFTER aborts orphaned-signup-reap before any
+// connection is opened: the job is destructive, so no silent fallback.
+func TestRun_OrphanedSignupReap_InvalidAfter_Returns1(t *testing.T) {
+	for _, raw := range []string{"48", "-1h", "30m"} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv("ORPHAN_SIGNUP_AFTER", raw)
+			resetFlags(t, "reconciler", "--job=orphaned-signup-reap")
+			exitCode := stubExit(t)
+
+			got := run()
+
+			assert.Equal(t, 1, got)
+			assert.Equal(t, 1, *exitCode)
+		})
+	}
+}
+
+func TestParseOrphanSignupAfter(t *testing.T) {
+	d, err := parseOrphanSignupAfter("")
+	require.NoError(t, err)
+	assert.Equal(t, 48*time.Hour, d, "unset means the 48h default")
+
+	d, err = parseOrphanSignupAfter("72h")
+	require.NoError(t, err)
+	assert.Equal(t, 72*time.Hour, d)
+
+	d, err = parseOrphanSignupAfter("1h")
+	require.NoError(t, err)
+	assert.Equal(t, time.Hour, d, "the floor itself is allowed")
+
+	for _, raw := range []string{"48", "two days", "59m", "0s", "-48h"} {
+		d, err = parseOrphanSignupAfter(raw)
+		require.Error(t, err, raw)
+		assert.Equal(t, 48*time.Hour, d, "%s: the default is still returned for jobs that ignore the setting", raw)
+	}
+}
+
 func TestRegistryNames(t *testing.T) {
 	names := registryNames()
 	assert.Len(t, names, len(registry))
 	assert.Contains(t, names, "trial-expiry")
 	assert.Contains(t, names, "outbox-prune")
+	assert.Contains(t, names, "orphaned-signup-reap")
 }
 
 func TestEnvOr(t *testing.T) {

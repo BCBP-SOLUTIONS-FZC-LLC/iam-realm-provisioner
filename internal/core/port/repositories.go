@@ -27,6 +27,12 @@ type TenantRealmRepository interface {
 	// this service is the single writer, so the count is authoritative
 	// without re-querying Keycloak).
 	CountsByShard(ctx context.Context) (map[string]int, error)
+	// IsTombstoned reports whether tenantID's tenant_realms row exists but
+	// is soft-deleted (deleted_at set — trial-hard-delete, orphaned-signup-
+	// reap, offboarding). FindByTenantID hides such a row, so this is how a
+	// consumer tells "this tenant was erased, drop the event" from "the row
+	// does not exist yet, retry".
+	IsTombstoned(ctx context.Context, tenantID uuid.UUID) (bool, error)
 }
 
 // IdpConfigRepository persists `keycloak_idp_configs` (§4.3).

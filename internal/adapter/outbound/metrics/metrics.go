@@ -80,6 +80,10 @@ var (
 	// TrialExpiryDeferredTotal counts RP-C1 trial-expiry rows deferred.
 	TrialExpiryDeferredTotal prometheus.Counter
 
+	// OrphanedSignupReapTotal counts orphaned-signup-reap per-tenant
+	// outcomes by result (reaped|skipped|deferred).
+	OrphanedSignupReapTotal *prometheus.CounterVec
+
 	// LapseProcessedTotal counts RP-C3 lapse-sweep transitions by kind.
 	LapseProcessedTotal *prometheus.CounterVec
 
@@ -285,6 +289,12 @@ func registerMetrics() {
 		ConstLabels: labels,
 	})
 
+	OrphanedSignupReapTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        prefix + "orphaned_signup_reap_total",
+		Help:        "orphaned-signup-reap per-tenant outcomes: signups that never received TrialStarted, by result (reaped|skipped|deferred).",
+		ConstLabels: labels,
+	}, []string{"result"})
+
 	LapseProcessedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name:        prefix + "lapse_processed_total",
 		Help:        "RP-C3 lapse-sweep transitions by kind (suspend|offboard).",
@@ -387,6 +397,7 @@ func registerMetrics() {
 		RealmConfigPendingGauge,
 		TrialExpiryProcessedTotal,
 		TrialExpiryDeferredTotal,
+		OrphanedSignupReapTotal,
 		LapseProcessedTotal,
 		RealmExportTotal,
 		UserDeleteTotal,

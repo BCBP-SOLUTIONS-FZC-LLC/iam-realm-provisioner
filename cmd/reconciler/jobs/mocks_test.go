@@ -176,6 +176,7 @@ type mockTenantRealmRepository struct {
 	ListExpiredTrialsFn          func(ctx context.Context, limit int) ([]*domain.TenantRealm, error)
 	ListSuspendedPastRetentionFn func(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error)
 	CountsByShardFn              func(ctx context.Context) (map[string]int, error)
+	IsTombstonedFn               func(ctx context.Context, tenantID uuid.UUID) (bool, error)
 }
 
 var _ port.TenantRealmRepository = (*mockTenantRealmRepository)(nil)
@@ -200,6 +201,9 @@ func (m *mockTenantRealmRepository) ListSuspendedPastRetention(ctx context.Conte
 }
 func (m *mockTenantRealmRepository) CountsByShard(ctx context.Context) (map[string]int, error) {
 	return m.CountsByShardFn(ctx)
+}
+func (m *mockTenantRealmRepository) IsTombstoned(ctx context.Context, tenantID uuid.UUID) (bool, error) {
+	return m.IsTombstonedFn(ctx, tenantID)
 }
 
 // ── mockReconciliationRepository ──────────────────────────────────────────

@@ -67,6 +67,28 @@ func TestTenantRealmRepository(t *testing.T) {
 		assert.Nil(t, got.DeletedAt)
 	})
 
+	t.Run("IsTombstoned_OnlyForSoftDeletedRows", func(t *testing.T) {
+		// tenant_consumer drops a TrialStarted for an erased tenant
+		// (orphaned-signup-reap, §8.7) — it must tell a tombstone apart from
+		// a live row and from no row at all, under the tenant's own GUC.
+		t.Parallel()
+		live, erased, absent := uuid.New(), uuid.New(), uuid.New()
+		require.NoError(t, repo.Upsert(withTenant(ctx, live), newSharedTrial(live)))
+		require.NoError(t, repo.Upsert(withTenant(ctx, erased), newSharedTrial(erased)))
+		_, err := rawPool.Exec(ctx, `UPDATE tenant_realms SET status = 'deleted', deleted_at = now() WHERE tenant_id = $1`, erased)
+		require.NoError(t, err)
+
+		for id, want := range map[uuid.UUID]bool{live: false, erased: true, absent: false} {
+			got, err := repo.IsTombstoned(withTenant(ctx, id), id)
+			require.NoError(t, err)
+			assert.Equal(t, want, got, "tenant %s", id)
+		}
+		_, err = repo.FindByTenantID(withTenant(ctx, erased), erased)
+		var de *domain.Error
+		require.ErrorAs(t, err, &de, "FindByTenantID hides the tombstone")
+		assert.Equal(t, domain.ErrTenantRealmNotFound, de.Code)
+	})
+
 	t.Run("Upsert_ServiceAccountColumnsRoundTrip", func(t *testing.T) {
 		// §2.5/RP-17: service_account_principal_id/keycloak_client_id are
 		// nil until minted, then round-trip through Upsert/Update like any

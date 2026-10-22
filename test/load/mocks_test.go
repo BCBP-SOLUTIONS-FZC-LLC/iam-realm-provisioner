@@ -81,6 +81,13 @@ func (m *loadTenantRealmRepository) ListSuspendedPastRetention(_ context.Context
 	return nil, nil
 }
 
+func (m *loadTenantRealmRepository) IsTombstoned(_ context.Context, tenantID uuid.UUID) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.rows[tenantID]
+	return ok && r.DeletedAt != nil, nil
+}
+
 func (m *loadTenantRealmRepository) CountsByShard(_ context.Context) (map[string]int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -42,8 +42,8 @@ metric_status: proposed. Every series: {domain=iam, service=iam-realm-provisione
         db2["SlowQueryTracer — WARN log > SlowQueryThreshold"]
     end
 
-    subgraph cron["cmd/reconciler — 7 CronJobs"]
-        c1["trial-expiry · trial-hard-delete · subscription-lapse\nrealm-config-reconcile · outbox-prune · processed-events-prune · ledger-prune\nmetrics pushed to the Pushgateway, grouped by cronjob"]
+    subgraph cron["cmd/reconciler — 8 CronJobs"]
+        c1["trial-expiry · trial-hard-delete · orphaned-signup-reap · subscription-lapse\nrealm-config-reconcile · outbox-prune · processed-events-prune · ledger-prune\nmetrics pushed to the Pushgateway, grouped by cronjob"]
     end
 
     subgraph alerts["Alert routing (deploy/monitoring/app-alerts.yml)"]

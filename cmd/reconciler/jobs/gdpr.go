@@ -10,8 +10,9 @@ import (
 // gdprScrubQueries is the single authoritative list of tenant-scoped tables
 // whose rows must be deleted on hard-delete and offboarding (§15.2/GDPR).
 // Add a DELETE here whenever a new RLS-scoped table that holds PII is
-// introduced — both RP-C1 (trial-hard-delete) and RP-C3 (subscription-lapse
-// offboard) call scrubTenantPII, so one update covers both erasure paths.
+// introduced — RP-C2 (trial-hard-delete), orphaned-signup-reap (both via
+// scrubAndTombstoneTenantRealm) and RP-C3 (subscription-lapse offboard) call
+// scrubTenantPII, so one update covers every erasure path.
 var gdprScrubQueries = []string{
 	`DELETE FROM keycloak_idp_configs            WHERE tenant_id = $1`,
 	`DELETE FROM keycloak_idp_config_validations WHERE tenant_id = $1`,

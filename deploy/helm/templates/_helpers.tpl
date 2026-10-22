@@ -66,7 +66,7 @@ Create the name of the service account to use.
 {{/*
 Image tag: prefer .Values.image.tag; fall back to chart appVersion. One
 image carries both binaries (server + reconciler) — the Deployment and all
-six CronJobs share this same tag.
+eight CronJobs share this same tag.
 */}}
 {{- define "iam-realm-provisioner.imageTag" -}}
 {{- .Values.image.tag | default .Chart.AppVersion }}

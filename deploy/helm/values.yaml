@@ -4,8 +4,9 @@
 # serves the HTTP API (RP-1..RP-16) AND runs the three inbound SQS
 # consumers (membership-realm-q, tenant-realm-q, billing-realm-q) plus the
 # transactional-outbox Runner in-process — same "one process, several
-# responsibilities" pattern as the sibling IAM services. Six CronJobs
-# (RP-C1..RP-C4 plus outbox-prune/processed-events-prune, §8.7-8.10) run
+# responsibilities" pattern as the sibling IAM services. Eight CronJobs
+# (RP-C1..RP-C4, orphaned-signup-reap, plus outbox-prune/
+# processed-events-prune/ledger-prune, §8.7-8.10, §15) run
 # from the SAME image (it carries both binaries — see the repo-root
 # Dockerfile), each overriding `command` to invoke
 # /iam-realm-provisioner-reconciler --job=<name> (see templates/cronjobs.yaml,
@@ -207,6 +208,11 @@ env:
   RECONCILER_BATCH_LIMIT: "100"
   RECONCILER_TIMEOUT: "5m"
   RECONCILER_MAX_ATTEMPTS: "20"      # RP-C4 poison-pill cap (§8.10)
+  # orphaned-signup-reap (§8.7, Signup BFF gap A-3): a shared-realm signup
+  # that never received O&M's TrialStarted is reaped (Keycloak users
+  # hard-deleted, row scrubbed) once older than this. Go duration, floor 1h;
+  # an invalid value aborts that job rather than falling back.
+  ORPHAN_SIGNUP_AFTER: "48h"
   # Idempotency ledger: an in_progress key older than this is reclaimed by
   # the next retry (a crashed or SIGKILLed execution). Must exceed
   # CONVERT_TIMEOUT.
@@ -560,6 +566,27 @@ cronjobs:
     enabled: true
     schedule: "0 3 * * *"        # RP-C2 (§8.7)
     jobName: trial-hard-delete
+    concurrencyPolicy: Forbid
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    # Must exceed RECONCILER_TIMEOUT (5m/300s) — same reasoning as trialExpiry above.
+    activeDeadlineSeconds: 360
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+  # orphaned-signup-reap (§8.7, Signup BFF gap A-3): RP-1 signups O&M
+  # never created a tenant for (no TrialStarted, older than
+  # ORPHAN_SIGNUP_AFTER) — hard-delete their shared-realm users and scrub
+  # the row so the email can sign up again. Hourly, off the hour so it
+  # never coincides with the daily lifecycle crons.
+  orphanedSignupReap:
+    enabled: true
+    schedule: "17 * * * *"       # chart's own choice — not LLD-pinned
+    jobName: orphaned-signup-reap
     concurrencyPolicy: Forbid
     successfulJobsHistoryLimit: 3
     failedJobsHistoryLimit: 3
