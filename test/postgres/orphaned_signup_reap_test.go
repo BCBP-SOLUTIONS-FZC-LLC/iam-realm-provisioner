@@ -56,6 +56,8 @@ func seedSignupRow(t testing.TB, ctx context.Context, rawPool *dbseed.Pool, tena
 		INSERT INTO provisioning_operations (idempotency_key, tenant_id, operation, status, result)
 		VALUES ($1, $2, 'provision_trial', 'succeeded', '{"admin_email":"a@example.com"}')`, "rp1:"+tenantID.String(), tenantID)
 	require.NoError(t, err)
+	// The owner's TermsAccepted, still undelivered: the reap must keep it.
+	seedPendingTermsAudit(t, ctx, rawPool, tenantID)
 }
 
 func realmStatus(t testing.TB, ctx context.Context, rawPool *dbseed.Pool, tenantID uuid.UUID) (string, bool) {

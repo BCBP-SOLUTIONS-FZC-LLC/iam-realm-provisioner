@@ -286,7 +286,7 @@ func runE2ESuite(m *testing.M) (int, error) {
 	idempotencyRepo := pgadapter.NewIdempotencyRepository(appPool)
 
 	provisioningSvc := service.NewProvisioningService(
-		tenantRealmRepo, idempotencyRepo, kcAdmin, fakeTokenService{}, txRunner, sharedRealm, nil,
+		tenantRealmRepo, idempotencyRepo, kcAdmin, fakeTokenService{}, txRunner, pgadapter.NewPendingAuditEntryRepository(appPool), sharedRealm, nil,
 	).WithLogger(noopLogger{})
 	lifecycleSvc := service.NewLifecycleService(
 		tenantRealmRepo, idempotencyRepo, kcAdmin, txRunner, sharedRealm,

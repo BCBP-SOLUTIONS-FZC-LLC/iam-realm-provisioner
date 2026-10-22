@@ -531,6 +531,9 @@ func wirePlatformAutomationHappyPath(kc *mockKeycloakAdmin) *mockTokenServiceCli
 type mockPendingAuditEntryRepository struct {
 	Enqueued   []domain.AuditEntry
 	EnqueueErr error
+	// EnqueuedKeys records EnqueueOnce keys; a repeated key is a no-op,
+	// exactly like the ON CONFLICT (idempotency_key) DO NOTHING insert.
+	EnqueuedKeys []string
 
 	Due            []*domain.PendingAuditEntry
 	ClaimErr       error
@@ -548,6 +551,20 @@ func (m *mockPendingAuditEntryRepository) Enqueue(ctx context.Context, entry dom
 	if m.EnqueueErr != nil {
 		return m.EnqueueErr
 	}
+	m.Enqueued = append(m.Enqueued, entry)
+	return nil
+}
+
+func (m *mockPendingAuditEntryRepository) EnqueueOnce(ctx context.Context, key string, entry domain.AuditEntry) error {
+	if m.EnqueueErr != nil {
+		return m.EnqueueErr
+	}
+	for _, k := range m.EnqueuedKeys {
+		if k == key {
+			return nil
+		}
+	}
+	m.EnqueuedKeys = append(m.EnqueuedKeys, key)
 	m.Enqueued = append(m.Enqueued, entry)
 	return nil
 }

@@ -26,7 +26,7 @@ func TestProvisionTrial_IdempotencyKeyReplay_NoDuplicateKeycloakUser(t *testing.
 	slug := "e2e-idem-" + uuid.NewString()[:8]
 	req := provisionTrialBody{
 		TenantID: tenantID, TenantName: "E2E Idempotency Co", TenantSlug: slug,
-		AdminEmail: slug + "@example.com", AdminName: "Idem Admin", Plan: "starter",
+		AdminEmail: slug + "@example.com", AdminName: "Idem Admin", Plan: "starter", TermsAcceptance: e2eTerms(),
 	}
 	key := newIdempotencyKey()
 	headers := sysHeaders(tenantID)
@@ -54,6 +54,20 @@ func TestProvisionTrial_IdempotencyKeyReplay_NoDuplicateKeycloakUser(t *testing.
 	err = rawPG.QueryRow(ctx, `SELECT count(*) FROM tenant_realms WHERE tenant_id = $1`, tenantID).Scan(&rowCount)
 	require.NoError(t, err)
 	require.Equal(t, 1, rowCount, "a replayed request must not create a second tenant_realms row")
+
+	// Exactly one TermsAccepted audit entry queued, under the deterministic
+	// key (A-4) — the replay enqueued nothing.
+	var keys []string
+	rows, err := rawPG.Query(ctx, `SELECT idempotency_key FROM pending_audit_entries WHERE tenant_id = $1`, tenantID)
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var k string
+		require.NoError(t, rows.Scan(&k))
+		keys = append(keys, k)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []string{"TermsAccepted:" + tenantID.String() + ":" + first.KeycloakUserID.String() + ":2026-09"}, keys)
 }
 
 // TestProvisionTrial_MissingIdempotencyKey_Rejected confirms the §10.4/§9.2
@@ -67,7 +81,7 @@ func TestProvisionTrial_MissingIdempotencyKey_Rejected(t *testing.T) {
 	slug := "e2e-noidem-" + uuid.NewString()[:8]
 	req := provisionTrialBody{
 		TenantID: tenantID, TenantName: "E2E No-Idem Co", TenantSlug: slug,
-		AdminEmail: slug + "@example.com", AdminName: "No Idem Admin", Plan: "starter",
+		AdminEmail: slug + "@example.com", AdminName: "No Idem Admin", Plan: "starter", TermsAcceptance: e2eTerms(),
 	}
 	resp, er := decodeErrorBody(t, http.MethodPost, "/api/v1/internal/tenants/provision-trial", sysHeaders(tenantID), req)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)

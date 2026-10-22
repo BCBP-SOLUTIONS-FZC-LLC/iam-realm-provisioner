@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
@@ -113,4 +115,41 @@ func TestAuditDelivery_EmptyBacklog(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, n)
 	assert.Empty(t, client.Keys)
+}
+
+// A row with a deterministic key (TermsAccepted) is delivered under that
+// key, not its row id, so Audit Log dedupes a resumed signup's entry.
+func TestAuditDelivery_UsesDeterministicKeyWhenSet(t *testing.T) {
+	due := pendingEntries(1)
+	due[0].IdempotencyKey = "TermsAccepted:t:u:2026-09"
+	client := &mockAuditLogClient{}
+	repo := &mockPendingAuditEntryRepository{Due: due}
+	svc := service.NewAuditDeliveryService(repo, client)
+
+	n, err := svc.DrainOnce(context.Background(), 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	assert.Equal(t, []string{"TermsAccepted:t:u:2026-09"}, client.Keys)
+	assert.Equal(t, []uuid.UUID{due[0].ID}, repo.Delivered, "a delivered row is deleted — no IP/user agent lingers here")
+}
+
+// 422 UNKNOWN_ENTRY_TYPE (Audit Log not yet upgraded to know
+// legal.terms.accepted) keeps the row pending and retries it — never
+// parked, never dropped, even past the transient retry budget.
+func TestAuditDelivery_UnknownEntryType_KeptAndRetried(t *testing.T) {
+	due := pendingEntries(2)
+	due[1].Attempts = 500 // far past the budget: still retried
+	repo := &mockPendingAuditEntryRepository{Due: due}
+	unknown := fmt.Errorf("%w: AL-5 status 422", port.ErrAuditEntryTypeUnknown)
+	client := &mockAuditLogClient{Errs: []error{unknown, unknown}}
+	svc := service.NewAuditDeliveryService(repo, client).WithLogger(&mockLogger{})
+	before := testutil.ToFloat64(metrics.AuditEntryDeliveryTotal.WithLabelValues("unknown_entry_type"))
+
+	n, err := svc.DrainOnce(context.Background(), 10)
+	require.NoError(t, err)
+	assert.Zero(t, n)
+	assert.Equal(t, []uuid.UUID{due[0].ID, due[1].ID}, repo.Retried)
+	assert.Empty(t, repo.Failed, "an unknown entry type must never be parked as failed")
+	assert.Empty(t, repo.Delivered)
+	assert.Equal(t, before+2, testutil.ToFloat64(metrics.AuditEntryDeliveryTotal.WithLabelValues("unknown_entry_type")))
 }

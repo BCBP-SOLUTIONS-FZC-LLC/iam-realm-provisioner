@@ -25,8 +25,8 @@ iam-realm-provisioner/
 │       └── jobs/                       # RP-C1..RP-C4 + 3 operational prune jobs (7 total)
 │           ├── context.go              # jobs.Context dependency bag, jobs.Result, jobs.Func signature
 │           ├── trial_expiry.go         # RP-C1
-│           ├── trial_hard_delete.go    # RP-C2 — uses NewGDPRScrubFn to atomically delete keycloak_idp_configs, keycloak_idp_config_validations, realm_config_reconciliations, provisioning_operations, pending_audit_entries
-│           ├── subscription_lapse.go   # RP-C3 (suspend + offboard transitions) — offboard phase uses NewGDPRScrubFn for the same five-table PII erasure
+│           ├── trial_hard_delete.go    # RP-C2 — uses NewGDPRScrubFn to atomically delete keycloak_idp_configs, keycloak_idp_config_validations, realm_config_reconciliations, provisioning_operations (not pending_audit_entries, LLD v1.41)
+│           ├── subscription_lapse.go   # RP-C3 (suspend + offboard transitions) — offboard phase uses NewGDPRScrubFn for the same four-table PII erasure (not `pending_audit_entries`, LLD v1.41)
 │           ├── realm_config_reconcile.go # RP-C4
 │           ├── outbox_prune.go         # operational — outbox_events retention
 │           ├── processed_events_prune.go # operational — processed_events retention
@@ -41,7 +41,8 @@ iam-realm-provisioner/
 │   │   │   ├── idp_config.go           # IdpConfig, IdpConfigValidation
 │   │   │   ├── idp_validation.go       # §11.6 CheckOutcome/check-ID constants
 │   │   │   ├── provisioning_op.go      # ProvisioningOperation (idempotency ledger row), RealmConfigReconciliation
-│   │   │   ├── audit_entry.go          # AuditEntry / PendingAuditEntry — the AL-5 TenantIdpConfigChanged direct-write entry
+│   │   │   ├── audit_entry.go          # AuditEntry / PendingAuditEntry — the AL-5 TenantIdpConfigChanged / TermsAccepted direct-write entry
+│   │   │   ├── terms.go                # TermsAcceptance (RP-1/RP-2 terms_acceptance) + legal.terms.accepted AL-5 entry + deterministic key (LLD v1.41)
 │   │   │   ├── errors.go               # ErrorCode taxonomy (§17) + Error{Code,Message,Details}, Status() -> HTTP code
 │   │   │   └── event.go                # Source="iam-realm-provisioner", SystemActorID, the 9 produced + 6 consumed event-type constants, Event{} struct, every payload struct (§25)
 │   │   ├── port/                       # interfaces required by the core

@@ -2,11 +2,13 @@ package http
 
 import (
 	"net/http"
+	"time"
 	"unicode"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/gincommon"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/problem"
@@ -43,6 +45,40 @@ var _ Handlers = (*InternalHandler)(nil)
 
 // ── RP-1 ─────────────────────────────────────────────────────────────────
 
+// termsAcceptanceRequest is RP-1/RP-2's required terms_acceptance object:
+// the tenant owner's terms-of-service acceptance, which this service
+// records in Audit Log as legal.terms.accepted (compliance_7y). The BFF
+// stamps accepted_at when it validates the signup form. Every rule is
+// checked here, not by binding tags (validate tags only document the
+// contract in Swagger), so each failure is a 400 INVALID_REQUEST
+// (realmInvalidRequest): parseTermsAcceptance checks presence, version,
+// accepted_at format, IP address and user agent; the service then checks
+// the accepted_at window [now-24h, now+10m] after the idempotent-replay
+// check, so a completed key still replays.
+type termsAcceptanceRequest struct {
+	Version    string `json:"version" validate:"required" example:"2026-09" minLength:"1" maxLength:"32"`
+	AcceptedAt string `json:"accepted_at" validate:"required" example:"2026-10-22T09:12:04Z" format:"date-time"`
+	IPAddress  string `json:"ip_address" validate:"required" example:"203.0.113.7"`
+	UserAgent  string `json:"user_agent" validate:"required" example:"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6)" maxLength:"512"`
+}
+
+// parseTermsAcceptance converts and shape-checks terms_acceptance; a nil
+// result is always paired with an INVALID_REQUEST problem.
+func parseTermsAcceptance(t *termsAcceptanceRequest) (*domain.TermsAcceptance, error) {
+	if t == nil {
+		return nil, problem.NewError(realmInvalidRequest, "terms_acceptance is required")
+	}
+	acceptedAt, err := time.Parse(time.RFC3339Nano, t.AcceptedAt)
+	if err != nil {
+		return nil, problem.NewError(realmInvalidRequest, "terms_acceptance.accepted_at must be an RFC 3339 timestamp")
+	}
+	out := &domain.TermsAcceptance{Version: t.Version, AcceptedAt: acceptedAt, IPAddress: t.IPAddress, UserAgent: t.UserAgent}
+	if err := out.ValidateShape(); err != nil {
+		return nil, domainErrToProblem(err)
+	}
+	return out, nil
+}
+
 type provisionTrialRequest struct {
 	TenantID           uuid.UUID `json:"tenant_id" binding:"required"`
 	TenantName         string    `json:"tenant_name" binding:"required,max=256"`
@@ -51,12 +87,14 @@ type provisionTrialRequest struct {
 	AdminName          string    `json:"admin_name" binding:"required,max=256"`
 	HashedPasswordSeed string    `json:"hashed_password_seed" binding:"max=512"`
 	Plan               string    `json:"plan" binding:"required,max=32"`
+	// TermsAcceptance is required: the owner's terms acceptance (A-4).
+	TermsAcceptance *termsAcceptanceRequest `json:"terms_acceptance" validate:"required"`
 }
 
 // ProvisionTrial handles RP-1 (POST /tenants/provision-trial).
 //
 // @Summary      RP-1 — Provision trial realm
-// @Description  Creates a shared trial realm for a new tenant and seeds the admin user. Keycloak-effect-first: realm is created in Keycloak before the local row is committed. Idempotent on Idempotency-Key reuse: replays the stored result without re-provisioning.
+// @Description  Creates a shared trial realm for a new tenant and seeds the admin user. Keycloak-effect-first: realm is created in Keycloak before the local row is committed. Idempotent on Idempotency-Key reuse: replays the stored result without re-provisioning. Requires terms_acceptance (the owner's terms-of-service acceptance): recorded for Audit Log as legal.terms.accepted in the same transaction (one record per tenant, owner and version), never put on an event. accepted_at must lie within [now-24h, now+10m].
 // @Tags         Provisioning
 // @Accept       json
 // @Produce      json
@@ -90,10 +128,16 @@ func (h *InternalHandler) ProvisionTrial(c *gin.Context) {
 		gincommon.AbortWithProblem(c, problem.NewError(realmInvalidRequest, "plan must be one of: starter, pro, enterprise"))
 		return
 	}
+	terms, err := parseTermsAcceptance(req.TermsAcceptance)
+	if err != nil {
+		gincommon.AbortWithProblem(c, err)
+		return
+	}
 	result, err := h.Provisioning.ProvisionTrial(c.Request.Context(), idempotencyKey(c), service.ProvisionTrialRequest{
 		TenantID: req.TenantID, TenantName: req.TenantName, TenantSlug: req.TenantSlug,
 		AdminEmail: req.AdminEmail, AdminName: req.AdminName,
 		HashedPasswordSeed: req.HashedPasswordSeed, Plan: req.Plan,
+		Terms: terms,
 	})
 	if err != nil {
 		gincommon.AbortWithProblem(c, domainErrToProblem(err))
@@ -113,12 +157,14 @@ type provisionDirectRequest struct {
 	HashedPasswordSeed    string    `json:"hashed_password_seed" binding:"max=512"`
 	Plan                  string    `json:"plan" binding:"required,max=32"`
 	BillingSubscriptionID string    `json:"billing_subscription_id" binding:"max=128"`
+	// TermsAcceptance is required: the owner's terms acceptance (A-4).
+	TermsAcceptance *termsAcceptanceRequest `json:"terms_acceptance" validate:"required"`
 }
 
 // ProvisionDirect handles RP-2 (POST /tenants/provision-direct).
 //
 // @Summary      RP-2 — Provision dedicated paid realm
-// @Description  Creates a dedicated realm for a direct-paid tenant using least-loaded shard placement. Keycloak-effect-first. Idempotent on Idempotency-Key reuse.
+// @Description  Creates a dedicated realm for a direct-paid tenant using least-loaded shard placement. Keycloak-effect-first. Idempotent on Idempotency-Key reuse. Requires terms_acceptance, recorded for Audit Log as legal.terms.accepted exactly as in RP-1.
 // @Tags         Provisioning
 // @Accept       json
 // @Produce      json
@@ -152,11 +198,17 @@ func (h *InternalHandler) ProvisionDirect(c *gin.Context) {
 		gincommon.AbortWithProblem(c, problem.NewError(realmInvalidRequest, "plan must be one of: starter, pro, enterprise"))
 		return
 	}
+	terms, err := parseTermsAcceptance(req.TermsAcceptance)
+	if err != nil {
+		gincommon.AbortWithProblem(c, err)
+		return
+	}
 	result, err := h.Provisioning.ProvisionDirect(c.Request.Context(), idempotencyKey(c), service.ProvisionDirectRequest{
 		TenantID: req.TenantID, TenantName: req.TenantName, TenantSlug: req.TenantSlug,
 		AdminEmail: req.AdminEmail, AdminName: req.AdminName,
 		HashedPasswordSeed: req.HashedPasswordSeed, Plan: req.Plan,
 		BillingSubscriptionID: req.BillingSubscriptionID,
+		Terms:                 terms,
 	})
 	if err != nil {
 		gincommon.AbortWithProblem(c, domainErrToProblem(err))

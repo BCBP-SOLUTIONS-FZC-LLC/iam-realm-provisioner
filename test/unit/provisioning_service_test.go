@@ -22,7 +22,7 @@ func newProvisioningTestService(t *testing.T) (*service.ProvisioningService, *mo
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx, pub := newMockTxRunner()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
 	return svc, kc, realms, idem, pub
 }
 
@@ -37,6 +37,7 @@ func TestProvisionTrial_Success(t *testing.T) {
 	}
 
 	result, err := svc.ProvisionTrial(context.Background(), "key-1", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantName: "Acme", TenantSlug: "acme",
 		AdminEmail: "owner@acme.example", AdminName: "Dana Owner", Plan: "pro",
 	})
@@ -78,6 +79,7 @@ func TestProvisionTrial_KeycloakFailure_NoLocalCommit(t *testing.T) {
 	}
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-2", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.Error(t, err)
@@ -105,6 +107,7 @@ func TestProvisionTrial_MintPlatformAutomation_UsesTenantScopedClientID(t *testi
 	}
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-mint-1", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.NoError(t, err)
@@ -134,6 +137,7 @@ func TestProvisionTrial_MintPlatformAutomationFails_NoLocalCommit(t *testing.T) 
 	}
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-mint-2", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.Error(t, err)
@@ -159,7 +163,7 @@ func TestProvisionTrial_MintPlatformAutomation_RegisterPrincipalFails_OrphanedCl
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx, _ := newMockTxRunner()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
 
 	tenantID := uuid.New()
 	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
@@ -170,6 +174,7 @@ func TestProvisionTrial_MintPlatformAutomation_RegisterPrincipalFails_OrphanedCl
 	}
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-mint-3", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.Error(t, err)
@@ -195,7 +200,7 @@ func TestProvisionTrial_MintPlatformAutomation_RegisterPrincipalFails_ResumedCli
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx, _ := newMockTxRunner()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
 
 	tenantID := uuid.New()
 	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
@@ -205,6 +210,7 @@ func TestProvisionTrial_MintPlatformAutomation_RegisterPrincipalFails_ResumedCli
 	}
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-mint-4", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.Error(t, err)
@@ -230,7 +236,7 @@ func TestProvisionTrial_MintPlatformAutomation_IssueOrRotateCredentialFails_Clie
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx, _ := newMockTxRunner()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
 
 	tenantID := uuid.New()
 	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
@@ -241,6 +247,7 @@ func TestProvisionTrial_MintPlatformAutomation_IssueOrRotateCredentialFails_Clie
 	}
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-mint-5", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.Error(t, err)
@@ -260,7 +267,7 @@ func TestProvisionTrial_MintPlatformAutomation_IssueOrRotateCredentialFails_Resu
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx, _ := newMockTxRunner()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
 
 	tenantID := uuid.New()
 	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
@@ -270,6 +277,7 @@ func TestProvisionTrial_MintPlatformAutomation_IssueOrRotateCredentialFails_Resu
 	}
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-mint-6", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.Error(t, err)
@@ -295,6 +303,7 @@ func TestProvisionTrial_EmailConflict_SameTenant_ResolvesAsIdempotentSuccess(t *
 	}
 
 	result, err := svc.ProvisionTrial(context.Background(), "key-conflict-1", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "owner@acme.example", AdminName: "Dana Owner",
 	})
 	require.NoError(t, err)
@@ -325,6 +334,7 @@ func TestProvisionTrial_EmailConflict_DifferentTenant_ReturnsConflict(t *testing
 	}
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-conflict-2", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "owner@acme.example", AdminName: "Dana Owner",
 	})
 	require.Error(t, err)
@@ -353,6 +363,7 @@ func TestProvisionTrial_EmailConflict_NilTenantID_NeverLooksUpOrMatches(t *testi
 	}
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-conflict-nil", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: uuid.Nil, AdminEmail: "owner@acme.example", AdminName: "Dana Owner",
 	})
 	require.Error(t, err)
@@ -377,6 +388,7 @@ func TestProvisionTrial_EmailConflict_LookupFails_ReturnsOriginalConflict(t *tes
 	}
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-conflict-3", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "owner@acme.example", AdminName: "Dana Owner",
 	})
 	require.Error(t, err)
@@ -399,11 +411,13 @@ func TestProvisionTrial_IdempotentReplay(t *testing.T) {
 	}
 
 	first, err := svc.ProvisionTrial(context.Background(), "key-3", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.NoError(t, err)
 
 	second, err := svc.ProvisionTrial(context.Background(), "key-3", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.NoError(t, err)
@@ -426,6 +440,7 @@ func TestProvisionTrial_ConcurrentDuplicate_ReturnsConflict(t *testing.T) {
 	idem.rows["key-4"] = &domain.ProvisioningOperation{IdempotencyKey: "key-4", TenantID: tenantID, Status: domain.OpStatusInProgress}
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-4", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.Error(t, err)
@@ -446,6 +461,7 @@ func TestProvisionTrial_IdempotencyCompleteFailure_LoggedNotPropagated(t *testin
 	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
 
 	result, err := svc.ProvisionTrial(context.Background(), "key-5", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.NoError(t, err)
@@ -467,6 +483,7 @@ func TestProvisionTrial_FailIdempotencyPersistFailure_LoggedNotEscalated(t *test
 	}
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-6", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.Error(t, err)
@@ -486,6 +503,7 @@ func TestProvisionTrial_BeginError_Propagates(t *testing.T) {
 	}
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-7", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: uuid.New(), AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.Error(t, err)
@@ -507,6 +525,7 @@ func TestProvisionTrial_Offboarded_Returns409(t *testing.T) {
 	}
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-offboarded", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.Error(t, err)
@@ -527,6 +546,7 @@ func TestProvisionTrial_EventEnqueueFails_MarksIdempotencyFailed(t *testing.T) {
 	pub.FailFromCall = 1
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-enqueue-fail", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.Error(t, err)
@@ -544,6 +564,7 @@ func TestProvisionTrial_UpsertFails_MarksIdempotencyFailed(t *testing.T) {
 	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-8", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.Error(t, err)
@@ -560,12 +581,13 @@ func TestProvisionTrial_NoEventPublisherInContext_StillCommitsLocally(t *testing
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx := newMockTxRunnerNoPublisher()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
 	tenantID := uuid.New()
 	kcUserID := uuid.New()
 	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return kcUserID, nil }
 
 	result, err := svc.ProvisionTrial(context.Background(), "key-9", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.NoError(t, err)
@@ -591,6 +613,7 @@ func TestReplayOrConflict_CorruptedStoredResult_DecodeError(t *testing.T) {
 	}
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-corrupt", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X",
 	})
 	require.Error(t, err)
@@ -615,6 +638,7 @@ func TestProvisionTrial_TombstonedTenant_Returns409(t *testing.T) {
 	}
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-tombstoned", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, AdminEmail: "x@example.com", AdminName: "X", Plan: "starter",
 	})
 	var de *domain.Error
@@ -635,6 +659,7 @@ func TestProvisionTrial_TombstoneLookupFails_NoKeycloakCall(t *testing.T) {
 	}
 
 	_, err := svc.ProvisionTrial(context.Background(), "key-tombstone-err", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
 		TenantID: uuid.New(), AdminEmail: "x@example.com", AdminName: "X", Plan: "starter",
 	})
 	require.Error(t, err)

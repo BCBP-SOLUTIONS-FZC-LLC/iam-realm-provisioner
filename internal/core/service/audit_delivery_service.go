@@ -52,7 +52,7 @@ func (s *AuditDeliveryService) DrainOnce(ctx context.Context, limit int) (int, e
 	}
 	delivered := 0
 	for _, p := range due {
-		werr := s.client.WriteEntry(ctx, p.ID.String(), p.Entry)
+		werr := s.client.WriteEntry(ctx, p.Key(), p.Entry)
 		switch {
 		case werr == nil:
 			metrics.AuditEntryDeliveryTotal.WithLabelValues("delivered").Inc()
@@ -61,6 +61,16 @@ func (s *AuditDeliveryService) DrainOnce(ctx context.Context, limit int) (int, e
 				// Harmless: the row is redelivered after its backoff and
 				// AL-5 answers the replayed key with 200.
 				s.log.WarnContext(ctx, "audit_delivery: mark delivered failed", "entry_id", p.ID, "error", err.Error())
+			}
+		case errors.Is(werr, port.ErrAuditEntryTypeUnknown):
+			// Deploy skew, not a bad entry: Audit Log does not know this
+			// entry_type yet. Keep the row pending on its backoff (capped at
+			// 5 min) with no retry budget, so it delivers once Audit Log is
+			// upgraded — never parked, never dropped.
+			metrics.AuditEntryDeliveryTotal.WithLabelValues("unknown_entry_type").Inc()
+			s.log.WarnContext(ctx, "audit_delivery: audit log does not know this entry type yet, will retry", "entry_id", p.ID, "tenant_id", p.TenantID, "entry_type", p.Entry.EntryType, "attempts", p.Attempts, "error", werr.Error())
+			if err := s.entries.MarkRetry(ctx, p.ID, werr.Error()); err != nil {
+				s.log.WarnContext(ctx, "audit_delivery: mark retry did not persist", "entry_id", p.ID, "error", err.Error())
 			}
 		case errors.Is(werr, port.ErrAuditEntryRejected):
 			metrics.AuditEntryDeliveryTotal.WithLabelValues("rejected").Inc()

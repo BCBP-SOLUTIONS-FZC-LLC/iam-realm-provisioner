@@ -100,8 +100,10 @@ var (
 	MfaResetTotal *prometheus.CounterVec
 
 	// AuditEntryDeliveryTotal counts AL-5 direct-write delivery attempts
-	// of pending_audit_entries rows (TenantIdpConfigChanged, §10.6) by
-	// result (delivered|retry|rejected).
+	// of pending_audit_entries rows (TenantIdpConfigChanged, TermsAccepted;
+	// §10.6) by result (delivered|retry|unknown_entry_type|rejected).
+	// unknown_entry_type is Audit Log not knowing the type yet (deploy
+	// skew): the row stays pending and is retried, never parked.
 	AuditEntryDeliveryTotal *prometheus.CounterVec
 
 	// AuditEntryBacklogGauge is the current pending_audit_entries row
@@ -327,7 +329,7 @@ func registerMetrics() {
 
 	AuditEntryDeliveryTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name:        prefix + "audit_entry_delivery_total",
-		Help:        "AL-5 direct-write audit-entry delivery attempts by result (delivered|retry|rejected).",
+		Help:        "AL-5 direct-write audit-entry delivery attempts by result (delivered|retry|unknown_entry_type|rejected).",
 		ConstLabels: labels,
 	}, []string{"result"})
 

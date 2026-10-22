@@ -480,9 +480,9 @@ spec:
             team: platform
           annotations:
             runbook: "docs/observability/runbooks.md#iamrealmprovisionerauditentriesrejected"
-            summary: "TenantIdpConfigChanged audit entries were permanently rejected by Audit Log"
+            summary: "Audit-log entries (TenantIdpConfigChanged, TermsAccepted) were permanently rejected by Audit Log"
             description: >-
-              pending_audit_entries holds rows Audit Log rejected with a 4xx (AL-5). Those IdP-configuration changes have no audit record until the cause is fixed and the rows are re-queued.
+              pending_audit_entries holds rows Audit Log rejected with a 4xx (AL-5). Those IdP-configuration changes or terms acceptances have no audit record until the cause is fixed and the rows are re-queued. A 422 UNKNOWN_ENTRY_TYPE is not parked here — it stays pending and retries.
 
         - alert: IAMRealmProvisionerAuditEntriesUndelivered
           expr: |
@@ -493,7 +493,7 @@ spec:
             team: platform
           annotations:
             runbook: "docs/observability/runbooks.md#iamrealmprovisionerauditentriesundelivered"
-            summary: "TenantIdpConfigChanged audit entries are not reaching Audit Log"
+            summary: "Audit-log entries (TenantIdpConfigChanged, TermsAccepted) are not reaching Audit Log"
             description: >-
-              pending_audit_entries has held undelivered rows for 30 minutes: Audit Log is unreachable, or AUDIT_LOG_BASE_URL is unset (the drainer is then off). Nothing is lost — rows deliver once the cause is fixed.
+              pending_audit_entries has held undelivered rows for 30 minutes: Audit Log is unreachable, does not know the entry type yet (422 UNKNOWN_ENTRY_TYPE, retried), or AUDIT_LOG_BASE_URL is unset (the drainer is then off). Nothing is lost — rows deliver once the cause is fixed.
 {{- end }}

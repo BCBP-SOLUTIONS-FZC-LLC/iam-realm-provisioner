@@ -280,12 +280,17 @@ CREATE POLICY tenant_isolation ON public.provisioning_operations
     WITH CHECK (rls_check_tenant(tenant_id, 'provisioning_operations'));
 
 -- ═════════════════════════════════════════════════════════════════════════
--- §4.4 pending_audit_entries — durable hand-off of the non-bus
--- TenantIdpConfigChanged audit entry to Audit Log's AL-5 direct-write
--- ingest (HLD §9.4, §10.6). Enqueued in the same RunInTx as the
--- keycloak_idp_configs write it records, so a committed IdP change always
--- carries its audit entry; cmd/server's drainer POSTs each row (id is the
--- AL-5 Idempotency-Key, stable across retries) and deletes it on success.
+-- §4.4 pending_audit_entries — durable hand-off of the non-bus audit
+-- entries to Audit Log's AL-5 direct-write ingest (HLD §9.4, §10.6):
+-- TenantIdpConfigChanged (enqueued in the same RunInTx as the
+-- keycloak_idp_configs write it records) and TermsAccepted (the tenant
+-- owner's terms acceptance, enqueued in RP-1/RP-2's tenant_realms
+-- transaction). cmd/server's drainer POSTs each row — the AL-5
+-- Idempotency-Key is idempotency_key when set (TermsAccepted's
+-- deterministic TermsAccepted:<tenant>:<user>:<version>, UNIQUE so a
+-- replayed signup cannot queue a second one), else id — and deletes it on
+-- success. The GDPR scrub never deletes these rows: they are audit
+-- records on their way to the system of record (LLD v1.41).
 -- A row Audit permanently rejects (4xx) moves to 'failed' and stays for
 -- operator inspection. RLS-scoped because `entry` embeds tenant data (same
 -- reasoning as provisioning_operations); the cross-tenant drainer reads
@@ -294,6 +299,7 @@ CREATE POLICY tenant_isolation ON public.provisioning_operations
 CREATE TABLE public.pending_audit_entries (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id       uuid NOT NULL,
+  idempotency_key text UNIQUE CHECK (idempotency_key IS NULL OR length(idempotency_key) BETWEEN 1 AND 256),
   entry           jsonb NOT NULL,
   status          text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'failed')),
   attempts        int NOT NULL DEFAULT 0,

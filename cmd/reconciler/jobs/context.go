@@ -41,7 +41,7 @@ type Context struct {
 
 	Logger port.SlogStyleLogger
 
-	// GDPRScrubFn deletes all tenant-scoped PII rows from the five tables
+	// GDPRScrubFn deletes all tenant-scoped PII rows from the four tables
 	// listed in gdpr.go (§15.2). Used by RP-C3 offboardTenant, where the
 	// scrub must run in its own pre-commit transaction before the realm-status
 	// RunInTx. Wired in cmd/reconciler/main.go to a BYPASSRLS sysPool tx.

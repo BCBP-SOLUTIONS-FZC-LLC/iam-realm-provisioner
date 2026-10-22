@@ -49,6 +49,27 @@ func (r *PendingAuditEntryRepository) Enqueue(ctx context.Context, entry domain.
 	})
 }
 
+// EnqueueOnce records entry as pending under idempotencyKey, due
+// immediately. ON CONFLICT (idempotency_key) DO NOTHING makes a second
+// enqueue of the same key a no-op while the first row is still queued;
+// once delivered (row deleted), Audit Log dedupes the same key itself.
+func (r *PendingAuditEntryRepository) EnqueueOnce(ctx context.Context, idempotencyKey string, entry domain.AuditEntry) error {
+	if idempotencyKey == "" {
+		return fmt.Errorf("pending_audit_entries: empty idempotency key")
+	}
+	body, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("pending_audit_entries: encode entry: %w", err)
+	}
+	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO pending_audit_entries (tenant_id, idempotency_key, entry) VALUES ($1, $2, $3)
+			ON CONFLICT (idempotency_key) DO NOTHING`,
+			entry.TenantID, idempotencyKey, body)
+		return err
+	})
+}
+
 // ClaimDue claims up to limit due pending rows, oldest-due first. The
 // single UPDATE ... FOR UPDATE SKIP LOCKED statement increments attempts
 // and pushes next_attempt_at out by min(2^attempts s, 5 min) atomically,
@@ -68,7 +89,7 @@ func (r *PendingAuditEntryRepository) ClaimDue(ctx context.Context, limit int) (
 				ORDER BY next_attempt_at
 				LIMIT $1
 				FOR UPDATE SKIP LOCKED)
-			RETURNING id, tenant_id, entry, attempts`, limit)
+			RETURNING id, COALESCE(idempotency_key, ''), tenant_id, entry, attempts`, limit)
 		if err != nil {
 			return err
 		}
@@ -76,7 +97,7 @@ func (r *PendingAuditEntryRepository) ClaimDue(ctx context.Context, limit int) (
 		for rows.Next() {
 			var p domain.PendingAuditEntry
 			var body []byte
-			if err := rows.Scan(&p.ID, &p.TenantID, &body, &p.Attempts); err != nil {
+			if err := rows.Scan(&p.ID, &p.IdempotencyKey, &p.TenantID, &body, &p.Attempts); err != nil {
 				return err
 			}
 			if err := json.Unmarshal(body, &p.Entry); err != nil {

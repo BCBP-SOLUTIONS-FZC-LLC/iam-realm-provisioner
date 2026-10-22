@@ -190,15 +190,15 @@ These alerts read platform-library metrics that are still `proposed` in the regi
 
 ### IAMRealmProvisionerAuditEntriesRejected
 
-**Meaning.** `pending_audit_entries` holds rows Audit Log permanently rejected (a 4xx other than 429 from AL-5) — those `TenantIdpConfigChanged` changes have no audit record yet.
+**Meaning.** `pending_audit_entries` holds rows Audit Log permanently rejected (a 4xx other than 429 from AL-5) — those `TenantIdpConfigChanged` changes or `TermsAccepted` signup records have no audit record yet. (A `422 UNKNOWN_ENTRY_TYPE` is never parked: it stays `pending` — see the next alert.)
 
-**Triage.** `SELECT id, tenant_id, entry->>'action' AS action, last_error, created_at FROM pending_audit_entries WHERE status='failed' ORDER BY created_at DESC LIMIT 20;` (sysPool). `last_error` carries Audit's response: `unknown_entry_type` (Audit's taxonomy lacks `config.idp.changed`), `metadata_too_large`, or `forbidden_peer` (mesh identity).
+**Triage.** `SELECT id, tenant_id, entry->>'entry_type' AS entry_type, entry->>'action' AS action, last_error, created_at FROM pending_audit_entries WHERE status='failed' ORDER BY created_at DESC LIMIT 20;` (sysPool). `last_error` carries Audit's response: `metadata_too_large`, `invalid_request`, or `forbidden_peer` (mesh identity).
 
-**Mitigate.** Fix the cause, then re-queue: `UPDATE pending_audit_entries SET status='pending', next_attempt_at=now() WHERE status='failed';` — the row id stays the Idempotency-Key, so a re-delivery never double-records.
+**Mitigate.** Fix the cause, then re-queue: `UPDATE pending_audit_entries SET status='pending', next_attempt_at=now() WHERE status='failed';` — the Idempotency-Key (`idempotency_key`, else the row id) is unchanged, so a re-delivery never double-records.
 
 ### IAMRealmProvisionerAuditEntriesUndelivered
 
-**Meaning.** `pending_audit_entries` has held undelivered rows for 30 minutes. Either Audit Log is unreachable (`iam_realm_provisioner_audit_entry_delivery_total{result="retry"}` rising), or `AUDIT_LOG_BASE_URL` is unset and the drainer is off (startup WARN `audit-entry delivery disabled`). Nothing is lost.
+**Meaning.** `pending_audit_entries` has held undelivered rows for 30 minutes. Either Audit Log is unreachable (`iam_realm_provisioner_audit_entry_delivery_total{result="retry"}` rising), Audit Log does not know the entry type yet (`{result="unknown_entry_type"}` rising — deploy Audit Log rev 0.31+ for `legal.terms.accepted`; WARN `audit log does not know this entry type yet`), or `AUDIT_LOG_BASE_URL` is unset and the drainer is off (startup WARN `audit-entry delivery disabled`). Nothing is lost.
 
 **Mitigate.** Restore Audit Log or set `AUDIT_LOG_BASE_URL`; the backlog drains on its own (a full batch re-drains immediately).
 

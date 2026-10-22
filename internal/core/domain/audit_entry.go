@@ -66,12 +66,23 @@ type AuditEntry struct {
 	Metadata        json.RawMessage `json:"metadata,omitempty"`
 }
 
-// PendingAuditEntry is one claimed `pending_audit_entries` row. ID is the
-// AL-5 Idempotency-Key — minted once at enqueue, so every delivery retry
-// of the same entry is deduplicated by Audit Log.
+// PendingAuditEntry is one claimed `pending_audit_entries` row. Its AL-5
+// Idempotency-Key (Key) is IdempotencyKey when the producer chose a
+// deterministic one (TermsAccepted), otherwise ID — minted once at
+// enqueue. Either way every delivery retry of the same entry is
+// deduplicated by Audit Log.
 type PendingAuditEntry struct {
-	ID       uuid.UUID
-	TenantID uuid.UUID
-	Entry    AuditEntry
-	Attempts int
+	ID             uuid.UUID
+	IdempotencyKey string
+	TenantID       uuid.UUID
+	Entry          AuditEntry
+	Attempts       int
+}
+
+// Key is the AL-5 Idempotency-Key the drainer sends for p.
+func (p *PendingAuditEntry) Key() string {
+	if p.IdempotencyKey != "" {
+		return p.IdempotencyKey
+	}
+	return p.ID.String()
 }

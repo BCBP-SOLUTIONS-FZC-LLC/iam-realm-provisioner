@@ -58,11 +58,15 @@ TokenService.IssueOrRotateCredential(tenant_id, principal_id, {
 ## RP-1: Trial Provisioning
 
 ```
-POST /tenants/provision-trial {tenant_id, tenant_name, tenant_slug, admin_email, admin_name, hashed_password_seed?, plan}
+POST /tenants/provision-trial {tenant_id, tenant_name, tenant_slug, admin_email, admin_name, hashed_password_seed?, plan,
+                               terms_acceptance{version, accepted_at, ip_address, user_agent}}
   -- handler: plan must be starter|pro|enterprise (400 INVALID_REQUEST), same as RP-2
+  -- handler: terms_acceptance required; version [A-Za-z0-9._-]{1,32}, accepted_at RFC 3339, ip_address IPv4/IPv6,
+     user_agent 1-512 bytes no control chars (400 INVALID_REQUEST) — same on RP-2 (LLD v1.41, RP-D17)
   idempotency.Begin(key, tenant_id, "provision_trial")
-    found + succeeded -> replay
+    found + succeeded -> replay   (before the accepted_at window check, so a replay still works after 24h)
     found + other     -> 409 operation_in_progress
+  terms.Validate(now): accepted_at within [now-24h, now+10m] -> else failIdempotency, 400 INVALID_REQUEST
   Keycloak.CreateTrialUser(email, full_name, tenant_id, seed, email_verified=false)
     -> stamps tenant_id attribute on the user, triggers VERIFY_EMAIL
     -> 409 user_email_conflict (§9.2, lost-response retry of THIS request, or a genuine conflict):
@@ -75,6 +79,9 @@ POST /tenants/provision-trial {tenant_id, tenant_name, tenant_slug, admin_email,
   RunInTx:
     tenant_realms.Upsert{tenant_id, realm_name:"trial", strategy:"shared", status:"active",
       service_account_principal_id, service_account_keycloak_client_id}
+    pending_audit_entries.EnqueueOnce("TermsAccepted:<tenant_id>:<keycloak_user_id>:<version>",
+      legal.terms.accepted{actor:user/<sub>, target:tenant/<tenant_id>, occurred_at:accepted_at, ip_address, user_agent,
+      metadata{terms_version, accepted_at, signup_type:"trial", plan}})   -- ON CONFLICT DO NOTHING; never on the bus
     outbox.Enqueue(TenantIdentityProvisioned{tenant_id, owner_user_id:keycloak_user_id, slug, name, plan,
       signup_type:"trial", realm:"trial", realm_type:"shared"})   -- BFF-2 backstop, RP-1's only event (RP-D16)
   idempotency.Complete(key, marshaled result)
@@ -84,7 +91,7 @@ POST /tenants/provision-trial {tenant_id, tenant_name, tenant_slug, admin_email,
 ## RP-2: Direct-Paid Provisioning
 
 ```
-POST /tenants/provision-direct {..., billing_subscription_id}
+POST /tenants/provision-direct {..., billing_subscription_id, terms_acceptance}   -- terms validated exactly as RP-1
   realmName := "tenant-" + tenant_slug
   shard := selectShard()  -- least-loaded of the configured shardIDs, ties broken lexicographically for
                              deterministic behavior under concurrent placements
@@ -100,6 +107,7 @@ POST /tenants/provision-direct {..., billing_subscription_id}
   RunInTx:
     tenant_realms.Upsert{tenant_id, realm_name:realmName, strategy:"dedicated", keycloak_shard:shard, status:"active", converted_at:now(),
       service_account_principal_id, service_account_keycloak_client_id}
+    pending_audit_entries.EnqueueOnce("TermsAccepted:<tenant_id>:<kcUserID>:<version>", legal.terms.accepted{..., signup_type:"direct_paid"})
     outbox.Enqueue(TenantIdentityProvisioned{tenant_id, owner_user_id:kcUserID, slug, name, plan,
       signup_type:"direct_paid", realm, realm_type:"dedicated"})   -- BFF-2 backstop, first (RP-D16)
     outbox.Enqueue(TenantRealmReady{tenant_id, realm, keycloak_shard, oidc_clients})
@@ -319,14 +327,14 @@ No `RunInTx`/outbox (mutates no tracked local field) and no Idempotency-Key (cle
 
 ## RP-C2: Trial Hard Delete
 
-`0 3 * * *`. Runs entirely against the `SysPool` (BYPASSRLS) with raw SQL (`runInTxWithSysPool`), not through the `TenantRealmRepository` port — selects `tenant_realms WHERE strategy='shared' AND status='disabled' AND disabled_at < now() - TRIAL_GRACE_DAYS`, calls `Keycloak.HardDeleteUsersInRealm` per row, then calls `NewGDPRScrubFn` (`gdpr.go`) to atomically delete all rows for the tenant from `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`, and `pending_audit_entries` in a single BYPASSRLS sysPool transaction, then `UPDATE tenant_realms SET status='deleted', deleted_at=now()`. No event is emitted — O&M runs its own independent cleanup cron for its `tenants` row; the two services do not coordinate this step.
+`0 3 * * *`. Runs entirely against the `SysPool` (BYPASSRLS) with raw SQL (`runInTxWithSysPool`), not through the `TenantRealmRepository` port — selects `tenant_realms WHERE strategy='shared' AND status='disabled' AND disabled_at < now() - TRIAL_GRACE_DAYS`, calls `Keycloak.HardDeleteUsersInRealm` per row, then calls `NewGDPRScrubFn` (`gdpr.go`) to atomically delete all rows for the tenant from `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, and `provisioning_operations` (never `pending_audit_entries`: undelivered audit records, LLD v1.41) in a single BYPASSRLS sysPool transaction, then `UPDATE tenant_realms SET status='deleted', deleted_at=now()`. No event is emitted — O&M runs its own independent cleanup cron for its `tenants` row; the two services do not coordinate this step.
 
 ## RP-C3: Subscription Lapse (Suspend → Offboard)
 
 `0 2 * * *`. Two phases sharing one `jctx.BatchLimit` budget (`remaining := jctx.BatchLimit - suspendPhase.Attempted`) so a busy suspend phase can't starve the offboard phase of its own daily run, or vice versa:
 
 - **Suspend phase** — polls O&M's I-16 `GET /api/v1/internal/subscription-lapses` via `jctx.SubscriptionLapses.ListLapsedSubscriptions` (`port.SubscriptionLapseReader`, `internal/adapter/outbound/orgmembership`). O&M itself applies `CANCELLED_GRACE_DAYS` before a tenant appears in this list — RP does not re-derive the grace window. Only `realm_type=="dedicated"` entries are acted on (`shared` entries are counted `Skipped`, per §8.8 — trial/shared realms go through RP-C1/RP-C2 instead). Per dedicated tenant, `suspendLapsedTenant`: skip as a no-op if the realm is already `suspended`/`deleted` (never touches the idempotency ledger); otherwise `DisableRealm` → `RunInTx{Status:"suspended", DisabledAt:now(), SuspensionSource:"billing_lapse"}` + `outbox.Enqueue(TenantSuspended{source:"billing_lapse"})`, keyed `"lapse-suspend:<tenant_id>"`. If `jctx.SubscriptionLapses` is `nil` (`ORG_MEMBERSHIP_BASE_URL` unset), this phase logs a WARN and skips entirely — the offboard phase below still runs.
-- **Offboard phase** — always runs, independent of whether the suspend phase ran. Queries `TenantRealmRepository.ListSuspendedPastRetention(retentionDays=RETENTION_DAYS, limit=remaining)`, which is scoped to `status='suspended' AND suspension_source='billing_lapse' AND disabled_at < now() - RETENTION_DAYS` (partial index `idx_tenant_realms_lapse_offboard`) — **an `operator`-sourced suspension (RP-14) is structurally excluded from this query**, not just skipped in code (§8.8): only `billing_lapse` suspensions age toward offboarding. Per candidate, `offboardTenant`: `ExportRealm` (must succeed) → `ObjectStore.PutRealmExport` (must succeed — **the realm is never deleted without a confirmed durable export**, RP-EVT-4) → `DeleteRealmIfExists` → `GDPRScrubFn` (wired to `NewGDPRScrubFn` from `gdpr.go` — atomically deletes all rows for the tenant from `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`, and `pending_audit_entries` in a BYPASSRLS sysPool transaction; **hard-fails and calls `failIdempotency` if `GDPRScrubFn` is nil** — `TenantOffboarded` is never emitted with PII intact) → `RunInTx{Status:"deleted", ExportedAt, ExportS3Key}` + `outbox.Enqueue(TenantOffboarded{export_s3_key, offboarded_at})`, keyed `"offboard:<tenant_id>"`. Terminal — RP-INV-5.
+- **Offboard phase** — always runs, independent of whether the suspend phase ran. Queries `TenantRealmRepository.ListSuspendedPastRetention(retentionDays=RETENTION_DAYS, limit=remaining)`, which is scoped to `status='suspended' AND suspension_source='billing_lapse' AND disabled_at < now() - RETENTION_DAYS` (partial index `idx_tenant_realms_lapse_offboard`) — **an `operator`-sourced suspension (RP-14) is structurally excluded from this query**, not just skipped in code (§8.8): only `billing_lapse` suspensions age toward offboarding. Per candidate, `offboardTenant`: `ExportRealm` (must succeed) → `ObjectStore.PutRealmExport` (must succeed — **the realm is never deleted without a confirmed durable export**, RP-EVT-4) → `DeleteRealmIfExists` → `GDPRScrubFn` (wired to `NewGDPRScrubFn` from `gdpr.go` — atomically deletes all rows for the tenant from `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, and `provisioning_operations` (never `pending_audit_entries`: undelivered audit records, LLD v1.41) in a BYPASSRLS sysPool transaction; **hard-fails and calls `failIdempotency` if `GDPRScrubFn` is nil** — `TenantOffboarded` is never emitted with PII intact) → `RunInTx{Status:"deleted", ExportedAt, ExportS3Key}` + `outbox.Enqueue(TenantOffboarded{export_s3_key, offboarded_at})`, keyed `"offboard:<tenant_id>"`. Terminal — RP-INV-5.
 
 Both phases use their own idempotency keys via the same `provisioning_operations` ledger, independent of the HTTP-endpoint idempotency keys. `suspension_source` is the durable column on `tenant_realms` that makes the offboard phase's query possible — it is also set by RP-14's `Suspend` (`operator`) and cleared by RP-10's `Reactivate`, so a tenant reactivated after either kind of suspension never re-enters this sweep.
 
@@ -356,11 +364,11 @@ This service holds **no per-user table** (RP-5/RP-9/RP-15/RP-16 persist nothing 
 
 ### Trial Expiry & Hard Delete PII Scrub (RP-C1 / RP-C2)
 
-RP-C1 disables the shared-realm trial users at `trial_ends_at` (no PII removed yet — reactivatable). RP-C2, at `TRIAL_GRACE_DAYS` past that, hard-deletes the trial users from Keycloak via the Admin API (removes email/name/profile), atomically deletes all tenant rows from `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`, and `pending_audit_entries` via `NewGDPRScrubFn` (BYPASSRLS sysPool transaction), and transitions the local `tenant_realms` row to `deleted` — no residual PII remains in any tenant-scoped table after this step. Only `tenant_id` is retained (audit FK); the immutable Keycloak `sub` is preserved for audit continuity. No event is emitted on hard delete — O&M runs its own independent cleanup cron for its `tenants` row; the two services do not coordinate this specific step (see RP-C2 above).
+RP-C1 disables the shared-realm trial users at `trial_ends_at` (no PII removed yet — reactivatable). RP-C2, at `TRIAL_GRACE_DAYS` past that, hard-deletes the trial users from Keycloak via the Admin API (removes email/name/profile), atomically deletes all tenant rows from `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, and `provisioning_operations` via `NewGDPRScrubFn` (never `pending_audit_entries`: undelivered audit records, LLD v1.41) (BYPASSRLS sysPool transaction), and transitions the local `tenant_realms` row to `deleted` — no residual PII remains in any tenant-scoped table after this step. Only `tenant_id` is retained (audit FK); the immutable Keycloak `sub` is preserved for audit continuity. No event is emitted on hard delete — O&M runs its own independent cleanup cron for its `tenants` row; the two services do not coordinate this specific step (see RP-C2 above).
 
 ### Tenant Offboarding PII Handling (RP-C3)
 
-Export-before-delete is the load-bearing invariant (RP-EVT-4): `ExportRealm` → `ObjectStore.PutRealmExport` (KMS-encrypted, for compliance retention) must both succeed **before** `DeleteRealmIfExists` ever runs — the realm, and every credential/session/profile it holds, is never destroyed without a durable, encrypted export existing first. After `DeleteRealmIfExists`, `NewGDPRScrubFn` atomically deletes all tenant rows from `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations`, and `pending_audit_entries` — the service hard-fails here if `GDPRScrubFn` is nil and never emits `TenantOffboarded` with PII intact. `TenantOffboarded{export_s3_key}` carries the pointer so downstream consumers (O&M's own GDPR wipe) know the export landed. `offboarded` is terminal (RP-INV-5) — no path back in.
+Export-before-delete is the load-bearing invariant (RP-EVT-4): `ExportRealm` → `ObjectStore.PutRealmExport` (KMS-encrypted, for compliance retention) must both succeed **before** `DeleteRealmIfExists` ever runs — the realm, and every credential/session/profile it holds, is never destroyed without a durable, encrypted export existing first. After `DeleteRealmIfExists`, `NewGDPRScrubFn` atomically deletes all tenant rows from `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, and `provisioning_operations` (never `pending_audit_entries`: undelivered audit records, LLD v1.41) — the service hard-fails here if `GDPRScrubFn` is nil and never emits `TenantOffboarded` with PII intact. `TenantOffboarded{export_s3_key}` carries the pointer so downstream consumers (O&M's own GDPR wipe) know the export landed. `offboarded` is terminal (RP-INV-5) — no path back in.
 
 ### Residency
 

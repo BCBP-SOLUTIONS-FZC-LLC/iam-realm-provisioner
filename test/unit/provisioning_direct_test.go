@@ -33,6 +33,7 @@ func TestProvisionDirect_Success(t *testing.T) {
 	}
 
 	result, err := svc.ProvisionDirect(context.Background(), "pd-1", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantName: "Acme Ltd", TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 		Plan: "pro", BillingSubscriptionID: "sub_1",
 	})
@@ -77,6 +78,7 @@ func TestProvisionDirect_NoBillingSubscriptionID(t *testing.T) {
 	}
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-2", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A", Plan: "pro",
 	})
 	require.NoError(t, err)
@@ -95,6 +97,7 @@ func TestProvisionDirect_CreateRealmFails_NoTeardownNeeded(t *testing.T) {
 	}
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-3", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 	})
 	require.Error(t, err)
@@ -120,6 +123,7 @@ func TestProvisionDirect_RegisterOIDCClientsFails_TeardownCalled(t *testing.T) {
 	}
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-4", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 	})
 	require.Error(t, err)
@@ -149,6 +153,7 @@ func TestProvisionDirect_CreateInvitedUserFails_TeardownCalled(t *testing.T) {
 	}
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-5", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 	})
 	require.Error(t, err)
@@ -178,6 +183,7 @@ func TestProvisionDirect_MintPlatformAutomationFails_TeardownCalled(t *testing.T
 	}
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-6", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 	})
 	require.Error(t, err)
@@ -205,6 +211,7 @@ func TestProvisionDirect_MintPlatformAutomation_PersistsPrincipalAndClientID(t *
 	}
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-7", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 	})
 	require.NoError(t, err)
@@ -243,6 +250,7 @@ func TestProvisionDirect_CreateInvitedUserConflict_SameTenant_ResolvesWithoutTea
 	}
 
 	result, err := svc.ProvisionDirect(context.Background(), "pd-conflict-1", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 	})
 	require.NoError(t, err)
@@ -281,6 +289,7 @@ func TestProvisionDirect_CreateInvitedUserConflict_DifferentTenant_TeardownCalle
 	}
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-conflict-2", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 	})
 	require.Error(t, err)
@@ -308,6 +317,7 @@ func TestProvisionDirect_TeardownFailure_LoggedNotEscalated(t *testing.T) {
 	}
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-6", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 	})
 	require.Error(t, err)
@@ -325,7 +335,7 @@ func TestProvisionDirect_IdempotentReplay(t *testing.T) {
 		return uuid.New(), nil
 	}
 
-	req := service.ProvisionDirectRequest{TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A"}
+	req := service.ProvisionDirectRequest{Terms: validTerms(), TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A"}
 	first, err := svc.ProvisionDirect(context.Background(), "pd-7", req)
 	require.NoError(t, err)
 	second, err := svc.ProvisionDirect(context.Background(), "pd-7", req)
@@ -348,6 +358,7 @@ func TestProvisionDirect_SelectShardFailure(t *testing.T) {
 	}
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-8", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 	})
 	require.Error(t, err)
@@ -365,6 +376,7 @@ func TestProvisionDirect_BeginError_Propagates(t *testing.T) {
 	}
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-9", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: uuid.New(), TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 	})
 	require.Error(t, err)
@@ -383,6 +395,7 @@ func TestProvisionDirect_UpsertFails_MarksIdempotencyFailed(t *testing.T) {
 	}
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-10", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 	})
 	require.Error(t, err)
@@ -404,6 +417,7 @@ func TestProvisionDirect_FirstEventEnqueueFails(t *testing.T) {
 	pub.FailFromCall = 1
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-11", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 	})
 	require.Error(t, err)
@@ -425,6 +439,7 @@ func TestProvisionDirect_SecondEventEnqueueFails(t *testing.T) {
 	pub.FailFromCall = 2
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-12", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 	})
 	require.Error(t, err)
@@ -448,6 +463,7 @@ func TestProvisionDirect_ThirdEventEnqueueFails(t *testing.T) {
 	pub.FailFromCall = 3
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-third-enqueue", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A", BillingSubscriptionID: "sub_1",
 	})
 	require.Error(t, err)
@@ -471,6 +487,7 @@ func TestProvisionDirect_FourthEventEnqueueFails(t *testing.T) {
 	pub.FailFromCall = 4
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-fourth-enqueue", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A", BillingSubscriptionID: "sub_1",
 	})
 	require.Error(t, err)
@@ -494,6 +511,7 @@ func TestProvisionDirect_Offboarded_Returns409(t *testing.T) {
 	}
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-offboarded", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 	})
 	require.Error(t, err)
@@ -511,7 +529,7 @@ func TestProvisionDirect_NoEventPublisherInContext_StillCommitsLocally(t *testin
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx := newMockTxRunnerNoPublisher()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
 	tenantID := uuid.New()
 	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
 	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) { return nil, nil }
@@ -520,6 +538,7 @@ func TestProvisionDirect_NoEventPublisherInContext_StillCommitsLocally(t *testin
 	}
 
 	result, err := svc.ProvisionDirect(context.Background(), "pd-13", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 	})
 	require.NoError(t, err)
@@ -545,6 +564,7 @@ func TestProvisionDirect_IdempotencyCompleteFailure_LoggedNotPropagated(t *testi
 	}
 
 	result, err := svc.ProvisionDirect(context.Background(), "pd-14", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
 	})
 	require.NoError(t, err)
@@ -700,6 +720,7 @@ func TestProvisionDirect_TombstonedTenant_Returns409(t *testing.T) {
 	}
 
 	_, err := svc.ProvisionDirect(context.Background(), "pd-tombstoned", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
 		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A", Plan: "pro",
 	})
 	var de *domain.Error

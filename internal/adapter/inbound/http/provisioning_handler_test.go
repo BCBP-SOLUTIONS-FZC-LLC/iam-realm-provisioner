@@ -3,7 +3,9 @@ package http
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -14,12 +16,18 @@ import (
 const provisionTrialPath = "/api/v1/internal/tenants/provision-trial"
 const provisionDirectPath = "/api/v1/internal/tenants/provision-direct"
 
+// termsJSON is a valid terms_acceptance object, accepted a minute ago.
+func termsJSON() string {
+	return `{"version":"2026-09","accepted_at":"` + time.Now().Add(-time.Minute).UTC().Format(time.RFC3339) +
+		`","ip_address":"203.0.113.7","user_agent":"Mozilla/5.0 (Macintosh)"}`
+}
+
 func trialBody(tenantID uuid.UUID) string {
-	return `{"tenant_id":"` + tenantID.String() + `","tenant_name":"Acme","tenant_slug":"acme","admin_email":"a@example.com","admin_name":"Admin","plan":"starter"}`
+	return `{"tenant_id":"` + tenantID.String() + `","tenant_name":"Acme","tenant_slug":"acme","admin_email":"a@example.com","admin_name":"Admin","plan":"starter","terms_acceptance":` + termsJSON() + `}`
 }
 
 func directBody(tenantID uuid.UUID) string {
-	return `{"tenant_id":"` + tenantID.String() + `","tenant_name":"Acme","tenant_slug":"acme","admin_email":"a@example.com","admin_name":"Admin","plan":"pro","billing_subscription_id":"sub_1"}`
+	return `{"tenant_id":"` + tenantID.String() + `","tenant_name":"Acme","tenant_slug":"acme","admin_email":"a@example.com","admin_name":"Admin","plan":"pro","billing_subscription_id":"sub_1","terms_acceptance":` + termsJSON() + `}`
 }
 
 // ── RP-1: provision-trial ────────────────────────────────────────────────
@@ -749,5 +757,50 @@ func TestRevertConversion_CommercialSystem_RecordsActor(t *testing.T) {
 	}
 	if reactivatedEvent.Actor != domain.CommercialActorID {
 		t.Fatalf("TrialReactivated.Actor = %q, want CommercialActorID %q", reactivatedEvent.Actor, domain.CommercialActorID)
+	}
+}
+
+// ── terms_acceptance (Signup BFF open gap A-4) ───────────────────────────
+
+// Every missing or invalid terms_acceptance value is a 400 INVALID_REQUEST
+// on both RP-1 and RP-2, before Keycloak is touched (its fakes are left nil
+// — a bypass would panic).
+func TestProvision_TermsAcceptance_Invalid400(t *testing.T) {
+	now := time.Now().UTC()
+	terms := func(version, acceptedAt, ip, ua string) string {
+		return `{"version":"` + version + `","accepted_at":"` + acceptedAt + `","ip_address":"` + ip + `","user_agent":"` + ua + `"}`
+	}
+	fresh := now.Add(-time.Minute).Format(time.RFC3339)
+	cases := map[string]string{
+		"missing object":       "",
+		"null object":          `null`,
+		"empty version":        terms("", fresh, "203.0.113.7", "Mozilla/5.0"),
+		"33-char version":      terms(strings.Repeat("v", 33), fresh, "203.0.113.7", "Mozilla/5.0"),
+		"version with slash":   terms("2026/09", fresh, "203.0.113.7", "Mozilla/5.0"),
+		"accepted_at not 3339": terms("2026-09", "22/10/2026", "203.0.113.7", "Mozilla/5.0"),
+		"accepted_at missing":  terms("2026-09", "", "203.0.113.7", "Mozilla/5.0"),
+		"accepted_at 25h old":  terms("2026-09", now.Add(-25*time.Hour).Format(time.RFC3339), "203.0.113.7", "Mozilla/5.0"),
+		"accepted_at +1h":      terms("2026-09", now.Add(time.Hour).Format(time.RFC3339), "203.0.113.7", "Mozilla/5.0"),
+		"bad ip":               terms("2026-09", fresh, "not-an-ip", "Mozilla/5.0"),
+		"missing ip":           terms("2026-09", fresh, "", "Mozilla/5.0"),
+		"missing user agent":   terms("2026-09", fresh, "203.0.113.7", ""),
+		"513-byte user agent":  terms("2026-09", fresh, "203.0.113.7", strings.Repeat("a", 513)),
+		"user agent with tab":  terms("2026-09", fresh, "203.0.113.7", `Mozilla\t5.0`),
+	}
+	for name, termsJSON := range cases {
+		for _, path := range []string{provisionTrialPath, provisionDirectPath} {
+			d := newServiceDeps()
+			tenantID := uuid.New()
+			body := `{"tenant_id":"` + tenantID.String() + `","tenant_name":"Acme","tenant_slug":"acme","admin_email":"a@example.com","admin_name":"Admin","plan":"pro"`
+			if termsJSON != "" {
+				body += `,"terms_acceptance":` + termsJSON
+			}
+			body += `}`
+			headers := withHeader(sysHeaders(), "Idempotency-Key", "terms-"+tenantID.String())
+			rec := doRequest(d.engine(), http.MethodPost, path, headers, body)
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"errorCode":"INVALID_REQUEST"`) {
+				t.Errorf("%s %s: got %d %s, want 400 INVALID_REQUEST", path, name, rec.Code, rec.Body.String())
+			}
+		}
 	}
 }

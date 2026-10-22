@@ -285,7 +285,7 @@ func TestProvisioning_RejectsTombstonedTenant(t *testing.T) {
 	realms := pgadapter.NewTenantRealmRepository(appPool)
 	idem := pgadapter.NewIdempotencyRepository(appPool)
 	svc := service.NewProvisioningService(realms, idem, &fakeJobsKeycloakAdmin{}, &fakeJobsTokenService{},
-		pgadapter.NewTxRunner(appPool, nil), "trial", nil)
+		pgadapter.NewTxRunner(appPool, nil), pgadapter.NewPendingAuditEntryRepository(appPool), "trial", nil)
 
 	tombstone := func(t *testing.T) uuid.UUID {
 		t.Helper()
@@ -310,6 +310,7 @@ func TestProvisioning_RejectsTombstonedTenant(t *testing.T) {
 	t.Run("RP1", func(t *testing.T) {
 		tenantID := tombstone(t)
 		_, err := svc.ProvisionTrial(withTenant(ctx, tenantID), "rp1-"+tenantID.String(), service.ProvisionTrialRequest{
+			Terms:    validTerms(),
 			TenantID: tenantID, TenantName: "Acme", TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A", Plan: "starter",
 		})
 		assertRejected(t, tenantID, err)
@@ -318,6 +319,7 @@ func TestProvisioning_RejectsTombstonedTenant(t *testing.T) {
 	t.Run("RP2", func(t *testing.T) {
 		tenantID := tombstone(t)
 		_, err := svc.ProvisionDirect(withTenant(ctx, tenantID), "rp2-"+tenantID.String(), service.ProvisionDirectRequest{
+			Terms:    validTerms(),
 			TenantID: tenantID, TenantName: "Acme", TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A", Plan: "pro",
 		})
 		assertRejected(t, tenantID, err)

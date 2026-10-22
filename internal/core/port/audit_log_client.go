@@ -16,6 +16,14 @@ import (
 // instead of retrying it. Every other WriteEntry error is transient.
 var ErrAuditEntryRejected = errors.New("audit entry rejected by audit log")
 
+// ErrAuditEntryTypeUnknown marks AL-5's 422 UNKNOWN_ENTRY_TYPE: this
+// service knows an entry type the deployed Audit Log does not yet (deploy
+// skew — e.g. legal.terms.accepted ahead of Audit Log rev 0.31). It is
+// deliberately NOT ErrAuditEntryRejected: the row is kept pending and
+// retried on its backoff, with no retry budget, until Audit Log learns the
+// type — never parked or dropped.
+var ErrAuditEntryTypeUnknown = errors.New("audit log does not know this entry type yet")
+
 // RetryAfterError wraps a transient AL-5 failure whose 429 response
 // carried a parseable Retry-After header (RFC 7231 §7.1.3). RetryAfter is
 // the hint's delay; AuditDeliveryService uses it to override the row's
@@ -43,6 +51,11 @@ type PendingAuditEntryRepository interface {
 	// Enqueue records entry as pending. Called inside the same RunInTx as
 	// the keycloak_idp_configs write it records.
 	Enqueue(ctx context.Context, entry domain.AuditEntry) error
+	// EnqueueOnce records entry as pending under the deterministic AL-5
+	// Idempotency-Key idempotencyKey, inside the caller's RunInTx. A row
+	// already holding that key makes it a no-op, so a replayed or resumed
+	// signup never queues a second TermsAccepted (the first one wins).
+	EnqueueOnce(ctx context.Context, idempotencyKey string, entry domain.AuditEntry) error
 	// ClaimDue atomically claims up to limit due pending rows across every
 	// tenant, incrementing each one's attempts and pushing its
 	// next_attempt_at out by an exponential backoff — which doubles as a
