@@ -25,6 +25,15 @@
 # this pipeline. To enable CRD validation, add a -schema-location flag
 # pointing to a catalog (e.g. the datreeio/CRDs-catalog) and remove
 # -ignore-missing-schemas once a catalog decision is made.
+#
+# ── CD-19 access matrix (Step 3) ─────────────────────────────────────────
+# kubeconform proves the manifests are well-formed, not WHO can reach WHAT.
+# Step 3 renders base+staging and base+prod and runs
+# .github/scripts/check-cd19-access-matrix.py on each: the Istio
+# AuthorizationPolicy (Billing → exactly RP-3/RP-4/RP-11, Signup BFF →
+# exactly RP-1/RP-2, namespace rule exactly [iam, observability]), every
+# NetworkPolicy (billing/bff only with their pod labels, never commercial),
+# and router.go's commercial-system allow-list. Needs python3 + PyYAML.
 set -euo pipefail
 
 CHART_DIR="deploy/helm"
@@ -124,6 +133,37 @@ run_combo "base+dev"     -f "${CHART_DIR}/values-dev.yaml"
 run_combo "base+staging" -f "${CHART_DIR}/values-staging.yaml"
 run_combo "base+prod"    -f "${CHART_DIR}/values-prod.yaml"
 
+# ── Step 3: CD-19 access matrix (staging + prod) ──────────────────────────
+# check_access_matrix <label> <overlay-values-file>
+check_access_matrix() {
+  local label="$1" overlay="$2"
+  echo "::group::CD-19 access matrix [${label}]"
+  local rendered
+  if ! rendered=$(helm template "${RELEASE_NAME}" "${CHART_DIR}" \
+      "${SHARED_SETS[@]}" \
+      --namespace "${NAMESPACE}" \
+      -f "${BASE_VALUES}" -f "${overlay}" 2>&1); then
+    echo "::error file=${CHART_DIR},title=CD-19 access matrix [${label}]::helm template failed — output below"
+    printf '%s\n' "${rendered}"
+    FAILED=1
+    echo "::endgroup::"
+    return
+  fi
+  if ! printf '%s\n' "${rendered}" | python3 .github/scripts/check-cd19-access-matrix.py \
+      --label "${label}" --values "${BASE_VALUES}" --values "${overlay}"; then
+    FAILED=1
+  fi
+  echo "::endgroup::"
+}
+
+if ! python3 -c 'import yaml' 2>/dev/null; then
+  echo "::error title=CD-19 access matrix::python3 with PyYAML is required (pip install pyyaml)"
+  FAILED=1
+else
+  check_access_matrix "base+staging" "${CHART_DIR}/values-staging.yaml"
+  check_access_matrix "base+prod"    "${CHART_DIR}/values-prod.yaml"
+fi
+
 # ── Final result ──────────────────────────────────────────────────────────
 if [ "${FAILED}" -ne 0 ]; then
   echo ""
@@ -133,6 +173,7 @@ fi
 
 echo ""
 echo "  ✔  helm check passed: base | base+dev | base+staging | base+prod"
+echo "  ✔  CD-19 access matrix asserted: base+staging | base+prod"
 echo "  ⚠  CRD schema coverage: ServiceMonitor, PrometheusRule, HTTPRoute,"
 echo "     SecurityPolicy, AuthorizationPolicy were SKIPPED (no org-wide"
 echo "     CRD schema catalog configured; -ignore-missing-schemas active)."

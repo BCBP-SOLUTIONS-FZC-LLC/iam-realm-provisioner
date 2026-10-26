@@ -121,7 +121,7 @@ help:
 	@echo "  make build            - compile server, reconciler and migrate to bin/"
 	@echo "  make cover            - coverage HTML report"
 	@echo "  make cover-func       - coverage summary by function"
-	@echo "  make helm-check       - helm lint + template (4 value combos) + kubeconform (mirrors validate-helm.yml)"
+	@echo "  make helm-check       - helm lint + template (4 value combos) + kubeconform + CD-19 access matrix (mirrors validate-helm.yml)"
 	@echo "  make ci               - tidy + fmt-check + vet + lint + arch-lint + metrics-registry-lint + metric-naming-lint + metrics-lint + test-ci + build"
 	@echo "  make docker-up        - start Postgres + Floci + Floci UI + Keycloak + OpenBao"
 	@echo "  make docker-down      - stop local containers"
@@ -575,10 +575,12 @@ schema-prune:
 # CI
 # -----------------------------
 
-# helm-check: lint, render all four values combos, and kubeconform-validate
-# rendered manifests. Mirrors .github/workflows/validate-helm.yml exactly.
-# Requires helm + kubeconform (installed automatically on first run via
-# go install if absent). Does not require Docker or a live cluster.
+# helm-check: lint, render all four values combos, kubeconform-validate
+# rendered manifests, and assert the CD-19 access matrix on the staging and
+# prod renders (.github/scripts/check-cd19-access-matrix.py). Mirrors
+# .github/workflows/validate-helm.yml exactly. Requires helm + kubeconform
+# (installed automatically on first run via go install if absent) and
+# python3 with PyYAML. Does not require Docker or a live cluster.
 .PHONY: helm-check
 helm-check:
 	bash .github/scripts/helm-check.sh

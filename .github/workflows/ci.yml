@@ -7,6 +7,8 @@
 #                       │   smoke ───────┤──► pr-summary (PR events only)
 #                       └────────────────┤──► push       (push events only, needs quality too)
 #   validate-quality ───────────────────┘
+#   validate-helm ──────────────────────┘  (helm lint/template/kubeconform +
+#                                           CD-19 access matrix; gates push)
 #
 # This repo ships TWO binaries from ONE image (§13 - see Dockerfile's header
 # comment): /iam-realm-provisioner-server (HTTP API RP-1..RP-16 + the three
@@ -64,6 +66,14 @@ jobs:
   validate-quality:
     name: Validate / Quality
     uses: ./.github/workflows/validate-quality.yml
+    secrets: inherit
+
+  # ── runs in parallel with the other validate jobs ────────────────────────
+  # helm lint + template + kubeconform, and the CD-19 access matrix on the
+  # staging/prod renders (Billing → RP-3/4/11, Signup BFF → RP-1/2 only).
+  validate-helm:
+    name: Validate / Helm
+    uses: ./.github/workflows/validate-helm.yml
     secrets: inherit
 
   # ── runs in parallel with validate-test + validate-quality ───────────────
@@ -280,7 +290,7 @@ jobs:
   pr-summary:
     name: PR summary
     runs-on: ubuntu-latest
-    needs: [validate-test, validate-quality, build-image, trivy, smoke]
+    needs: [validate-test, validate-quality, validate-helm, build-image, trivy, smoke]
     if: github.event_name == 'pull_request'
     timeout-minutes: 5
     permissions:
@@ -308,7 +318,7 @@ jobs:
   push:
     name: Push image → GHCR
     runs-on: ubuntu-latest
-    needs: [validate-test, trivy, smoke, validate-quality]
+    needs: [validate-test, trivy, smoke, validate-quality, validate-helm]
     if: github.event_name == 'push'
     # amd64-only publish with provenance/SBOM attestations can exceed 10 minutes.
     timeout-minutes: 25
