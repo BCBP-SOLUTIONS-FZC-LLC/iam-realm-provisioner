@@ -260,7 +260,7 @@ Missing or invalid → `400 INVALID_REQUEST`. RP-1/RP-2 record it as an Audit Lo
 
 ### 4. Billing — RP-3 / RP-4 / reactivate
 
-Billing drives conversion, reversal, and (non-operator-sourced) reactivation over mesh calls, not events: RP-3 `convert`, RP-4 `revert-conversion`, RP-10 `reactivate`. Billing also **produces** `TenantReactivated` on its own `billing.events` topic, consumed by `billing-realm-q` — a re-enable of a suspended dedicated realm — which is a different topic/producer from this service's own `TenantReactivated` (`source=operator`) on `iam.tenant.events`; the two are distinguished by `source`, never self-consumed.
+Billing drives conversion and reversal over mesh calls (`commercial-system`, CD-19 allow-list): RP-3 `convert`, RP-4 `revert-conversion`, plus the RP-11 `realm` read. Billing does **not** call RP-10 `reactivate` (it is not admitted, `403`); it reactivates through an event instead: it **produces** `TenantReactivated` on its own `billing.events` topic, consumed by `billing-realm-q` — a re-enable of a suspended dedicated realm — which is a different topic/producer from this service's own `TenantReactivated` (`source=operator`) on `iam.tenant.events`; the two are distinguished by `source`, never self-consumed.
 
 ### 5. Org & Membership — multiple call sites
 

@@ -525,7 +525,7 @@ type ProvisionDirectRequest struct {
 //
 // KeycloakUserID is the tenant owner's Keycloak `sub`, exactly as RP-1
 // returns it: the Signup BFF passes it to O&M I-1 as owner_user_id, so
-// both signup paths call I-1 the same way (LLD v1.42). It is the user this
+// both signup paths call I-1 the same way (LLD v1.43). It is the user this
 // call created, or — on the user-exists conflict resume — the existing
 // same-tenant user, and it is stored in the idempotency ledger so a replay
 // returns it too.

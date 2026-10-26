@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # pre-deploy-check.sh — validate all production go-live prerequisites before
-# deploying iam-realm-provisioner for the first time.
+# deploying iam-realm-provisioner for the first time. Item 13 (tenants past
+# RETENTION_DAYS, CD-23) is a standing check for EVERY deploy and every
+# RETENTION_DAYS change — docs/runbook.md §10.
 #
 # Usage:
 #   AWS_REGION=ap-south-1 GLUE_REGISTRY_TENANT_NAME=iam-tenant-events \
 #   KUBECONFIG=~/.kube/config NAMESPACE=iam \
+#   PROVISIONER_DATABASE_URL=postgres://... RETENTION_DAYS=60 \
 #   ./scripts/pre-deploy-check.sh
 #
 # Each check prints PASS or FAIL with a remediation hint.
@@ -134,6 +137,39 @@ if [[ "$KB" != "missing" ]]; then
 else
   fail "KUBECONFIG_B64 secret not set" \
        "gh secret set KUBECONFIG_B64 --body \$(base64 -i ~/.kube/config) --repo ${GH_REPO}"
+fi
+
+# ── 13. Tenants past the retention window (CD-23, standing check) ───────────
+# Every deploy and every RETENTION_DAYS change: list billing-lapse-suspended
+# tenants the next subscription-lapse run would offboard (terminal). Same
+# predicate as TenantRealmRepository.ListSuspendedPastRetention. Runbook §10.
+section "Item 13 — Tenants past RETENTION_DAYS (offboarded on the next subscription-lapse run)"
+RETENTION_DAYS="${RETENTION_DAYS:-60}"
+DB_URL="${PROVISIONER_DATABASE_URL:-}"
+if ! [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]]; then
+  fail "RETENTION_DAYS='${RETENTION_DAYS}' is not a whole number of days" \
+       "Set RETENTION_DAYS to the value that will be live after this deploy"
+elif [[ -z "$DB_URL" ]]; then
+  echo "  ⚠️  WARN: PROVISIONER_DATABASE_URL unset — retention check skipped"
+  echo "         Run the query in docs/runbook.md §10 by hand before deploying"
+elif ! command -v psql >/dev/null 2>&1; then
+  fail "psql not installed — cannot run the retention check" \
+       "Install the PostgreSQL client, or run the query in docs/runbook.md §10 by hand"
+else
+  ROWS=$(psql "$DB_URL" -X -A -t -F ' ' -v ON_ERROR_STOP=1 -c "
+    SELECT tenant_id, disabled_at FROM tenant_realms
+    WHERE status = 'suspended' AND suspension_source = 'billing_lapse'
+      AND disabled_at < now() - make_interval(days => ${RETENTION_DAYS})
+    ORDER BY disabled_at" 2>&1) || { fail "retention query failed: ${ROWS}" "Check PROVISIONER_DATABASE_URL"; ROWS="__error__"; }
+  if [[ "$ROWS" == "__error__" ]]; then
+    :
+  elif [[ -z "$ROWS" ]]; then
+    pass "No billing-lapse tenant is past RETENTION_DAYS=${RETENTION_DAYS}"
+  else
+    echo "$ROWS" | sed 's/^/         /'
+    fail "$(echo "$ROWS" | wc -l | tr -d ' ') tenant(s) past RETENTION_DAYS=${RETENTION_DAYS} would be offboarded" \
+         "Confirm each with Billing before deploying (docs/runbook.md §10)"
+  fi
 fi
 
 # ── 12. Caller migration ──────────────────────────────────────────────────────
