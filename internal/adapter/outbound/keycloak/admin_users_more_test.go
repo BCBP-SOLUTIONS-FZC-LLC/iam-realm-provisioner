@@ -365,7 +365,9 @@ func TestPartialImportUser_DecodeError(t *testing.T) {
 	})
 	tok, err := a.token(context.Background())
 	require.NoError(t, err)
-	err = a.partialImportUser(context.Background(), tok, realm, buildUser(port.CreateUserRequest{Email: "a@example.com", FullName: "A", TenantID: uuid.New()}))
+	u, err := buildUser(port.CreateUserRequest{Email: "a@example.com", FullName: "A", TenantID: uuid.New()})
+	require.NoError(t, err)
+	err = a.partialImportUser(context.Background(), tok, realm, u)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "decode response")
 }
@@ -379,7 +381,9 @@ func TestPartialImportUser_SkippedNotAdded(t *testing.T) {
 	})
 	tok, err := a.token(context.Background())
 	require.NoError(t, err)
-	err = a.partialImportUser(context.Background(), tok, realm, buildUser(port.CreateUserRequest{Email: "a@example.com", FullName: "A", TenantID: uuid.New()}))
+	u, err := buildUser(port.CreateUserRequest{Email: "a@example.com", FullName: "A", TenantID: uuid.New()})
+	require.NoError(t, err)
+	err = a.partialImportUser(context.Background(), tok, realm, u)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "expected 1 user added")
 }
@@ -388,7 +392,9 @@ func TestPartialImportUser_TransportError(t *testing.T) {
 	a := newFakeAdmin(t, nil, nil) // no route registered for partialImport -> gocloak's resty escape hatch still succeeds the round trip (404), IsError() true
 	tok, err := a.token(context.Background())
 	require.NoError(t, err)
-	err = a.partialImportUser(context.Background(), tok, "acme", buildUser(port.CreateUserRequest{Email: "a@example.com", FullName: "A", TenantID: uuid.New()}))
+	u, err := buildUser(port.CreateUserRequest{Email: "a@example.com", FullName: "A", TenantID: uuid.New()})
+	require.NoError(t, err)
+	err = a.partialImportUser(context.Background(), tok, "acme", u)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unexpected status")
 }

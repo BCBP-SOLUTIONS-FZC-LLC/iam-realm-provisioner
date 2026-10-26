@@ -1,6 +1,7 @@
 package keycloak
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -77,7 +78,8 @@ func TestBuildUser(t *testing.T) {
 		Email: "owner@example.com", FullName: "Dana Owner", TenantID: tenantID,
 		RequiredActions: []string{"VERIFY_EMAIL"}, EmailVerified: true,
 	}
-	u := buildUser(req)
+	u, err := buildUser(req)
+	require.NoError(t, err)
 	require.Equal(t, "owner@example.com", *u.Username)
 	require.Equal(t, "owner@example.com", *u.Email)
 	require.Equal(t, "Dana", *u.FirstName)
@@ -90,18 +92,47 @@ func TestBuildUser(t *testing.T) {
 }
 
 func TestBuildUser_NoRequiredActions(t *testing.T) {
-	u := buildUser(port.CreateUserRequest{Email: "a@example.com", FullName: "A", TenantID: uuid.New()})
+	u, err := buildUser(port.CreateUserRequest{Email: "a@example.com", FullName: "A", TenantID: uuid.New()})
+	require.NoError(t, err)
 	require.Nil(t, u.RequiredActions)
 }
 
 func TestBuildUser_WithHashedPasswordSeed(t *testing.T) {
-	u := buildUser(port.CreateUserRequest{
-		Email: "a@example.com", FullName: "A", TenantID: uuid.New(), HashedPasswordSeed: "seed-hash",
+	seed := `{"algorithm":"pbkdf2-sha512","iterations":210000,"salt":"c2FsdA==","hash":"aGFzaA=="}`
+	u, err := buildUser(port.CreateUserRequest{
+		Email: "a@example.com", FullName: "A", TenantID: uuid.New(), HashedPasswordSeed: seed,
 	})
+	require.NoError(t, err)
 	require.NotNil(t, u.Credentials)
 	require.Len(t, *u.Credentials, 1)
 	cred := (*u.Credentials)[0]
 	require.Equal(t, "password", *cred.Type)
-	require.Equal(t, "seed-hash", *cred.Value)
 	require.False(t, *cred.Temporary)
+	require.Nil(t, cred.Value, "Value must be nil — Keycloak must not re-hash the credential")
+	require.NotNil(t, cred.SecretData)
+	require.NotNil(t, cred.CredentialData)
+
+	var secret struct {
+		Value string `json:"value"`
+		Salt  string `json:"salt"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(*cred.SecretData), &secret))
+	require.Equal(t, "aGFzaA==", secret.Value)
+	require.Equal(t, "c2FsdA==", secret.Salt)
+
+	var credData struct {
+		HashIterations int    `json:"hashIterations"`
+		Algorithm      string `json:"algorithm"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(*cred.CredentialData), &credData))
+	require.Equal(t, 210000, credData.HashIterations)
+	require.Equal(t, "pbkdf2-sha512", credData.Algorithm)
+}
+
+func TestBuildUser_InvalidHashedPasswordSeed(t *testing.T) {
+	_, err := buildUser(port.CreateUserRequest{
+		Email: "a@example.com", FullName: "A", TenantID: uuid.New(), HashedPasswordSeed: "not-json",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "hashed_password_seed is not valid JSON")
 }

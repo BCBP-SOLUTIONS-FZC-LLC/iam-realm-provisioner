@@ -14,7 +14,43 @@ import (
 
 const tenantIDAttribute = "tenant_id"
 
-func buildUser(req port.CreateUserRequest) gocloak.User {
+// buildCredential converts bff-signup's HashedPasswordSeed JSON blob into
+// Keycloak's import format. SecretData/CredentialData tell Keycloak to store
+// the credential without re-hashing (contrast with Value, which Keycloak
+// hashes using the realm's configured algorithm, causing a double-hash).
+func buildCredential(hashedPasswordSeed string) (*gocloak.CredentialRepresentation, error) {
+	var seed struct {
+		Algorithm  string `json:"algorithm"`
+		Iterations int    `json:"iterations"`
+		Salt       string `json:"salt"`
+		Hash       string `json:"hash"`
+	}
+	if err := json.Unmarshal([]byte(hashedPasswordSeed), &seed); err != nil {
+		return nil, fmt.Errorf("hashed_password_seed is not valid JSON: %w", err)
+	}
+	secretData, err := json.Marshal(map[string]any{
+		"value": seed.Hash,
+		"salt":  seed.Salt,
+	})
+	if err != nil {
+		return nil, err
+	}
+	credentialData, err := json.Marshal(map[string]any{
+		"hashIterations": seed.Iterations,
+		"algorithm":      seed.Algorithm,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &gocloak.CredentialRepresentation{
+		Type:           gocloak.StringP("password"),
+		SecretData:     gocloak.StringP(string(secretData)),
+		CredentialData: gocloak.StringP(string(credentialData)),
+		Temporary:      gocloak.BoolP(false),
+	}, nil
+}
+
+func buildUser(req port.CreateUserRequest) (gocloak.User, error) {
 	first, last := splitName(req.FullName)
 	u := gocloak.User{
 		Username:      &req.Email,
@@ -29,13 +65,13 @@ func buildUser(req port.CreateUserRequest) gocloak.User {
 		u.RequiredActions = &req.RequiredActions
 	}
 	if req.HashedPasswordSeed != "" {
-		u.Credentials = &[]gocloak.CredentialRepresentation{{
-			Type:      gocloak.StringP("password"),
-			Value:     &req.HashedPasswordSeed,
-			Temporary: gocloak.BoolP(false),
-		}}
+		cred, err := buildCredential(req.HashedPasswordSeed)
+		if err != nil {
+			return gocloak.User{}, err
+		}
+		u.Credentials = &[]gocloak.CredentialRepresentation{*cred}
 	}
-	return u
+	return u, nil
 }
 
 func splitName(full string) (first, last string) {
@@ -59,7 +95,11 @@ func (a *Admin) CreateTrialUser(ctx context.Context, req port.CreateUserRequest)
 	if len(req.RequiredActions) == 0 {
 		req.RequiredActions = []string{"VERIFY_EMAIL"}
 	}
-	id, err := a.client.CreateUser(ctx, tok, "trial", buildUser(req))
+	user, err := buildUser(req)
+	if err != nil {
+		return uuid.Nil, wrapErr("create_trial_user: build_user", err)
+	}
+	id, err := a.client.CreateUser(ctx, tok, "trial", user)
 	if err != nil {
 		return uuid.Nil, wrapCreateUserErr("create_trial_user", req.Email, err)
 	}
@@ -79,7 +119,11 @@ func (a *Admin) CreateInvitedUser(ctx context.Context, realmName string, req por
 	if err != nil {
 		return uuid.Nil, wrapErr("create_invited_user: token", err)
 	}
-	id, err := a.client.CreateUser(ctx, tok, realmName, buildUser(req))
+	user, err := buildUser(req)
+	if err != nil {
+		return uuid.Nil, wrapErr("create_invited_user: build_user", err)
+	}
+	id, err := a.client.CreateUser(ctx, tok, realmName, user)
 	if err != nil {
 		return uuid.Nil, wrapCreateUserErr("create_invited_user", req.Email, err)
 	}
