@@ -113,7 +113,7 @@ POST /tenants/provision-direct {..., billing_subscription_id, terms_acceptance} 
     outbox.Enqueue(TenantRealmReady{tenant_id, realm, keycloak_shard, oidc_clients})
     outbox.Enqueue(DirectPaidSignup{tenant_id, realm, direct_signup:true})
     outbox.Enqueue(TenantConverted{tenant_id, realm, plan, billing_subscription_id?, users_migrated:0, direct_signup:true})
-  -> 201 {tenant_id, realm, strategy:"dedicated", keycloak_shard, oidc_clients}
+  -> 201 {tenant_id, realm, strategy:"dedicated", keycloak_shard, oidc_clients, keycloak_user_id, email_verification_sent:true}
 ```
 
 Note `selectShard` reads `CountsByShard` from the **local mirror** of `tenant_realms` (this service is the single writer to Keycloak, so its own local count is authoritative without a live Keycloak query, §9.5).

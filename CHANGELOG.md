@@ -4,6 +4,18 @@ All notable changes to this service are documented here. Format follows [Keep a 
 
 This service has never been deployed to any environment — there is no released version yet, so everything lives under `[Unreleased]`. Because of that, this file tracks only what is currently true and what is still outstanding, not a phase-by-phase build history; the full development diary is available via `git log` if it's ever needed.
 
+## [Unreleased — 2026-10-26 patch 2]
+
+### Fixed
+
+- **RP-2 201 response now includes `keycloak_user_id` and `email_verification_sent` (Phase 1.5 blocker, LLD v1.43).** `ProvisionDirectResult` was missing these two fields that bff-signup requires to call O&M's I-1 with the correct `owner_user_id` (SB-INV-4: RP before I-1, `owner_user_id` = `keycloak_user_id` from RP response). Without `keycloak_user_id`, the I-1 call would send `owner_user_id: ""` → O&M validation failure → direct-paid signup broken. `kcUserID` is already resolved by the time the result is built (via `CreateInvitedUser` / `resolveUserCreateConflict`). `EmailVerificationSent` is always `true` for RP-2 (admin user is created with `RequiredActions: ["VERIFY_EMAIL"]`). Both fields now set at result-build time, mirroring `ProvisionTrialResult`'s pattern (`provisioning_service.go:612`).
+
+### Changed
+
+- **RP-2 `@Failure 409` Swagger annotation updated** to list `email_already_registered` alongside `operation_in_progress`, `realm_already_dedicated`, and `tenant_offboarded` — the service layer already handles it via `resolveUserCreateConflict`, as on RP-1. Documentation-only fix, no behaviour change.
+
+---
+
 ## [Unreleased — 2026-10-26]
 
 ### Fixed
