@@ -18,3 +18,13 @@ DLA-4792-1
 # re-check: remove this entry, the Dockerfile's bundle COPY, and bump the
 # runtime digest once distroless ships deb12u2.
 DLA-4845-1 exp:2026-11-21
+
+# DLA-4854-1: tzdata 2026b-0+deb12u1 → 2026e-0+deb12u1, a timezone-database
+# refresh (Trivy: UNKNOWN; the CI gate fails on UNKNOWN). Same package and
+# situation as DLA-4792-1 above.
+# Not exploitable here: the service never loads a zone (no time.LoadLocation, no
+# time/tzdata, no time.Local use; all timestamps are UTC).
+# Blocked upstream: on 2026-10-26 the newest gcr.io/distroless/static-debian12
+# :nonroot digest (sha256:afa5c872…) still ships tzdata 2026b. Remove this
+# entry and re-pin once distroless ships tzdata >= 2026e.
+DLA-4854-1 exp:2026-11-30
