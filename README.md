@@ -4,7 +4,7 @@ The Realm Provisioner Service — the **single writer to the Keycloak Admin API*
 
 **Repository:** `github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`
 **Module:** Go 1.26.10 · private module · deployed as three binaries from one image (`cmd/server`, `cmd/reconciler`, `cmd/migrate`)
-**Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.23 Approved** — names frozen at v1.0 sign-off (`docs/lld/iam-lld-realm-provisioner-service.md`)
+**Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.42 Approved** (`docs/lld/iam-lld-realm-provisioner-service.md`)
 
 ---
 
@@ -167,7 +167,7 @@ iam-realm-provisioner/
 │   ├── asyncapi.yaml                  # AsyncAPI 3.0 — iam-tenant-events (9 published) + 3 inbound SQS channels + 3 downstream Commercial consumer queue references (CD-26)
 │   └── embed.go                       # //go:embed asyncapi.yaml — served from the compiled binary, no source tree in the image
 ├── deploy/                            # Helm chart, AWS IAM policy, OpenBao policy, Prometheus alerts, Keycloak realm template
-├── docs/lld/                          # LLD v1.23 (names frozen at v1.0)
+├── docs/lld/                          # LLD v1.42
 ├── docs/observability/                # Observability Standard implementation, generated metric registry, metric migration history, per-alert runbooks
 ├── docs/runbook.md                    # Operator procedures for the headline incident scenarios (§24)
 ├── docs/runbook-schema-registry.md    # Schema-governance operator runbook (shared iam-tenant-events registry)
@@ -345,7 +345,7 @@ if resp.StatusCode >= 400 {
 | `TENANT_REALM_NOT_FOUND` / `IDP_CONFIG_NOT_FOUND` | 404 | Resource missing (RP-15/RP-16 treat a missing Keycloak user as **204**, not 404) |
 | `KEYCLOAK_USER_NOT_FOUND` | 404 | Internal signal from `FindUserByEmail`, absorbed before reaching a caller (§9.2) |
 | `IDP_REQUIRES_DEDICATED_REALM` / `REALM_ALREADY_DEDICATED` / `REVERT_WINDOW_EXPIRED` / `TENANT_OFFBOARDED` / `OPERATION_IN_PROGRESS` / `OPTIMISTIC_LOCK_CONFLICT` | 409 | State-machine / idempotency conflict |
-| `USER_EMAIL_CONFLICT` | 409 | RP-1/RP-2/RP-5 create-user 409 that couldn't be resolved as the caller's own lost-response retry (§9.2) |
+| `EMAIL_ALREADY_REGISTERED` | 409 | RP-1/RP-2/RP-5 create-user 409 that couldn't be resolved as the caller's own lost-response retry (§9.2); domain code `user_email_conflict` |
 | `SERVICE_ACCOUNT_ROTATION_IN_FLIGHT` | 409 | Token Service TS-1 rejected a concurrent issue/rotate for the same `platform-automation` principal (§2.5); also the safe default for any unparseable TS-1 409 body |
 | `CREDENTIAL_REPLAY_REVOKED` | 409 | Token Service TS-1 (TS-D13) — replayed `rotation_id` whose credential has since been revoked |
 | `CREDENTIAL_REPLAY_EXPIRED` | 409 | Token Service TS-1 (TS-D22) — replayed `rotation_id` past `ROTATION_REPLAY_WINDOW` |
@@ -934,6 +934,7 @@ Two fail-closed calls that sibling services feel (invite, MFA-reset) stop comple
 
 **Open items:**
 - **OpenBao Kubernetes auth is untested outside a real cluster** — in local dev, RP-6/RP-7's OpenBao write/delete step returns `500` as expected (no cluster to authenticate against); `test/integration/openbao_test.go` exercises the real login flow with a stubbed TokenReview response.
+- **bff-signup must add `x-tenant-roles: iam-system` to RP-1/RP-2 calls (fix in BFF, not here)** — `RequireSystemRole` checks `rc.HasRole("iam-system")` from the `x-tenant-roles` header; bff-signup's `realmprovisioner/client.go` ProvisionTrial and ProvisionDirect calls are currently missing this header. Add `req.Header.Set("x-tenant-roles", "iam-system")` to both (same fix applied for O&M in bff-signup commit `4af2499`). Verified 2026-10-26.
 
 ---
 
@@ -963,7 +964,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, extending the serv
 | [`.claude/request-flows.md`](.claude/request-flows.md) | Keycloak-effect-first discipline, compensating teardown, every RP-*/RP-C* flow, idempotency mechanics, GDPR/data-lifecycle |
 | [`.claude/operations.md`](.claude/operations.md) | Security, observability, configuration, CI/CD, testing, GDPR, integration points, open items |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Detailed architecture narrative with Mermaid diagrams — layer model, write flow, RLS/GUC flow, threat model |
-| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD, v1.23 Approved — §15 GDPR scrub (four-table erasure via `NewGDPRScrubFn`), §17 error taxonomy (incl. `credential_replay_expired` TS-D22), §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
+| [`docs/lld/iam-lld-realm-provisioner-service.md`](docs/lld/iam-lld-realm-provisioner-service.md) | Full LLD, v1.42 Approved — §15 GDPR scrub (four-table erasure via `NewGDPRScrubFn`), §17 error taxonomy (incl. `credential_replay_expired` TS-D22, `EMAIL_ALREADY_REGISTERED` wire code for email conflicts), §18.10 dependency table, §19 migration strategy, §25 frozen name inventory |
 | [`docs/runbook.md`](docs/runbook.md) | Full operator procedures for the headline incident scenarios |
 | [`docs/observability/`](docs/observability/README.md) | Observability Standard implementation, generated metric inventory, metric migration history, per-alert runbooks |
 

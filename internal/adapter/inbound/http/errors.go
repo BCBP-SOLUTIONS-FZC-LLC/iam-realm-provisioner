@@ -38,7 +38,7 @@ var (
 	realmTenantOffboarded               = problem.MustType("realm", "tenant-offboarded", "Tenant Offboarded", 409, "TENANT_OFFBOARDED")
 	realmOperationInProgress            = problem.MustType("realm", "operation-in-progress", "Operation In Progress", 409, "OPERATION_IN_PROGRESS")
 	realmOptimisticLockConflict         = problem.MustType("realm", "optimistic-lock-conflict", "Optimistic Lock Conflict", 409, "OPTIMISTIC_LOCK_CONFLICT")
-	realmUserEmailConflict              = problem.MustType("realm", "user-email-conflict", "User Email Conflict", 409, "USER_EMAIL_CONFLICT")
+	realmUserEmailConflict              = problem.MustType("realm", "user-email-conflict", "User Email Conflict", 409, "EMAIL_ALREADY_REGISTERED")
 	realmServiceAccountRotationInFlight = problem.MustType("realm", "service-account-rotation-in-flight", "Service Account Rotation In Flight", 409, "SERVICE_ACCOUNT_ROTATION_IN_FLIGHT")
 	realmCredentialReplayRevoked        = problem.MustType("realm", "credential-replay-revoked", "Credential Replay Revoked", 409, "CREDENTIAL_REPLAY_REVOKED")
 	realmCredentialReplayExpired        = problem.MustType("realm", "credential-replay-expired", "Credential Replay Expired", 409, "CREDENTIAL_REPLAY_EXPIRED")

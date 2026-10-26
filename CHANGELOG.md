@@ -4,6 +4,20 @@ All notable changes to this service are documented here. Format follows [Keep a 
 
 This service has never been deployed to any environment — there is no released version yet, so everything lives under `[Unreleased]`. Because of that, this file tracks only what is currently true and what is still outstanding, not a phase-by-phase build history; the full development diary is available via `git log` if it's ever needed.
 
+## [Unreleased — 2026-10-26]
+
+### Fixed
+
+- **Wire `errorCode` for email conflicts corrected to `EMAIL_ALREADY_REGISTERED` (LLD v1.42, §17).** A BFF-Signup ↔ RP cross-service compatibility check on 2026-10-26 found that `internal/adapter/inbound/http/errors.go` emitted `USER_EMAIL_CONFLICT` in the RFC 9457 `errorCode` field for `domain.ErrUserEmailConflict` (RP-1/RP-2/RP-5), while bff-signup's `realmprovisioner/client.go` branches on `"EMAIL_ALREADY_REGISTERED"`. The mismatch meant the BFF's `case "EMAIL_ALREADY_REGISTERED"` never matched RP's response, and a duplicate-email error surfaced as a generic failure instead of `domain.ErrEmailUnavailable`. Fix: the `problem.MustType` `errorCode` argument in `errors.go:41` changed from `"USER_EMAIL_CONFLICT"` to `"EMAIL_ALREADY_REGISTERED"`. The domain error code (`user_email_conflict`, `ErrUserEmailConflict`) and internal logic are unchanged. Swagger `@Failure 409` annotation on the RP-1 handler updated to include `email_already_registered`.
+
+- **RP-1 201 response includes `strategy` field (confirmed, no change).** `ProvisionTrialResult.Strategy` is populated with `domain.RealmStrategyShared` (`"shared"`) — the field bff-signup's `ProvisionTrialResponse` struct expects. ✅
+
+### Notes (bff-signup open item — fix in BFF, not here)
+
+- `RequireSystemRole` checks `rc.IsSystem()` → `rc.HasRole("iam-system")` from the `x-tenant-roles` header. bff-signup's ProvisionTrial and ProvisionDirect calls are missing this header — add `req.Header.Set("x-tenant-roles", "iam-system")` to both in `internal/adapter/outbound/realmprovisioner/client.go` (same fix applied for O&M in bff-signup commit `4af2499`).
+
+---
+
 ## [Unreleased — 2026-10-21]
 
 ### Added

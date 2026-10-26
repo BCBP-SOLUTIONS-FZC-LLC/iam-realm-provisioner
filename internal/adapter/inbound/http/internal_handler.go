@@ -101,7 +101,7 @@ type provisionTrialRequest struct {
 // @Param        request  body      provisionTrialRequest        true  "Trial provisioning payload"
 // @Success      201      {object}  service.ProvisionTrialResult
 // @Failure      400      {object}  ProblemResponse                "invalid_request OR missing_idempotency_key"
-// @Failure      409      {object}  ProblemResponse                "operation_in_progress OR realm_already_dedicated OR tenant_offboarded"
+// @Failure      409      {object}  ProblemResponse                "operation_in_progress OR realm_already_dedicated OR tenant_offboarded OR email_already_registered"
 // @Failure      500      {object}  ProblemResponse
 // @Failure      503      {object}  ProblemResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
 // @Security     SystemRole
