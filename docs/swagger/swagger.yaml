@@ -334,6 +334,8 @@ definitions:
     properties:
       keycloak_shard:
         type: string
+      keycloak_user_id:
+        type: string
       oidc_clients:
         items:
           type: string

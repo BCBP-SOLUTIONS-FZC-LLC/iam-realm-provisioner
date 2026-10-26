@@ -1642,6 +1642,9 @@ const docTemplate = `{
                 "keycloak_shard": {
                     "type": "string"
                 },
+                "keycloak_user_id": {
+                    "type": "string"
+                },
                 "oidc_clients": {
                     "type": "array",
                     "items": {
