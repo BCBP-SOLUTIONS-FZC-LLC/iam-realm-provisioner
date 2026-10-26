@@ -102,9 +102,9 @@ Each queue has a `-dlq` sibling, `maxReceiveCount=5`. Dedup via `processed_event
 
 | Queue | Owner | `EventType` filter |
 |---|---|---|
-| `tenant-billing-q` | Billing Service | `TenantSuspended`, `TenantReactivated` (CD-24: operator suspensions + un-suspends previously invisible to Billing) |
+| `tenant-billing-q` | Billing Service | `TenantSuspended`, `TenantReactivated`, `TenantConverted`, `TenantOffboarded` (CD-24: operator suspensions + un-suspends previously invisible to Billing; CD-49 adds conversion and offboarding) |
 | `tenant-entitlements-q` | Entitlements Service | `TenantConverted`, `TenantSuspended`, `TenantReactivated`, `TenantOffboarded`, `TrialExpired` (CD-6) |
-| `tenant-usage-q` | Usage & Metering Service | `TenantConverted`, `TenantSuspended`, `TenantOffboarded` |
+| `tenant-usage-q` | Usage & Metering Service | `TenantConverted`, `TenantSuspended`, `TenantOffboarded`, `TenantReactivated` (CD-49) |
 
 These are documented in `api/asyncapi.yaml` (three `sqsTenant*` server entries) and the LLD §7.4 consumer table for cross-team visibility. Each has a `-dlq` sibling, `maxReceiveCount=5`.
 
