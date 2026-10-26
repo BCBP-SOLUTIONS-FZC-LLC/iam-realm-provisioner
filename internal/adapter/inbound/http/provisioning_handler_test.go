@@ -124,8 +124,9 @@ func TestProvisionDirect_Happy(t *testing.T) {
 	d.keycloak.RegisterOIDCClientsFn = func(ctx context.Context, realmName, tenantSlug string) ([]string, error) {
 		return []string{"web", "mobile"}, nil
 	}
+	kcUserID := uuid.New()
 	d.keycloak.CreateInvitedUserFn = func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
-		return uuid.New(), nil
+		return kcUserID, nil
 	}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "direct-1")
 	rec := doRequest(d.engine(), http.MethodPost, provisionDirectPath, headers, directBody(uuid.New()))
@@ -133,16 +134,89 @@ func TestProvisionDirect_Happy(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 	var body struct {
-		Strategy      string   `json:"strategy"`
-		KeycloakShard string   `json:"keycloak_shard"`
-		OIDCClients   []string `json:"oidc_clients"`
+		Strategy       string    `json:"strategy"`
+		KeycloakUserID uuid.UUID `json:"keycloak_user_id"`
+		KeycloakShard  string    `json:"keycloak_shard"`
+		OIDCClients    []string  `json:"oidc_clients"`
 	}
 	decodeInto(t, rec, &body)
 	if body.Strategy != "dedicated" || body.KeycloakShard == "" || len(body.OIDCClients) != 2 {
 		t.Fatalf("unexpected result: %+v", body)
 	}
+	// Same JSON name and type as RP-1: the BFF's O&M I-1 owner_user_id.
+	if body.KeycloakUserID != kcUserID {
+		t.Fatalf("keycloak_user_id = %s, want the created owner %s", body.KeycloakUserID, kcUserID)
+	}
 	if len(d.tx.pub.events) != 4 {
 		t.Fatalf("expected 4 events (TenantIdentityProvisioned+TenantRealmReady+DirectPaidSignup+TenantConverted), got %d", len(d.tx.pub.events))
+	}
+}
+
+// A retry under the same Idempotency-Key is answered from the ledger and
+// still carries keycloak_user_id — a BFF whose first response was lost can
+// build I-1's owner_user_id from the replay.
+func TestProvisionDirect_Replay_ReturnsKeycloakUserID(t *testing.T) {
+	d := newServiceDeps()
+	d.keycloak.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, templateVersion string) error { return nil }
+	d.keycloak.RegisterOIDCClientsFn = func(ctx context.Context, realmName, tenantSlug string) ([]string, error) {
+		return []string{"web", "mobile"}, nil
+	}
+	kcUserID := uuid.New()
+	creates := 0
+	d.keycloak.CreateInvitedUserFn = func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
+		creates++
+		return kcUserID, nil
+	}
+	tenantID := uuid.New()
+	headers := withHeader(sysHeaders(), "Idempotency-Key", "direct-replay-1")
+	var ids [2]uuid.UUID
+	for i := range ids {
+		rec := doRequest(d.engine(), http.MethodPost, provisionDirectPath, headers, directBody(tenantID))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("call %d: expected 201, got %d: %s", i+1, rec.Code, rec.Body.String())
+		}
+		var body struct {
+			KeycloakUserID uuid.UUID `json:"keycloak_user_id"`
+		}
+		decodeInto(t, rec, &body)
+		ids[i] = body.KeycloakUserID
+	}
+	if creates != 1 {
+		t.Fatalf("the replay must not create the user again; CreateInvitedUser calls = %d", creates)
+	}
+	if ids[0] != kcUserID || ids[1] != kcUserID {
+		t.Fatalf("keycloak_user_id first=%s replay=%s, want %s both times", ids[0], ids[1], kcUserID)
+	}
+}
+
+// The user-exists conflict resume (a lost-response retry under a NEW key,
+// the owner already in the realm under this tenant) returns the existing
+// owner's sub.
+func TestProvisionDirect_UserExistsResume_ReturnsExistingKeycloakUserID(t *testing.T) {
+	d := newServiceDeps()
+	d.keycloak.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, templateVersion string) error { return nil }
+	d.keycloak.RegisterOIDCClientsFn = func(ctx context.Context, realmName, tenantSlug string) ([]string, error) {
+		return []string{"web"}, nil
+	}
+	tenantID := uuid.New()
+	existingID := uuid.New()
+	d.keycloak.CreateInvitedUserFn = func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
+		return uuid.Nil, domain.NewError(domain.ErrUserEmailConflict, "email already exists in realm")
+	}
+	d.keycloak.FindUserByEmailFn = func(ctx context.Context, realmName, email string) (*port.ExistingUser, error) {
+		return &port.ExistingUser{ID: existingID, TenantID: tenantID}, nil
+	}
+	headers := withHeader(sysHeaders(), "Idempotency-Key", "direct-resume-1")
+	rec := doRequest(d.engine(), http.MethodPost, provisionDirectPath, headers, directBody(tenantID))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		KeycloakUserID uuid.UUID `json:"keycloak_user_id"`
+	}
+	decodeInto(t, rec, &body)
+	if body.KeycloakUserID != existingID {
+		t.Fatalf("keycloak_user_id = %s, want the existing owner %s", body.KeycloakUserID, existingID)
 	}
 }
 
