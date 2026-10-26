@@ -340,7 +340,7 @@ day a real production Prometheus is configured and this URL is set.
 
 ### 18.2 `billing-service`
 
-- Billing → RP (mesh calls, not events): RP-3 (`convert`), RP-4 (`revert-conversion`), RP-10 (`reactivate`, non-operator source).
+- Billing → RP (mesh calls, `commercial-system`, CD-19): RP-3 (`convert`), RP-4 (`revert-conversion`), RP-11 (`realm` read). **Not RP-10** — Billing is admitted to it by neither Istio nor the app allow-list (`403`); it reactivates by producing `TenantReactivated` on `billing.events` → `billing-realm-q`.
 - Billing → events → RP: `TenantReactivated` on `billing-realm-q` (same event *name* as RP's own produced `TenantReactivated`, but a different topic/producer — no self-consumption; RP-D13 distinguishes them by `source`).
 - RP → O&M (not Billing directly, **open item** below): the subscription-lapse sweep (RP-C3) is specified to read subscription status from O&M, since RP stores no subscription/plan data of its own.
 
