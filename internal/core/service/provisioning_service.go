@@ -522,12 +522,20 @@ type ProvisionDirectRequest struct {
 }
 
 // ProvisionDirectResult is the RP-2 response body (§5.2).
+//
+// KeycloakUserID is the tenant owner's Keycloak `sub`, exactly as RP-1
+// returns it: the Signup BFF passes it to O&M I-1 as owner_user_id, so
+// both signup paths call I-1 the same way (LLD v1.42). It is the user this
+// call created, or — on the user-exists conflict resume — the existing
+// same-tenant user, and it is stored in the idempotency ledger so a replay
+// returns it too.
 type ProvisionDirectResult struct {
-	TenantID      uuid.UUID `json:"tenant_id"`
-	Realm         string    `json:"realm"`
-	Strategy      string    `json:"strategy"`
-	KeycloakShard string    `json:"keycloak_shard"`
-	OIDCClients   []string  `json:"oidc_clients"`
+	TenantID       uuid.UUID `json:"tenant_id"`
+	Realm          string    `json:"realm"`
+	Strategy       string    `json:"strategy"`
+	KeycloakUserID uuid.UUID `json:"keycloak_user_id"`
+	KeycloakShard  string    `json:"keycloak_shard"`
+	OIDCClients    []string  `json:"oidc_clients"`
 }
 
 // ProvisionDirect implements RP-2 (§8.2): provision the dedicated realm
@@ -606,7 +614,7 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 
 	result := &ProvisionDirectResult{
 		TenantID: req.TenantID, Realm: realmName, Strategy: string(domain.RealmStrategyDedicated),
-		KeycloakShard: shard, OIDCClients: clients,
+		KeycloakUserID: kcUserID, KeycloakShard: shard, OIDCClients: clients,
 	}
 
 	automationClientID := dedicatedPlatformAutomationClientID

@@ -42,6 +42,8 @@ func TestProvisionDirect_Success(t *testing.T) {
 	assert.Equal(t, "dedicated", result.Strategy)
 	assert.Equal(t, "kc-shard-1", result.KeycloakShard)
 	assert.Equal(t, []string{"tender-web", "tender-mobile"}, result.OIDCClients)
+	assert.Equal(t, adminID, result.KeycloakUserID,
+		"RP-2 returns the owner's Keycloak sub, like RP-1 — the BFF's I-1 owner_user_id")
 
 	row, err := realms.FindByTenantID(context.Background(), tenantID)
 	require.NoError(t, err)
@@ -255,6 +257,8 @@ func TestProvisionDirect_CreateInvitedUserConflict_SameTenant_ResolvesWithoutTea
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "tenant-acme", result.Realm)
+	assert.Equal(t, existingID, result.KeycloakUserID,
+		"a resolved same-tenant conflict returns the existing admin's sub")
 
 	row, err := realms.FindByTenantID(context.Background(), tenantID)
 	require.NoError(t, err, "local commit must still land on a resolved conflict")
@@ -331,8 +335,9 @@ func TestProvisionDirect_IdempotentReplay(t *testing.T) {
 	calls := 0
 	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { calls++; return nil }
 	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) { return nil, nil }
+	adminID := uuid.New()
 	kc.CreateInvitedUserFn = func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
-		return uuid.New(), nil
+		return adminID, nil
 	}
 
 	req := service.ProvisionDirectRequest{Terms: validTerms(), TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A"}
@@ -343,6 +348,8 @@ func TestProvisionDirect_IdempotentReplay(t *testing.T) {
 
 	assert.Equal(t, 1, calls, "Keycloak must not be re-invoked on replay")
 	assert.Equal(t, first, second)
+	assert.Equal(t, adminID, second.KeycloakUserID,
+		"the replay (answered from the ledger) carries keycloak_user_id")
 	assert.Len(t, pub.events, 4)
 }
 
