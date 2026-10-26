@@ -523,11 +523,13 @@ type ProvisionDirectRequest struct {
 
 // ProvisionDirectResult is the RP-2 response body (§5.2).
 type ProvisionDirectResult struct {
-	TenantID      uuid.UUID `json:"tenant_id"`
-	Realm         string    `json:"realm"`
-	Strategy      string    `json:"strategy"`
-	KeycloakShard string    `json:"keycloak_shard"`
-	OIDCClients   []string  `json:"oidc_clients"`
+	TenantID              uuid.UUID `json:"tenant_id"`
+	Realm                 string    `json:"realm"`
+	Strategy              string    `json:"strategy"`
+	KeycloakShard         string    `json:"keycloak_shard"`
+	OIDCClients           []string  `json:"oidc_clients"`
+	KeycloakUserID        uuid.UUID `json:"keycloak_user_id"`
+	EmailVerificationSent bool      `json:"email_verification_sent"`
 }
 
 // ProvisionDirect implements RP-2 (§8.2): provision the dedicated realm
@@ -607,6 +609,7 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 	result := &ProvisionDirectResult{
 		TenantID: req.TenantID, Realm: realmName, Strategy: string(domain.RealmStrategyDedicated),
 		KeycloakShard: shard, OIDCClients: clients,
+		KeycloakUserID: kcUserID, EmailVerificationSent: true,
 	}
 
 	automationClientID := dedicatedPlatformAutomationClientID
