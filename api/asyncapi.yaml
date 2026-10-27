@@ -21,19 +21,30 @@ info:
 
     Downstream consumers of iam.tenant.events (Commercial domain, CD-26):
     These queues are subscribed to the shared iam-tenant-events SNS topic by
-    Commercial domain services — they are NOT consumed by this service. Listed
-    here for cross-team visibility (CD-24, CD-6, CD-26):
-      tenant-billing-q     → Billing      — filter: TenantSuspended, TenantReactivated
-                             Billing monitors operator suspensions (CD-24) and
-                             operator un-suspends to decide subscription handling.
+    Commercial domain services — they are NOT consumed by this service. The
+    Commercial domain owns these SNS subscriptions and their filter policies;
+    the filters below mirror what Commercial sets (CD-49) and are listed here
+    for cross-team visibility (CD-24, CD-6, CD-26, CD-49):
+      tenant-billing-q     → Billing      — filter: TenantSuspended, TenantReactivated,
+                             TenantConverted, TenantOffboarded (CD-24, CD-49)
+                             Billing monitors operator suspensions/un-suspends
+                             (CD-24), conversions and offboarding.
       tenant-entitlements-q → Entitlements — filter: TenantConverted, TenantSuspended,
                              TenantReactivated, TenantOffboarded, TrialExpired (CD-6)
                              Entitlements recomputes effective entitlement state on
                              every tenant-lifecycle change.
       tenant-usage-q       → Usage & Metering — filter: TenantConverted,
-                             TenantSuspended, TenantOffboarded
+                             TenantSuspended, TenantOffboarded, TenantReactivated (CD-49)
                              Usage & Metering starts a fresh period, stops rendering
-                             limits, and purges raw usage on the respective events.
+                             limits, purges raw usage, and resumes on reactivation.
+
+    Payload cautions for every consumer (no personal data in either field):
+      TenantOffboarded.export_s3_key — points to the encrypted realm export,
+        which DOES contain user data. Treat the key as sensitive: never log
+        it, and keep it no longer than needed to close the account.
+      TenantReactivated.reason — free-form text typed by an operator on an
+        RP-10 reactivation. It may contain anything: never show it to
+        customers and don't assume it is free of personal data.
 
     Wire format: each SNS message body is prefixed with an 18-byte AWS Glue
     Schema Registry header before the EventEnvelope JSON:
@@ -120,12 +131,15 @@ servers:
     protocol: sqs
     description: |
       Queue: tenant-billing-q  |  DLQ: tenant-billing-q-dlq  (maxReceiveCount=5)
-      SNS subscription filter: EventType IN [TenantSuspended, TenantReactivated]
+      SNS subscription filter: EventType IN [TenantSuspended, TenantReactivated,
+        TenantConverted, TenantOffboarded]
       Source topic: iam.tenant.events (this service).
-      Owner: Billing Service (commercial namespace).
+      Owner: Billing Service (`billing` namespace). The SNS subscription and its
+      filter policy are owned by Commercial (CD-49), not by this service.
       Purpose (CD-24): Billing monitors operator suspensions (RP-14, source=operator)
       and operator un-suspends (RP-10, source=operator) to decide subscription state
-      handling — previously these were invisible to Billing (CD-24).
+      handling — previously these were invisible to Billing (CD-24). CD-49 adds
+      TenantConverted and TenantOffboarded.
 
   sqsTenantEntitlements:
     host: "sqs.ap-south-1.amazonaws.com"
@@ -135,7 +149,8 @@ servers:
       SNS subscription filter: EventType IN [TenantConverted, TenantSuspended,
         TenantReactivated, TenantOffboarded, TrialExpired]
       Source topic: iam.tenant.events (this service).
-      Owner: Entitlements Service (commercial namespace).
+      Owner: Entitlements Service (commercial namespace). The SNS subscription
+      and its filter policy are owned by Commercial (CD-49).
       Purpose: Entitlements invalidates its cached effective entitlement set on every
       tenant-lifecycle transition. TrialExpired is included per CD-6 so Entitlements
       reflects the suspended entitlement state when a trial expires.
@@ -146,12 +161,14 @@ servers:
     description: |
       Queue: tenant-usage-q  |  DLQ: tenant-usage-q-dlq  (maxReceiveCount=5)
       SNS subscription filter: EventType IN [TenantConverted, TenantSuspended,
-        TenantOffboarded]
+        TenantOffboarded, TenantReactivated]
       Source topic: iam.tenant.events (this service).
-      Owner: Usage & Metering Service (commercial namespace).
+      Owner: Usage & Metering Service (commercial namespace). The SNS subscription
+      and its filter policy are owned by Commercial (CD-49).
       Purpose: Usage & Metering starts a fresh billing period on TenantConverted,
-      stops rendering limits for a suspended tenant on TenantSuspended, and purges
-      raw usage (keeping period totals) on TenantOffboarded.
+      stops rendering limits for a suspended tenant on TenantSuspended, purges
+      raw usage (keeping period totals) on TenantOffboarded, and resumes a
+      reactivated tenant on TenantReactivated (CD-49).
 
 channels:
   iamTenantEvents:
@@ -434,6 +451,10 @@ components:
 
     TenantOffboarded:
       title: TenantOffboarded
+      description: >-
+        Caution — `export_s3_key` points to the encrypted realm export, which
+        contains user data. Treat the key as sensitive: never log it, and keep
+        it no longer than needed to close the account.
       tags:
         - $ref: '#/components/tags/published'
       traits:
@@ -443,7 +464,12 @@ components:
 
     TenantReactivated:
       title: TenantReactivated
-      description: Produced by this service (source=operator). See BillingTenantReactivated for the consumed counterpart (RP-D13).
+      description: >-
+        Produced by this service (source=operator only). See
+        BillingTenantReactivated for the consumed counterpart (RP-D13).
+        Caution — `reason` is free-form operator text from RP-10: it may
+        contain anything, is not customer-facing, and must not be assumed
+        free of personal data.
       tags:
         - $ref: '#/components/tags/published'
       traits:

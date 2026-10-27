@@ -121,7 +121,7 @@ help:
 	@echo "  make build            - compile server, reconciler and migrate to bin/"
 	@echo "  make cover            - coverage HTML report"
 	@echo "  make cover-func       - coverage summary by function"
-	@echo "  make helm-check       - helm lint + template (4 value combos) + kubeconform (mirrors validate-helm.yml)"
+	@echo "  make helm-check       - helm lint + template (4 value combos) + kubeconform + CD-19 access matrix (mirrors validate-helm.yml)"
 	@echo "  make ci               - tidy + fmt-check + vet + lint + arch-lint + metrics-registry-lint + metric-naming-lint + metrics-lint + test-ci + build"
 	@echo "  make docker-up        - start Postgres + Floci + Floci UI + Keycloak + OpenBao"
 	@echo "  make docker-down      - stop local containers"
@@ -493,9 +493,11 @@ schema-register:
 # schema-register uploads, so it covers exactly the produced schemas. Surfaces
 # "pod would CrashLoop on NewGlueCodec" pre-deploy, which a name-only
 # get-schema check cannot. Requires GLUE_REGISTRY_TENANT_NAME, AWS credentials (or
-# predeploy-check: run scripts/pre-deploy-check.sh to validate all 12
-# production go-live prerequisites before the first deploy.
-# Requires: aws CLI, kubectl, gh CLI, BAO_ADDR, and the environment vars
+# predeploy-check: run scripts/pre-deploy-check.sh to validate the production
+# go-live prerequisites before the first deploy, plus the standing CD-23
+# retention check (item 13 — every deploy and every RETENTION_DAYS change;
+# set PROVISIONER_DATABASE_URL + RETENTION_DAYS, see docs/runbook.md §10).
+# Requires: aws CLI, kubectl, gh CLI, psql, BAO_ADDR, and the environment vars
 # documented in .claude/operations.md.
 .PHONY: predeploy-check
 predeploy-check:
@@ -573,10 +575,12 @@ schema-prune:
 # CI
 # -----------------------------
 
-# helm-check: lint, render all four values combos, and kubeconform-validate
-# rendered manifests. Mirrors .github/workflows/validate-helm.yml exactly.
-# Requires helm + kubeconform (installed automatically on first run via
-# go install if absent). Does not require Docker or a live cluster.
+# helm-check: lint, render all four values combos, kubeconform-validate
+# rendered manifests, and assert the CD-19 access matrix on the staging and
+# prod renders (.github/scripts/check-cd19-access-matrix.py). Mirrors
+# .github/workflows/validate-helm.yml exactly. Requires helm + kubeconform
+# (installed automatically on first run via go install if absent) and
+# python3 with PyYAML. Does not require Docker or a live cluster.
 .PHONY: helm-check
 helm-check:
 	bash .github/scripts/helm-check.sh

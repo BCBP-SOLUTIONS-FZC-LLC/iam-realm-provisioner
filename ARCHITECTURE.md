@@ -608,9 +608,9 @@ sequenceDiagram
 
 | Queue | Owner | Filter |
 |---|---|---|
-| `tenant-billing-q` | Billing | `TenantSuspended`, `TenantReactivated` (CD-24: operator suspensions previously invisible to Billing) |
+| `tenant-billing-q` | Billing | `TenantSuspended`, `TenantReactivated`, `TenantConverted`, `TenantOffboarded` (CD-24: operator suspensions + un-suspends previously invisible to Billing; CD-49 adds conversion and offboarding) |
 | `tenant-entitlements-q` | Entitlements | `TenantConverted`, `TenantSuspended`, `TenantReactivated`, `TenantOffboarded`, `TrialExpired` (CD-6) |
-| `tenant-usage-q` | Usage & Metering | `TenantConverted`, `TenantSuspended`, `TenantOffboarded` |
+| `tenant-usage-q` | Usage & Metering | `TenantConverted`, `TenantSuspended`, `TenantOffboarded`, `TenantReactivated` (CD-49) |
 
 Each queue's consumer and handler are built by `internal/adapter/inbound/sqspipeline` from platform-events (`eventcfg.LoadSQS`, the library's `GlueDecodeCodec`, `WithDLQForwarding` over `NewSQSDLQPublisherWithClient`; `RequireDLQ` fails startup for a queue with no RedrivePolicy): `platform_messages_*` counters → **straight-to-DLQ route** → a consumer span → **consumed-schema validation** → the consumer's `Handle`, which dedups through platform-events' `pkg/inbox` (`InboxRepository`, claim + projection in one transaction). The Glue-decoded payload is validated against this service's own extracted consumed-message schema (`eventschema.ConsumedByConsumer`, keyed per consumer — billing's `TenantReactivated` is Billing's, never this service's own produced one). No Glue call; unknown types pass through to `ackUnknown`. A violation never reaches the handler or `processed_events`; it is sent straight to `-dlq` on its first delivery through the library's DLQ publisher (original body and attributes, reason `schema_violation`), and it pages via `iam_realm_provisioner_consumed_schema_violations_total`. A message whose handler keeps failing is forwarded to `-dlq` by platform-events on its 5th delivery.
 

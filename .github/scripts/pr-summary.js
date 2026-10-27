@@ -18,6 +18,7 @@ const rows = [
   ['Trivy CVE scan',         'trivy'],
   ['Smoke tests',            'smoke'],
   ['Code quality',           'validate-quality'],
+  ['Helm + CD-19 access matrix', 'validate-helm'],
 ];
 
 const table = rows

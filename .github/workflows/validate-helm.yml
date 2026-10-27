@@ -1,6 +1,8 @@
 # Reusable workflow — Helm chart validation gate (CD-19).
-# helm lint + helm template × 4 values combos + kubeconform.
-# Called by ci.yml on every PR and push. Does NOT gate coverage, trivy,
+# helm lint + helm template × 4 values combos + kubeconform, plus the CD-19
+# access-matrix assertions on the staging and prod renders
+# (.github/scripts/check-cd19-access-matrix.py).
+# Called by ci.yml (job validate-helm) on every PR and push. Does NOT gate coverage, trivy,
 # or smoke — those are pure Go/image concerns. DOES gate push (a broken
 # chart must not reach a deploy).
 #
@@ -62,7 +64,17 @@ jobs:
           path: ~/go/bin
           key: helm-check-tools-${{ runner.os }}-helm3.16.3-kubeconform0.6.7
 
-      # Lint, render all four values combinations, and validate rendered
-      # manifests with kubeconform. The script exits non-zero if any step fails.
-      - name: Helm lint + template + kubeconform
+      # PyYAML for the CD-19 access-matrix check (helm-check.sh step 3).
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyYAML
+        run: pip install --no-cache-dir 'pyyaml==6.0.2'
+
+      # Lint, render all four values combinations, validate rendered
+      # manifests with kubeconform, then assert the CD-19 access matrix on
+      # the staging and prod renders. The script exits non-zero if any step fails.
+      - name: Helm lint + template + kubeconform + CD-19 access matrix
         run: bash .github/scripts/helm-check.sh

@@ -159,6 +159,29 @@ General health check for any job: K8s CronJob's `lastScheduleTime`/`lastSuccessf
 
 ---
 
+## 10. Pre-deploy check: tenants past the retention window (CD-23)
+
+**When:** before **every deployment to any environment**, and before **any change to `RETENTION_DAYS`** (Helm `config.RETENTION_DAYS`, code default 60 in `cmd/reconciler/main.go`). This is a standing step, not a one-off for the CD-23 90 → 60 change (that query previously lived only in the LLD 1.28 changelog row).
+
+**Why:** the offboard leg of `subscription-lapse` (RP-C3, LLD §8.8) exports, deletes and scrubs every billing-lapse-suspended realm whose `disabled_at` is older than `RETENTION_DAYS` — it is **terminal** (RP-INV-5). Shortening the window, or deploying to an environment whose suspended tenants have aged while the job wasn't running, makes every matching tenant eligible on the **next** run. Know who they are before that happens.
+
+**Query** (run against the `provisioner` database with the `RETENTION_DAYS` value that will be live after the deploy — it is the same predicate `ListSuspendedPastRetention` uses):
+
+```sql
+SELECT tenant_id, disabled_at FROM tenant_realms
+WHERE status = 'suspended' AND suspension_source = 'billing_lapse'
+  AND disabled_at < now() - interval '<RETENTION_DAYS> days'
+ORDER BY disabled_at;
+```
+
+**Reading the result:**
+- **0 rows** — proceed.
+- **Any rows** — those tenants will be offboarded (realm exported to S3, then deleted) on the first `subscription-lapse` run after the deploy. Before deploying, confirm with Billing/Commercial that each one is genuinely due for offboarding; for any that is not, reactivate it (Billing's `TenantReactivated` on `billing-realm-q`, or RP-10 for an operator decision) or hold the deploy. Operator suspensions (`suspension_source='operator'`) are never auto-offboarded and are deliberately excluded.
+
+`scripts/pre-deploy-check.sh` runs this query automatically when `PROVISIONER_DATABASE_URL` is set (with `RETENTION_DAYS`, default 60) and fails if any rows match.
+
+---
+
 ## Open items — operational impact
 
 - **RP-C3's suspend phase needs `ORG_MEMBERSHIP_BASE_URL` set.** The `subscription-lapse` job polls O&M's I-16 `GET /api/v1/internal/subscription-lapses` via `port.SubscriptionLapseReader` (`internal/adapter/outbound/orgmembership`) for its suspend phase. If `ORG_MEMBERSHIP_BASE_URL` is unset, the job does **not** fail — it logs a WARN, skips the suspend phase, and still runs its offboard phase (retention-driven, purely local against `suspension_source='billing_lapse'` rows). Check `iam_realm_provisioner_lapse_processed_total{transition="suspend"}` staying at zero alongside a healthy `lastSuccessfulTime` as the signal this env var is missing in a deployment where it should be set.
