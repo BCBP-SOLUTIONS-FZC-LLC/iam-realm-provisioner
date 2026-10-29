@@ -86,13 +86,14 @@ setup: install-hooks
 install-hooks:
 	@mkdir -p .git/hooks
 	@cp .githooks/pre-commit .git/hooks/pre-commit
-	@chmod +x .git/hooks/pre-commit
+	@cp .githooks/pre-push .git/hooks/pre-push
+	@chmod +x .git/hooks/pre-commit .git/hooks/pre-push
 	@echo "Installed git hooks"
 
 .PHONY: help
 help:
 	@echo "Available commands:"
-	@echo "  make setup            - copy .env-example to .env if missing; install .githooks/pre-commit"
+	@echo "  make setup            - copy .env-example to .env if missing; install .githooks/pre-commit + pre-push"
 	@echo "  make install-hooks    - install local git hooks (.githooks -> .git/hooks); also run by make setup"
 	@echo "  make tidy             - go mod tidy"
 	@echo "  make fmt              - go fmt ./..."
@@ -130,6 +131,7 @@ help:
 	@echo "  make migrate-create   - scaffold a new migration pair: make migrate-create NAME=add_x"
 	@echo "  make mod-verify       - go mod verify"
 	@echo "  make vuln-check       - govulncheck ./..."
+	@echo "  make trivy            - build the image and Trivy-scan it like CI (CRITICAL/HIGH/UNKNOWN, fixed only); run by .githooks/pre-push"
 	@echo "  make clean            - remove build artefacts"
 	@echo ""
 	@echo "Schema governance (platform-schemagov 0.4, shared iam-tenant-events registry):"
@@ -180,6 +182,23 @@ mod-verify:
 .PHONY: vuln-check
 vuln-check:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+# trivy: local mirror of ci.yml's "Trivy CVE scan" gate — build the amd64
+# image, then fail on CRITICAL/HIGH/UNKNOWN CVEs that have a fix (.trivyignore
+# applies automatically). The Dockerfile needs the go_private_token build
+# secret: GO_PRIVATE_TOKEN from the environment, else `gh auth token`.
+TRIVY_IMAGE ?= iam-realm-provisioner-trivy
+GO_PRIVATE_TOKEN ?= $(shell gh auth token 2>/dev/null)
+export GO_PRIVATE_TOKEN
+
+.PHONY: trivy
+trivy:
+	@command -v trivy >/dev/null || { echo "trivy not found (brew install trivy)"; exit 1; }
+	@test -n "$$GO_PRIVATE_TOKEN" || { echo "GO_PRIVATE_TOKEN is empty: export it or run 'gh auth login'"; exit 1; }
+	docker build --platform linux/amd64 \
+	  --secret id=go_private_token,env=GO_PRIVATE_TOKEN \
+	  -t $(TRIVY_IMAGE) .
+	trivy image --severity CRITICAL,HIGH,UNKNOWN --ignore-unfixed --exit-code 1 $(TRIVY_IMAGE)
 
 # -----------------------------
 # LINT
