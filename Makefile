@@ -144,23 +144,7 @@ help:
 	
 	@echo "Swagger:"
 	@echo "  make swag             - generate Swagger docs from annotations (output: docs/swagger/)"
-	@echo " 
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	    - fail if Swagger regeneration changes docs/swagger/"
+	@echo "  make swag-check       - fail if Swagger regeneration changes docs/swagger/"
 
 # -----------------------------
 # GO BASICS
