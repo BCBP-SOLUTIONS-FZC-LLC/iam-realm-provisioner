@@ -21,6 +21,10 @@ This service has never been deployed to any environment — there is no released
 
 ## [Unreleased — 2026-10-21]
 
+### Security (2026-10-30 — Trivy: tzdata DLA-4867-1 suppressed)
+
+- **`.trivyignore` suppresses DLA-4867-1** (`tzdata` 2026b → 2026f, Trivy UNKNOWN), with `exp:2026-11-30`. The newest `gcr.io/distroless/static-debian12:nonroot` (`sha256:afa5c872…`) still ships 2026b, and the service never loads a time zone (all timestamps UTC). Same handling as DLA-4854-1. Remove both entries and re-pin once distroless ships tzdata ≥ 2026f.
+
 ### Added
 
 - **CI test of the CD-19 access matrix (IAM's reply to Commercial, item 1).** New `.github/scripts/check-cd19-access-matrix.py`, run by `helm-check.sh` on the `base+staging` and `base+prod` renders. It asserts the access matrix at each layer:
