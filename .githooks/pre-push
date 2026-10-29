@@ -3,7 +3,19 @@
 # ci.yml's "Trivy CVE scan" job (make trivy). Builds the Docker image, so it
 # needs Docker running and takes a few minutes on a cold cache.
 # Skip once with `git push --no-verify` or SKIP_TRIVY=1 git push.
+# A push that only deletes remote branches/tags skips the scan automatically.
 set -euo pipefail
+
+# git feeds one "<local ref> <local sha> <remote ref> <remote sha>" line per
+# pushed ref on stdin; a deletion has an all-zero local sha (40 or 64 chars).
+only_deletes=1
+while read -r _ local_sha _ _; do
+  [[ "$local_sha" =~ ^0+$ ]] || only_deletes=0
+done
+if [ "$only_deletes" = "1" ]; then
+  echo "[pre-push] only ref deletions — skipping Trivy scan"
+  exit 0
+fi
 
 if [ "${SKIP_TRIVY:-}" = "1" ]; then
   echo "[pre-push] SKIP_TRIVY=1 — skipping Trivy scan"
