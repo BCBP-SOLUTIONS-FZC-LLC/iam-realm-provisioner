@@ -28,3 +28,13 @@ DLA-4845-1 exp:2026-11-21
 # :nonroot digest (sha256:afa5c872…) still ships tzdata 2026b. Remove this
 # entry and re-pin once distroless ships tzdata >= 2026e.
 DLA-4854-1 exp:2026-11-30
+
+# DLA-4867-1: tzdata 2026b-0+deb12u1 → 2026f-0+deb12u1, the next timezone-
+# database refresh after DLA-4854-1 (Trivy: UNKNOWN; the CI gate fails on
+# UNKNOWN). Same package and situation as DLA-4854-1 above.
+# Not exploitable here: the service never loads a zone (no time.LoadLocation, no
+# time/tzdata, no time.Local use; all timestamps are UTC).
+# Blocked upstream: on 2026-10-30 the newest gcr.io/distroless/static-debian12
+# :nonroot digest (sha256:afa5c872…) still ships tzdata 2026b. Remove this
+# entry (with DLA-4854-1) and re-pin once distroless ships tzdata >= 2026f.
+DLA-4867-1 exp:2026-11-30
