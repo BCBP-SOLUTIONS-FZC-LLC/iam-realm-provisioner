@@ -4,6 +4,21 @@ All notable changes to this service are documented here. Format follows [Keep a 
 
 This service has never been deployed to any environment — there is no released version yet, so everything lives under `[Unreleased]`. Because of that, this file tracks only what is currently true and what is still outstanding, not a phase-by-phase build history; the full development diary is available via `git log` if it's ever needed.
 
+## [Unreleased — 2026-10-30]
+
+### Added
+
+- **Invitation email (RP-5, LLD v1.44).** RP-5 now sends Keycloak's execute-actions email after creating the invited user, for the `required_actions` O&M sent: valid 7 days, ending on `<WEB_APP_BASE_URL>/t/<tenant_slug>/` through `tender-web`. Before this, no IAM code sent an invitation email, so an invitee had no way in. `tenant_slug` is a new **required** body field (≤ 63, missing → `400`). A send failure fails RP-5 (`502 KEYCLOAK_UNAVAILABLE`); O&M's retry resends. New port method `SendActionsEmail`, Keycloak op `send_actions_email`.
+- **Verify email link (RP-1).** The trial verification email ends on the tenant's `/t/<slug>/` URL. Still best-effort; a link Keycloak refuses is retried once without it.
+- **Shared trial realm provisioned by code (RP-D18).** Each server pod runs `EnsureSharedRealm(SHARED_TRIAL_REALM)` in the background at startup (retry every 30 s): create from the template when absent, then converge the `requires-mfa` role, the user profile, token settings, the hardened `tender-web` client and the `tenant_id` protocol mapper (access + ID token). Integration test against Keycloak 26.
+- **Config:** `WEB_APP_BASE_URL` (default `https://app.bcbpsolutions.com`), `WEB_APP_EXTRA_BASE_URLS`, `WEB_CLIENT_ID` (default `tender-web`). An invalid value fails startup.
+
+### Changed
+
+- **`tender-web` hardened (HLD §11.3).** Public, standard flow only, PKCE S256, exact redirect / post-logout URIs `<base>/*` and web origins `<base>` from config (no `https://*.bcbpsolutions.com/*`, no `+`). Realm token settings: access 5 min, client session 8 h idle / 12 h max, SSO 12 h / 24 h, refresh-token rotation (`revokeRefreshToken`, max reuse 0). Applied to new realms; dedicated realms created earlier are recreated in dev (nothing is in production).
+- **`tenant_id` user attribute is admin-only** in every realm's user profile, so a user cannot edit it in the account console and move into another trial tenant.
+- **RP-2 sends no creation-time email** (RP-D19, a stated choice): the direct-paid admin verifies at first login.
+
 ## [Unreleased — 2026-10-21]
 
 ### Added

@@ -41,6 +41,12 @@ type Config struct {
 	SecretProvider func(ctx context.Context) (string, error)
 	RateLimitRPS   int
 	Timeout        time.Duration
+	// Web is the tender-web SPA client's environment-specific half: its
+	// exact redirect URIs, web origins and post-logout URIs, which the
+	// template cannot carry (§12.2). Zero value = the template's client is
+	// created as-is, with no redirect URI at all (tests, local dev);
+	// EnsureSharedRealm refuses to run without it.
+	Web WebClientConfig
 }
 
 // Admin implements port.KeycloakAdmin.
@@ -132,11 +138,11 @@ func wrapErr(op string, err error) error {
 //go:embed realm-template.json
 var embeddedTemplateFS embed.FS
 
-// loadRealmTemplate reads deploy/keycloak/realm-template.json when present
+// readRealmTemplate reads deploy/keycloak/realm-template.json when present
 // on disk (deploy-time mount, RP-3/§12.2), falling back to the minimal
 // embedded default so the service also boots in local dev without that
 // mount.
-func loadRealmTemplate() (gocloak.RealmRepresentation, error) {
+func readRealmTemplate() ([]byte, error) {
 	var raw []byte
 	var err error
 	if p := os.Getenv("REALM_TEMPLATE_PATH"); p != "" {
@@ -145,6 +151,12 @@ func loadRealmTemplate() (gocloak.RealmRepresentation, error) {
 	if len(raw) == 0 {
 		raw, err = embeddedTemplateFS.ReadFile("realm-template.json")
 	}
+	return raw, err
+}
+
+// loadRealmTemplate parses the realm template (readRealmTemplate).
+func loadRealmTemplate() (gocloak.RealmRepresentation, error) {
+	raw, err := readRealmTemplate()
 	if err != nil {
 		return gocloak.RealmRepresentation{}, err
 	}
@@ -156,7 +168,8 @@ func loadRealmTemplate() (gocloak.RealmRepresentation, error) {
 }
 
 // CreateRealmFromTemplate clones the versioned realm template into a new
-// realm named realmName (RP-3, §12.2).
+// realm named realmName (RP-3, §12.2), with the tender-web client's
+// redirect URIs and origins taken from Config.Web.
 func (a *Admin) CreateRealmFromTemplate(ctx context.Context, realmName, _ string) (err error) {
 	ctx, done := a.begin(ctx, "create_realm")
 	defer func() { done(err) }()
@@ -165,12 +178,34 @@ func (a *Admin) CreateRealmFromTemplate(ctx context.Context, realmName, _ string
 	if err != nil {
 		return wrapErr("create_realm: token", err)
 	}
+	tok, err = a.createRealm(ctx, tok, realmName)
+	if err != nil {
+		if isConflict(err) {
+			return domain.NewError(domain.ErrRealmAlreadyDedicated, "realm already exists").WithDetails(map[string]any{"realm": realmName})
+		}
+		return err
+	}
+	return a.initRealm(ctx, tok, realmName)
+}
+
+// createRealm creates realmName from the template and returns a token
+// minted after the create. A 409 is returned unwrapped (isConflict) so
+// each caller decides what an existing realm means; other failures are
+// already wrapped.
+func (a *Admin) createRealm(ctx context.Context, tok, realmName string) (string, error) {
 	rep, err := loadRealmTemplate()
 	if err != nil {
-		return fmt.Errorf("keycloak: load realm template: %w", err)
+		return "", fmt.Errorf("keycloak: load realm template: %w", err)
 	}
 	rep.Realm = gocloak.StringP(realmName)
 	rep.Enabled = gocloak.BoolP(true)
+	if rep.Clients != nil && a.cfg.Web.configured() {
+		for i := range *rep.Clients {
+			if c := &(*rep.Clients)[i]; c.ClientID != nil && *c.ClientID == a.cfg.Web.ClientID {
+				a.cfg.Web.apply(c)
+			}
+		}
+	}
 	// Deliberately NOT setting rep.ID: Keycloak's REALM.ID column is a
 	// VARCHAR(36) sized for a bare UUID, but realmName (the logical/URL
 	// realm name, used only for rep.Realm) can run longer — RP-3's
@@ -182,9 +217,9 @@ func (a *Admin) CreateRealmFromTemplate(ctx context.Context, realmName, _ string
 	// UUID primary key, independent of realmName's length.
 	if _, err := a.client.CreateRealm(ctx, tok, rep); err != nil {
 		if isConflict(err) {
-			return domain.NewError(domain.ErrRealmAlreadyDedicated, "realm already exists").WithDetails(map[string]any{"realm": realmName})
+			return "", err
 		}
-		return wrapErr("create_realm", err)
+		return "", wrapErr("create_realm", err)
 	}
 	// Keycloak grants the create-realm principal full admin on realms it
 	// creates (§10.2), but that grant is a role-mapping added to the
@@ -197,8 +232,16 @@ func (a *Admin) CreateRealmFromTemplate(ctx context.Context, realmName, _ string
 	a.tokens.Invalidate()
 	tok, err = a.token(ctx)
 	if err != nil {
-		return wrapErr("create_realm: refresh token post-create", err)
+		return "", wrapErr("create_realm: refresh token post-create", err)
 	}
+	return tok, nil
+}
+
+// initRealm applies what the create call cannot carry: the requires-mfa
+// role, the user profile, and the token settings gocloak's
+// RealmRepresentation has no field for. Every step is idempotent, so it
+// also serves as the first half of convergeSharedRealm.
+func (a *Admin) initRealm(ctx context.Context, tok, realmName string) error {
 	// requires-mfa realm role must exist on every dedicated realm for §8.6
 	// to have something to assign.
 	if _, err := a.client.CreateRealmRole(ctx, tok, realmName, gocloak.Role{Name: gocloak.StringP(RequiresMFARoleName)}); err != nil && !isConflict(err) {
@@ -211,42 +254,18 @@ func (a *Admin) CreateRealmFromTemplate(ctx context.Context, realmName, _ string
 	// a protocol mapper) is SILENTLY DROPPED on create without this.
 	// gocloak v13 has no wrapper for the user-profile endpoint, so this
 	// uses the resty escape hatch directly, same as partialImportUser.
-	if err := a.enableUnmanagedAttributes(ctx, tok, realmName); err != nil {
-		return wrapErr("create_realm: enable_unmanaged_attributes", err)
+	if err := a.applyUserProfile(ctx, tok, realmName); err != nil {
+		return wrapErr("create_realm: user_profile", err)
 	}
-	return nil
-}
-
-// enableUnmanagedAttributes sets unmanagedAttributePolicy=ENABLED on
-// realmName's User Profile config so custom attributes (tenant_id) persist
-// on user create/update instead of being silently dropped.
-func (a *Admin) enableUnmanagedAttributes(ctx context.Context, tok, realmName string) error {
-	url := a.cfg.BaseURL + "/admin/realms/" + realmName + "/users/profile"
-	getResp, err := a.client.GetRequestWithBearerAuth(ctx, tok).Get(url)
-	if err != nil {
-		return err
-	}
-	if getResp.IsError() {
-		return fmt.Errorf("get user profile: unexpected status %d: %s", getResp.StatusCode(), getResp.String())
-	}
-	var profile map[string]any
-	if err := json.Unmarshal(getResp.Body(), &profile); err != nil {
-		return fmt.Errorf("decode user profile: %w", err)
-	}
-	profile["unmanagedAttributePolicy"] = "ENABLED"
-	putResp, err := a.client.GetRequestWithBearerAuth(ctx, tok).SetBody(profile).Put(url)
-	if err != nil {
-		return err
-	}
-	if putResp.IsError() {
-		return fmt.Errorf("update user profile: unexpected status %d: %s", putResp.StatusCode(), putResp.String())
+	if err := a.applyRealmTokenSettings(ctx, tok, realmName); err != nil {
+		return wrapErr("create_realm: token_settings", err)
 	}
 	return nil
 }
 
 // RegisterOIDCClients registers the standard OIDC client set (already
-// present on the cloned template, per-tenant redirect URIs scoped to the
-// tenant slug) and returns their client IDs.
+// present on the cloned template, tender-web's redirect URIs set from
+// Config.Web at create time) and returns their client IDs.
 func (a *Admin) RegisterOIDCClients(ctx context.Context, realmName, _ string) (clientIDs []string, err error) {
 	ctx, done := a.begin(ctx, "register_oidc_clients")
 	defer func() { done(err) }()

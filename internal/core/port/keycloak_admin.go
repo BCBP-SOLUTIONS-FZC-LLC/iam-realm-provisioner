@@ -2,6 +2,7 @@ package port
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -35,6 +36,13 @@ type KeycloakAdmin interface {
 	// DeleteRealmIfExists is the idempotent compensating-teardown primitive
 	// for a partially-created dedicated realm (§9.3).
 	DeleteRealmIfExists(ctx context.Context, realmName string) error
+	// EnsureSharedRealm creates the shared trial realm from the template
+	// when it is absent, then converges it: token settings, the tender-web
+	// client (exact redirect URIs/origins, PKCE S256), the tenant_id
+	// protocol mapper (RP-INV-2, the claim AuthZ Enrichment trusts for a
+	// trial user, HLD §5.4) and an admin-only tenant_id user-profile
+	// attribute. Idempotent; run at server startup (§12.2).
+	EnsureSharedRealm(ctx context.Context, realmName string) error
 
 	// ── User lifecycle (§8.1-8.3, §8.6-8.7, §8.13) ───────────────────────
 
@@ -46,6 +54,11 @@ type KeycloakAdmin interface {
 	// CreateInvitedUser creates a user in realmName with requiredActions
 	// applied verbatim (RP-5, F5 — this service never re-derives them).
 	CreateInvitedUser(ctx context.Context, realmName string, req CreateUserRequest) (uuid.UUID, error)
+	// SendActionsEmail sends Keycloak's execute-actions email to userID in
+	// realmName (RP-5 invitations): one single-use link, valid for
+	// lifespan, that runs actions and then offers link as the way back to
+	// the app (nil = Keycloak's own "account updated" page).
+	SendActionsEmail(ctx context.Context, realmName string, userID uuid.UUID, actions []string, lifespan time.Duration, link *ActionLink) error
 	// FindUserByEmail looks up a user by exact email match within
 	// realmName — used by callers of CreateTrialUser/CreateInvitedUser to
 	// disambiguate a lost-response retry of their OWN request (the
@@ -153,6 +166,17 @@ type CreateUserRequest struct {
 	HashedPasswordSeed string   // optional — trial/direct-paid admin only
 	RequiredActions    []string // applied verbatim (F5)
 	EmailVerified      bool
+	// Link, when set, is the verification email's way back to the app
+	// (CreateTrialUser only). nil keeps Keycloak's bare "email verified" page.
+	Link *ActionLink
+}
+
+// ActionLink is where a Keycloak action email lands once the user has
+// finished: Keycloak offers RedirectURI as a "back to application" link.
+// RedirectURI must match one of ClientID's registered redirect URIs.
+type ActionLink struct {
+	ClientID    string
+	RedirectURI string
 }
 
 // ExistingUser is FindUserByEmail's result — the minimal shape a caller

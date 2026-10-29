@@ -24,8 +24,10 @@ type fakeKeycloakAdmin struct {
 	ExportRealmFn                        func(ctx context.Context, realmName string) ([]byte, error)
 	DeleteRealmFn                        func(ctx context.Context, realmName string) error
 	DeleteRealmIfExistsFn                func(ctx context.Context, realmName string) error
+	EnsureSharedRealmFn                  func(ctx context.Context, realmName string) error
 	CreateTrialUserFn                    func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error)
 	CreateInvitedUserFn                  func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error)
+	SendActionsEmailFn                   func(ctx context.Context, realmName string, userID uuid.UUID, actions []string, lifespan time.Duration, link *port.ActionLink) error
 	FindUserByEmailFn                    func(ctx context.Context, realmName, email string) (*port.ExistingUser, error)
 	MigrateUserFn                        func(ctx context.Context, sourceRealm, targetRealm string, keycloakUserID uuid.UUID) (bool, error)
 	ListUsersByTenantFn                  func(ctx context.Context, realmName string, tenantID uuid.UUID) ([]uuid.UUID, error)
@@ -71,11 +73,20 @@ func (m *fakeKeycloakAdmin) DeleteRealm(ctx context.Context, realmName string) e
 func (m *fakeKeycloakAdmin) DeleteRealmIfExists(ctx context.Context, realmName string) error {
 	return m.DeleteRealmIfExistsFn(ctx, realmName)
 }
+func (m *fakeKeycloakAdmin) EnsureSharedRealm(ctx context.Context, realmName string) error {
+	return m.EnsureSharedRealmFn(ctx, realmName)
+}
 func (m *fakeKeycloakAdmin) CreateTrialUser(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) {
 	return m.CreateTrialUserFn(ctx, req)
 }
 func (m *fakeKeycloakAdmin) CreateInvitedUser(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
 	return m.CreateInvitedUserFn(ctx, realmName, req)
+}
+func (m *fakeKeycloakAdmin) SendActionsEmail(ctx context.Context, realmName string, userID uuid.UUID, actions []string, lifespan time.Duration, link *port.ActionLink) error {
+	if m.SendActionsEmailFn == nil {
+		return nil // unset = success, so RP-5 tests that predate the email need no change
+	}
+	return m.SendActionsEmailFn(ctx, realmName, userID, actions, lifespan, link)
 }
 func (m *fakeKeycloakAdmin) FindUserByEmail(ctx context.Context, realmName, email string) (*port.ExistingUser, error) {
 	return m.FindUserByEmailFn(ctx, realmName, email)
