@@ -24,8 +24,8 @@ This file provides guidance to Claude Code when working with the **Realm Provisi
 ## Common Commands
 
 ```bash
-make setup             # Copy .env-example -> .env + install .githooks/pre-commit (run once before anything else)
-make install-hooks     # Install .githooks/pre-commit standalone (also run by make setup)
+make setup             # Copy .env-example -> .env + install .githooks/pre-commit + pre-push (run once before anything else)
+make install-hooks     # Install .githooks/pre-commit + pre-push standalone (also run by make setup)
 make tidy               # go mod tidy
 make fmt                # go fmt ./...
 make fmt-check          # Verify gofmt formatting without modifying files (mirrors CI)
@@ -38,6 +38,7 @@ make metrics-lint       # platform-gincommon metricslint: real /metrics scrape +
 make metrics-inventory  # Regenerate docs/observability/metric-registry.md (commit the result)
 make mod-verify         # go mod verify (check module download integrity)
 make vuln-check         # govulncheck ./...
+make trivy              # Build the image + Trivy CVE scan, same gate as CI (CRITICAL/HIGH/UNKNOWN, fixed only); run by .githooks/pre-push before every push (skip once: SKIP_TRIVY=1 or --no-verify)
 make test               # Unit + postgres + integration tests in parallel (requires Docker; e2e is separate — make test-e2e)
 make test-ci            # Unit + postgres + integration with -race + coverage (used in CI)
 make test-unit          # Unit tests only (no Docker required)

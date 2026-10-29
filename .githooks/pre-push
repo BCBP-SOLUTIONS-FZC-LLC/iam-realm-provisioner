@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Local push gate: Trivy CVE scan of the built image, the same check as
+# ci.yml's "Trivy CVE scan" job (make trivy). Builds the Docker image, so it
+# needs Docker running and takes a few minutes on a cold cache.
+# Skip once with `git push --no-verify` or SKIP_TRIVY=1 git push.
+set -euo pipefail
+
+if [ "${SKIP_TRIVY:-}" = "1" ]; then
+  echo "[pre-push] SKIP_TRIVY=1 — skipping Trivy scan"
+  exit 0
+fi
+
+if ! docker info >/dev/null 2>&1; then
+  echo "[pre-push] Docker is not running; start it, or push with --no-verify / SKIP_TRIVY=1 to skip the Trivy scan." >&2
+  exit 1
+fi
+
+echo "[pre-push] running trivy..."
+make trivy
