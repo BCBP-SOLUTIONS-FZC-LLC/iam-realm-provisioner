@@ -123,9 +123,16 @@ definitions:
           type: string
         maxItems: 10
         type: array
+      tenant_slug:
+        description: |-
+          TenantSlug builds the invitation link /t/<slug>/ (required for both
+          realm strategies: the shared trial realm's name carries no slug).
+        maxLength: 63
+        type: string
     required:
     - email
     - full_name
+    - tenant_slug
     type: object
   http.provisionDirectRequest:
     properties:
@@ -934,8 +941,9 @@ paths:
       consumes:
       - application/json
       description: Creates a Keycloak user in the tenant's realm for an accepted invitation.
-        Sets required_actions (e.g. VERIFY_EMAIL, UPDATE_PASSWORD). Idempotent on
-        Idempotency-Key reuse.
+        Sets required_actions (e.g. VERIFY_EMAIL, UPDATE_PASSWORD), then sends the
+        execute-actions invitation email linking to <WEB_APP_BASE_URL>/t/<tenant_slug>/
+        (a send failure fails the call). Idempotent on Idempotency-Key reuse.
       parameters:
       - description: Tenant UUID
         format: uuid

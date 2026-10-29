@@ -77,6 +77,17 @@ func userProfileHandlers(mux *http.ServeMux, realm string, getFail, putFail bool
 	})
 }
 
+// tokenSettingsHandler serves the partial realm PUT that applies the
+// template's token settings, decoding its body into got when non-nil.
+func tokenSettingsHandler(mux *http.ServeMux, realm string, got *map[string]any) {
+	mux.HandleFunc("PUT "+realmPath(realm), func(w http.ResponseWriter, r *http.Request) {
+		if got != nil {
+			_ = json.NewDecoder(r.Body).Decode(got)
+		}
+		writeJSON(w, http.StatusNoContent, ``)
+	})
+}
+
 func TestCreateRealmFromTemplate_Success(t *testing.T) {
 	realm := "acme"
 	a := newFakeAdmin(t, []tokenResponse{okTokenResponse(), okTokenResponse()}, func(mux *http.ServeMux) {
@@ -89,6 +100,7 @@ func TestCreateRealmFromTemplate_Success(t *testing.T) {
 			writeJSON(w, http.StatusCreated, `{}`)
 		})
 		userProfileHandlers(mux, realm, false, false)
+		tokenSettingsHandler(mux, realm, nil)
 	})
 
 	err := a.CreateRealmFromTemplate(context.Background(), realm, "tpl")
@@ -118,6 +130,7 @@ func TestCreateRealmFromTemplate_NeverSetsRealmID(t *testing.T) {
 			writeJSON(w, http.StatusCreated, `{}`)
 		})
 		userProfileHandlers(mux, realm, false, false)
+		tokenSettingsHandler(mux, realm, nil)
 	})
 
 	err := a.CreateRealmFromTemplate(context.Background(), realm, "tpl")
@@ -206,12 +219,13 @@ func TestCreateRealmFromTemplate_RoleAlreadyExistsIsIgnored(t *testing.T) {
 			writeJSON(w, http.StatusConflict, `{"errorMessage":"role exists"}`)
 		})
 		userProfileHandlers(mux, realm, false, false)
+		tokenSettingsHandler(mux, realm, nil)
 	})
 	err := a.CreateRealmFromTemplate(context.Background(), realm, "tpl")
 	require.NoError(t, err)
 }
 
-func TestCreateRealmFromTemplate_EnableUnmanagedAttributesError(t *testing.T) {
+func TestCreateRealmFromTemplate_UserProfileError(t *testing.T) {
 	realm := "acme"
 	a := newFakeAdmin(t, []tokenResponse{okTokenResponse(), okTokenResponse()}, func(mux *http.ServeMux) {
 		mux.HandleFunc("POST /admin/realms/", func(w http.ResponseWriter, r *http.Request) {
@@ -226,23 +240,23 @@ func TestCreateRealmFromTemplate_EnableUnmanagedAttributesError(t *testing.T) {
 	})
 	err := a.CreateRealmFromTemplate(context.Background(), realm, "tpl")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "enable_unmanaged_attributes")
+	require.Contains(t, err.Error(), "user_profile")
 }
 
-// --- enableUnmanagedAttributes (deeper branches beyond the one exercised
+// --- applyUserProfile (deeper branches beyond the one exercised
 // above) ---
 
-func TestEnableUnmanagedAttributes_GetTransportError(t *testing.T) {
+func TestApplyUserProfile_GetTransportError(t *testing.T) {
 	realm := "acme"
 	a := newFakeAdmin(t, []tokenResponse{okTokenResponse()}, nil) // no route registered -> connection works but 404s, not a transport error
 	tok, err := a.token(context.Background())
 	require.NoError(t, err)
-	err = a.enableUnmanagedAttributes(context.Background(), tok, realm)
+	err = a.applyUserProfile(context.Background(), tok, realm)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "get user profile")
 }
 
-func TestEnableUnmanagedAttributes_DecodeError(t *testing.T) {
+func TestApplyUserProfile_DecodeError(t *testing.T) {
 	realm := "acme"
 	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
 		mux.HandleFunc("GET "+realmPath(realm, "users", "profile"), func(w http.ResponseWriter, _ *http.Request) {
@@ -251,19 +265,19 @@ func TestEnableUnmanagedAttributes_DecodeError(t *testing.T) {
 	})
 	tok, err := a.token(context.Background())
 	require.NoError(t, err)
-	err = a.enableUnmanagedAttributes(context.Background(), tok, realm)
+	err = a.applyUserProfile(context.Background(), tok, realm)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "decode user profile")
 }
 
-func TestEnableUnmanagedAttributes_PutError(t *testing.T) {
+func TestApplyUserProfile_PutError(t *testing.T) {
 	realm := "acme"
 	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
 		userProfileHandlers(mux, realm, false, true)
 	})
 	tok, err := a.token(context.Background())
 	require.NoError(t, err)
-	err = a.enableUnmanagedAttributes(context.Background(), tok, realm)
+	err = a.applyUserProfile(context.Background(), tok, realm)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "update user profile")
 }
@@ -287,18 +301,18 @@ func hijackAndClose(t *testing.T) http.HandlerFunc {
 	}
 }
 
-func TestEnableUnmanagedAttributes_GetRealTransportError(t *testing.T) {
+func TestApplyUserProfile_GetRealTransportError(t *testing.T) {
 	realm := "acme"
 	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
 		mux.HandleFunc("GET "+realmPath(realm, "users", "profile"), hijackAndClose(t))
 	})
 	tok, err := a.token(context.Background())
 	require.NoError(t, err)
-	err = a.enableUnmanagedAttributes(context.Background(), tok, realm)
+	err = a.applyUserProfile(context.Background(), tok, realm)
 	require.Error(t, err)
 }
 
-func TestEnableUnmanagedAttributes_PutRealTransportError(t *testing.T) {
+func TestApplyUserProfile_PutRealTransportError(t *testing.T) {
 	realm := "acme"
 	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
 		mux.HandleFunc("GET "+realmPath(realm, "users", "profile"), func(w http.ResponseWriter, _ *http.Request) {
@@ -308,18 +322,19 @@ func TestEnableUnmanagedAttributes_PutRealTransportError(t *testing.T) {
 	})
 	tok, err := a.token(context.Background())
 	require.NoError(t, err)
-	err = a.enableUnmanagedAttributes(context.Background(), tok, realm)
+	err = a.applyUserProfile(context.Background(), tok, realm)
 	require.Error(t, err)
 }
 
-func TestEnableUnmanagedAttributes_Success(t *testing.T) {
+func TestApplyUserProfile_Success(t *testing.T) {
 	realm := "acme"
 	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
 		userProfileHandlers(mux, realm, false, false)
+		tokenSettingsHandler(mux, realm, nil)
 	})
 	tok, err := a.token(context.Background())
 	require.NoError(t, err)
-	require.NoError(t, a.enableUnmanagedAttributes(context.Background(), tok, realm))
+	require.NoError(t, a.applyUserProfile(context.Background(), tok, realm))
 }
 
 // --- RegisterOIDCClients ---
