@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,7 +65,16 @@ type ProvisioningService struct {
 	// inflight tracks detached conversions so shutdown can wait for them
 	// (Drain) before the pools close.
 	inflight sync.WaitGroup
+
+	// webBaseURL and webClientID build the link at the end of the verify and
+	// invitation emails (WithWebEntry). Empty webBaseURL = no link.
+	webBaseURL  string
+	webClientID string
 }
+
+// InvitationLifespan is how long an RP-5 invitation link stays valid: the
+// 7-day expiry O&M stores on the pending invitation (HLD §8.2.2 step 4).
+const InvitationLifespan = 7 * 24 * time.Hour
 
 // DefaultConvertTimeout bounds a detached RP-3 conversion. The LLD budget is
 // p95 ≤ 8s + ~0.3s per migrated user (§11.1), so 10 minutes covers ~2,000
@@ -120,6 +131,24 @@ func (s *ProvisioningService) Drain(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// WithWebEntry sets the web app's base URL (e.g. https://app.bcbpsolutions.com)
+// and its OIDC client (tender-web), so the verify and invitation emails end
+// on the tenant's workspace URL <baseURL>/t/<slug>/ (HLD §8.2.7: the emailed
+// link carries the workspace). Returns s for chaining.
+func (s *ProvisioningService) WithWebEntry(baseURL, clientID string) *ProvisioningService {
+	s.webBaseURL, s.webClientID = strings.TrimRight(baseURL, "/"), clientID
+	return s
+}
+
+// workspaceLink is the email link for slug, or nil when the web entry is not
+// configured or the slug is unknown (Keycloak then shows its own page).
+func (s *ProvisioningService) workspaceLink(slug string) *port.ActionLink {
+	if s.webBaseURL == "" || s.webClientID == "" || slug == "" {
+		return nil
+	}
+	return &port.ActionLink{ClientID: s.webClientID, RedirectURI: s.webBaseURL + "/t/" + url.PathEscape(slug) + "/"}
 }
 
 // WithLogger attaches a logger and returns s for chaining.
@@ -412,6 +441,7 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 	kcUserID, err := s.keycloak.CreateTrialUser(ctx, port.CreateUserRequest{
 		Email: req.AdminEmail, FullName: req.AdminName, TenantID: req.TenantID,
 		HashedPasswordSeed: req.HashedPasswordSeed, EmailVerified: false,
+		Link: s.workspaceLink(req.TenantSlug),
 	})
 	if isUserEmailConflict(err) {
 		kcUserID, err = s.resolveUserCreateConflict(ctx, s.sharedRealm, req.AdminEmail, req.TenantID, err)
@@ -1023,6 +1053,9 @@ type CreateInvitedUserRequest struct {
 	Email           string
 	FullName        string
 	RequiredActions []string
+	// TenantSlug (required) builds the invitation link's /t/<slug>/ for
+	// both realm strategies — the shared trial realm's name carries no slug.
+	TenantSlug string
 }
 
 // CreateInvitedUserResult is the RP-5 response body.
@@ -1034,6 +1067,9 @@ type CreateInvitedUserResult struct {
 // tenant's realm (resolved from tenant_realms). No local persistence — RP
 // has no per-user table (§5.2.1).
 func (s *ProvisioningService) CreateInvitedUser(ctx context.Context, idempotencyKey string, tenantID uuid.UUID, req CreateInvitedUserRequest) (*CreateInvitedUserResult, error) {
+	if req.TenantSlug == "" {
+		return nil, domain.NewError(domain.ErrInvalidRequest, "tenant_slug is required: it builds the invitation link")
+	}
 	existing, found, err := s.idempotency.Begin(ctx, idempotencyKey, tenantID, domain.OpCreateInvitedUser)
 	if err != nil {
 		return nil, err
@@ -1057,6 +1093,17 @@ func (s *ProvisioningService) CreateInvitedUser(ctx context.Context, idempotency
 	if err != nil {
 		s.failIdempotency(ctx, idempotencyKey)
 		return nil, err
+	}
+	// The invitation email (HLD §8.2.2 step 4). An invitee has no password,
+	// so this link is their only way in: a send failure fails RP-5, and the
+	// caller's retry lands in the conflict resolution above and sends again.
+	if len(req.RequiredActions) > 0 {
+		if err := s.keycloak.SendActionsEmail(ctx, row.RealmName, userID, req.RequiredActions, InvitationLifespan, s.workspaceLink(req.TenantSlug)); err != nil {
+			s.failIdempotency(ctx, idempotencyKey)
+			return nil, err
+		}
+	} else {
+		s.log.WarnContext(ctx, "create_invited_user: no required actions, no invitation email sent", "tenant_id", tenantID)
 	}
 	result := &CreateInvitedUserResult{KeycloakUserID: userID}
 	body := marshalIdempotencyResult(ctx, s.log, "create_invited_user", result)

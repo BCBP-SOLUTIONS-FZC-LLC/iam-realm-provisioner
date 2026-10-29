@@ -74,10 +74,16 @@ func (f *fakeJobsKeycloakAdmin) DeleteRealm(ctx context.Context, realmName strin
 func (f *fakeJobsKeycloakAdmin) DeleteRealmIfExists(ctx context.Context, realmName string) error {
 	panic("not implemented")
 }
+func (f *fakeJobsKeycloakAdmin) EnsureSharedRealm(ctx context.Context, realmName string) error {
+	panic("not implemented")
+}
 func (f *fakeJobsKeycloakAdmin) CreateTrialUser(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) {
 	panic("not implemented")
 }
 func (f *fakeJobsKeycloakAdmin) CreateInvitedUser(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
+	panic("not implemented")
+}
+func (f *fakeJobsKeycloakAdmin) SendActionsEmail(ctx context.Context, realmName string, userID uuid.UUID, actions []string, lifespan time.Duration, link *port.ActionLink) error {
 	panic("not implemented")
 }
 func (f *fakeJobsKeycloakAdmin) FindUserByEmail(ctx context.Context, realmName, email string) (*port.ExistingUser, error) {

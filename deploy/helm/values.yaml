@@ -168,6 +168,18 @@ env:
   # deploy/keycloak/realm-template.json here; LLD §12.2). Without it the code
   # silently falls back to the copy embedded in the binary.
   REALM_TEMPLATE_PATH: "/deploy/keycloak/realm-template.json"
+  # The web app (React SPA) and its public OIDC client tender-web (HLD
+  # §11.3, LLD §12.2). WEB_APP_BASE_URL is a bare https origin: it becomes
+  # tender-web's exact redirect/post-logout URI "<base>/*" and web origin
+  # (no wildcard host, no "+"), and the base of the RP-1 verify / RP-5
+  # invitation email links (<base>/t/<slug>/). WEB_APP_EXTRA_BASE_URLS is an
+  # optional comma-separated list of further origins the same realms must
+  # accept (e.g. a local SPA in dev). Set per environment; a bad value
+  # fails server startup. Applied to new realms at creation and to the
+  # shared trial realm at every server start.
+  WEB_APP_BASE_URL: "https://app.bcbpsolutions.com"
+  WEB_APP_EXTRA_BASE_URLS: ""
+  WEB_CLIENT_ID: "tender-web"
 
   # OpenBao (per-tenant IdP secrets + Keycloak admin credential, §12) — no
   # static token: this pod authenticates via its ServiceAccount JWT against

@@ -616,7 +616,7 @@ func TestCreateInvitedUser_Happy(t *testing.T) {
 		return newUserID, nil
 	}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "invite-1")
-	rec := doRequest(d.engine(), http.MethodPost, invitedUserPath(tenantID), headers, `{"email":"u@example.com","full_name":"User One","required_actions":["VERIFY_EMAIL"]}`)
+	rec := doRequest(d.engine(), http.MethodPost, invitedUserPath(tenantID), headers, `{"email":"u@example.com","full_name":"User One","required_actions":["VERIFY_EMAIL"],"tenant_slug":"acme"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -632,7 +632,7 @@ func TestCreateInvitedUser_Happy(t *testing.T) {
 func TestCreateInvitedUser_TenantRealmNotFound(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "invite-2")
-	rec := doRequest(d.engine(), http.MethodPost, invitedUserPath(uuid.New()), headers, `{"email":"u@example.com","full_name":"User One"}`)
+	rec := doRequest(d.engine(), http.MethodPost, invitedUserPath(uuid.New()), headers, `{"email":"u@example.com","full_name":"User One","tenant_slug":"acme"}`)
 	assertStatusAndCode(t, rec, http.StatusNotFound, "TENANT_REALM_NOT_FOUND")
 }
 
@@ -641,8 +641,19 @@ func TestCreateInvitedUser_InvalidRequest(t *testing.T) {
 	tenantID := uuid.New()
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "invite-3")
-	rec := doRequest(d.engine(), http.MethodPost, invitedUserPath(tenantID), headers, `{"email":"not-an-email","full_name":"User One"}`)
+	rec := doRequest(d.engine(), http.MethodPost, invitedUserPath(tenantID), headers, `{"email":"not-an-email","full_name":"User One","tenant_slug":"acme"}`)
 	// Invalid email format → validator.ValidationErrors → VALIDATION_FAILED per RFC 9457.
+	assertStatusAndCode(t, rec, http.StatusBadRequest, "VALIDATION_FAILED")
+}
+
+// tenant_slug is required: it builds the invitation link for either realm
+// strategy (rev 1.44).
+func TestCreateInvitedUser_MissingTenantSlug(t *testing.T) {
+	d := newServiceDeps()
+	tenantID := uuid.New()
+	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
+	headers := withHeader(sysHeaders(), "Idempotency-Key", "invite-7")
+	rec := doRequest(d.engine(), http.MethodPost, invitedUserPath(tenantID), headers, `{"email":"u@example.com","full_name":"User One"}`)
 	assertStatusAndCode(t, rec, http.StatusBadRequest, "VALIDATION_FAILED")
 }
 
@@ -654,7 +665,7 @@ func TestCreateInvitedUser_KeycloakUnavailable(t *testing.T) {
 		return uuid.Nil, domain.NewError(domain.ErrKeycloakUnavailable, "down")
 	}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "invite-4")
-	rec := doRequest(d.engine(), http.MethodPost, invitedUserPath(tenantID), headers, `{"email":"u@example.com","full_name":"User One"}`)
+	rec := doRequest(d.engine(), http.MethodPost, invitedUserPath(tenantID), headers, `{"email":"u@example.com","full_name":"User One","tenant_slug":"acme"}`)
 	assertStatusAndCode(t, rec, http.StatusBadGateway, "KEYCLOAK_UNAVAILABLE")
 }
 
@@ -664,7 +675,7 @@ func TestCreateInvitedUser_OperationInProgress(t *testing.T) {
 	d.putRealm(dedicatedRealm(tenantID, "kc-shard-1"))
 	d.idempotency.rows["invite-5"] = &domain.ProvisioningOperation{IdempotencyKey: "invite-5", TenantID: tenantID, Status: domain.OpStatusSucceeded, Result: []byte(`{"keycloak_user_id":"` + uuid.New().String() + `"}`)}
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "invite-5")
-	rec := doRequest(d.engine(), http.MethodPost, invitedUserPath(tenantID), headers, `{"email":"u@example.com","full_name":"User One"}`)
+	rec := doRequest(d.engine(), http.MethodPost, invitedUserPath(tenantID), headers, `{"email":"u@example.com","full_name":"User One","tenant_slug":"acme"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected replayed 201, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -672,14 +683,14 @@ func TestCreateInvitedUser_OperationInProgress(t *testing.T) {
 
 func TestCreateInvitedUser_MissingIdempotencyKey(t *testing.T) {
 	d := newServiceDeps()
-	rec := doRequest(d.engine(), http.MethodPost, invitedUserPath(uuid.New()), sysHeaders(), `{"email":"u@example.com","full_name":"User One"}`)
+	rec := doRequest(d.engine(), http.MethodPost, invitedUserPath(uuid.New()), sysHeaders(), `{"email":"u@example.com","full_name":"User One","tenant_slug":"acme"}`)
 	assertStatusAndCode(t, rec, http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY")
 }
 
 func TestCreateInvitedUser_InvalidTenantIDInPath(t *testing.T) {
 	d := newServiceDeps()
 	headers := withHeader(sysHeaders(), "Idempotency-Key", "invite-6")
-	rec := doRequest(d.engine(), http.MethodPost, "/api/v1/internal/tenants/not-a-uuid/users", headers, `{"email":"u@example.com","full_name":"User One"}`)
+	rec := doRequest(d.engine(), http.MethodPost, "/api/v1/internal/tenants/not-a-uuid/users", headers, `{"email":"u@example.com","full_name":"User One","tenant_slug":"acme"}`)
 	assertStatusAndCode(t, rec, http.StatusBadRequest, "INVALID_REQUEST")
 }
 
