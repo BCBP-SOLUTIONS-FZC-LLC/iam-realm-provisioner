@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with the **Realm Provisioner Service** (`iam-realm-provisioner`), a Go microservice in the IAM subsystem (Tender Management SaaS platform). Refines the IAM HLD; LLD v1.44 Approved (`docs/lld/iam-lld-realm-provisioner-service.md`), owner database `provisioner` on shared RDS PostgreSQL. Where LLD and HLD disagree, HLD is authoritative.
+This file provides guidance to Claude Code when working with the **Realm Provisioner Service** (`iam-realm-provisioner`), a Go microservice in the IAM subsystem (Tender Management SaaS platform). Refines the IAM HLD; LLD v1.45 Approved (`docs/lld/iam-lld-realm-provisioner-service.md`), owner database `provisioner` on shared RDS PostgreSQL. Where LLD and HLD disagree, HLD is authoritative.
 
 ## What This Repo Is
 
