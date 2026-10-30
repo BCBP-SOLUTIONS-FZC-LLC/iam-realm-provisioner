@@ -50,6 +50,8 @@ func TestProvisionDirect_Success(t *testing.T) {
 	assert.Equal(t, domain.RealmStrategyDedicated, row.Strategy)
 	require.NotNil(t, row.KeycloakShard)
 	assert.Equal(t, "kc-shard-1", *row.KeycloakShard)
+	require.NotNil(t, row.TenantSlug)
+	assert.Equal(t, "acme", *row.TenantSlug)
 
 	// TenantIdentityProvisioned first (BFF-2 backstop), owner = the admin
 	// user RP-2 just created, then the three existing events in order.

@@ -304,7 +304,8 @@ func TestProvisionDirect_UnsupportedPlan_Rejected(t *testing.T) {
 func convertPath(id uuid.UUID) string { return "/api/v1/internal/tenants/" + id.String() + "/convert" }
 
 func sharedRealm(tenantID uuid.UUID) *domain.TenantRealm {
-	return &domain.TenantRealm{TenantID: tenantID, RealmName: "trial", Strategy: domain.RealmStrategyShared, Status: domain.RealmStatusActive}
+	slug := "acme"
+	return &domain.TenantRealm{TenantID: tenantID, RealmName: "trial", Strategy: domain.RealmStrategyShared, Status: domain.RealmStatusActive, TenantSlug: &slug}
 }
 
 func dedicatedRealm(tenantID uuid.UUID, shard string) *domain.TenantRealm {

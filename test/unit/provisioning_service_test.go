@@ -54,6 +54,8 @@ func TestProvisionTrial_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, domain.RealmStrategyShared, row.Strategy)
 	assert.Equal(t, domain.RealmStatusActive, row.Status)
+	require.NotNil(t, row.TenantSlug, "RP-D20: RP-3 later names the realm from it")
+	assert.Equal(t, "acme", *row.TenantSlug)
 
 	// Exactly one TenantIdentityProvisioned event (the BFF-2 signup
 	// backstop), carrying the request's tenant fields verbatim.

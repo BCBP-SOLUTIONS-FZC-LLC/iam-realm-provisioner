@@ -9,6 +9,16 @@ import (
 	"github.com/google/uuid"
 )
 
+// DedicatedRealmOwners answers which live tenant holds a dedicated realm
+// name. It reads across tenants, so it is backed by the BYPASSRLS sysPool
+// (RP-D20: RP-3 resumes into an existing tenant-<slug> realm only when no
+// other tenant owns it).
+type DedicatedRealmOwners interface {
+	// DedicatedRealmOwner returns the tenant whose live dedicated row is
+	// named realmName, or ok=false when none is.
+	DedicatedRealmOwner(ctx context.Context, realmName string) (tenantID uuid.UUID, ok bool, err error)
+}
+
 // TenantRealmRepository persists `tenant_realms` (§4.2). Every method binds
 // the RLS GUC transaction-locally via the caller's ctx (RLS-6).
 type TenantRealmRepository interface {

@@ -312,7 +312,8 @@ func main() {
 	provisioningSvc := service.NewProvisioningService(
 		tenantRealmRepo, idempotencyRepo, keycloakAdmin, tokenServiceClient, txRunner, pendingAuditRepo, sharedRealm, nil,
 	).WithLogger(log).WithConvertTimeout(envDuration("CONVERT_TIMEOUT", service.DefaultConvertTimeout)).
-		WithWebEntry(webClient.BaseURLs[0], webClient.ClientID)
+		WithWebEntry(webClient.BaseURLs[0], webClient.ClientID).
+		WithRealmOwners(pgadapter.NewTenantRealmRepository(sysPool))
 	lifecycleSvc := service.NewLifecycleService(
 		tenantRealmRepo, idempotencyRepo, keycloakAdmin, txRunner, sharedRealm,
 	).WithLogger(log).WithIdpConfigs(idpConfigRepo)

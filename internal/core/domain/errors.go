@@ -28,6 +28,10 @@ const (
 	ErrServiceAccountRotationInFlight ErrorCode = "service_account_rotation_in_flight" // 409
 	ErrCredentialReplayRevoked        ErrorCode = "credential_replay_revoked"          //nolint:gosec // G101 false positive: 409, an §17 error-code string constant, not a credential
 	ErrCredentialReplayExpired        ErrorCode = "credential_replay_expired"          // 409 — TS-D22: rotation_id replayed past ROTATION_REPLAY_WINDOW
+	// ErrRealmNameUnavailable: RP-3 cannot name the dedicated realm
+	// tenant-<slug> — no slug is recorded for the tenant, or another live
+	// tenant already holds that realm (RP-D20).
+	ErrRealmNameUnavailable ErrorCode = "realm_name_unavailable" // 409
 
 	ErrServiceAccountNotProvisioned ErrorCode = "service_account_not_provisioned" // 422
 	ErrKeycloakUnavailable          ErrorCode = "keycloak_unavailable"            // 502
@@ -81,6 +85,7 @@ var httpStatus = map[ErrorCode]int{
 	ErrServiceAccountRotationInFlight: 409,
 	ErrCredentialReplayRevoked:        409,
 	ErrCredentialReplayExpired:        409,
+	ErrRealmNameUnavailable:           409,
 	ErrKeycloakUnavailable:            502,
 	ErrConversionFailed:               502,
 	ErrOrgMembershipUnavailable:       503,
