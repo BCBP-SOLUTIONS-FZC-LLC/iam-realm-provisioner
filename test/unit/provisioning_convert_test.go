@@ -16,10 +16,115 @@ import (
 )
 
 func seedSharedRealm(realms *mockTenantRealmRepository, tenantID uuid.UUID) {
+	slug := "acme"
 	realms.rows[tenantID] = &domain.TenantRealm{
 		TenantID: tenantID, RealmName: "trial", Strategy: domain.RealmStrategyShared,
-		Status: domain.RealmStatusActive, RecordVersion: 1,
+		Status: domain.RealmStatusActive, RecordVersion: 1, TenantSlug: &slug,
 	}
+}
+
+func stubConvertKeycloak(kc *mockKeycloakAdmin) {
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
+	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) { return nil, nil }
+	kc.ListUsersByTenantFn = func(ctx context.Context, realmName string, tid uuid.UUID) ([]uuid.UUID, error) { return nil, nil }
+	kc.ForceLogoutRealmFn = func(ctx context.Context, realmName string) error { return nil }
+}
+
+// G-1 (HLD v1.59 §17.2): the converted realm is tenant-<slug>, from the slug
+// recorded at RP-1, never tenant-<tenant_id>.
+func TestConvert_NamesTheRealmFromTheRecordedSlug(t *testing.T) {
+	svc, kc, realms, _, pub := newProvisioningTestService(t)
+	svc.WithRealmOwners(realms)
+	tenantID := uuid.New()
+	seedSharedRealm(realms, tenantID)
+	stubConvertKeycloak(kc)
+	var createdRealm, clientsSlug string
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { createdRealm = realmName; return nil }
+	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) {
+		clientsSlug = slug
+		return nil, nil
+	}
+
+	result, err := svc.Convert(context.Background(), "conv-key-slug", tenantID, service.ConvertRequest{Plan: "pro"})
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-acme", createdRealm)
+	assert.Equal(t, "acme", clientsSlug)
+	assert.Equal(t, "tenant-acme", result.Realm)
+	row := realms.rows[tenantID]
+	assert.Equal(t, "tenant-acme", row.RealmName)
+	require.NotNil(t, row.TenantSlug)
+	assert.Equal(t, "acme", *row.TenantSlug, "the slug survives the conversion update")
+	for _, ev := range pub.events {
+		switch d := ev.Data.(type) {
+		case domain.TenantConvertedPayload:
+			assert.Equal(t, "tenant-acme", d.Realm)
+		case domain.TenantRealmReadyPayload:
+			assert.Equal(t, "tenant-acme", d.Realm)
+		}
+	}
+}
+
+func TestConvert_NoRecordedSlug_RealmNameUnavailable_NoKeycloakCall(t *testing.T) {
+	svc, kc, realms, idem, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	seedSharedRealm(realms, tenantID)
+	realms.rows[tenantID].TenantSlug = nil
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error {
+		t.Fatal("no realm may be created without a slug")
+		return nil
+	}
+
+	_, err := svc.Convert(context.Background(), "conv-key-noslug", tenantID, service.ConvertRequest{Plan: "pro"})
+	var de *domain.Error
+	require.ErrorAs(t, err, &de)
+	assert.Equal(t, domain.ErrRealmNameUnavailable, de.Code)
+	assert.Equal(t, 409, de.Status())
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["conv-key-noslug"].Status)
+}
+
+// The realm-exists conflict is resumed as this tenant's own earlier attempt,
+// so a tenant-<slug> held by another live tenant must stop the conversion
+// before Keycloak is touched: resuming would migrate this tenant's users
+// into the other tenant's realm.
+func TestConvert_RealmHeldByAnotherTenant_Refused(t *testing.T) {
+	svc, kc, realms, _, _ := newProvisioningTestService(t)
+	svc.WithRealmOwners(realms)
+	tenantID, otherID := uuid.New(), uuid.New()
+	seedSharedRealm(realms, tenantID)
+	shard := "kc-shard-1"
+	realms.rows[otherID] = &domain.TenantRealm{
+		TenantID: otherID, RealmName: "tenant-acme", Strategy: domain.RealmStrategyDedicated,
+		KeycloakShard: &shard, Status: domain.RealmStatusActive, RecordVersion: 1,
+	}
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error {
+		t.Fatal("must not create or resume into another tenant's realm")
+		return nil
+	}
+	kc.MigrateUserFn = func(ctx context.Context, src, dst string, uid uuid.UUID) (bool, error) {
+		t.Fatal("must not migrate users")
+		return false, nil
+	}
+
+	_, err := svc.Convert(context.Background(), "conv-key-taken", tenantID, service.ConvertRequest{Plan: "pro"})
+	var de *domain.Error
+	require.ErrorAs(t, err, &de)
+	assert.Equal(t, domain.ErrRealmNameUnavailable, de.Code)
+	assert.Equal(t, domain.RealmStrategyShared, realms.rows[tenantID].Strategy)
+}
+
+func TestConvert_RealmOwnerLookupFails_FailsClosed(t *testing.T) {
+	svc, kc, realms, _, _ := newProvisioningTestService(t)
+	realms.DedicatedRealmOwnerErr = errors.New("sys pool down")
+	svc.WithRealmOwners(realms)
+	tenantID := uuid.New()
+	seedSharedRealm(realms, tenantID)
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error {
+		t.Fatal("must not proceed without the ownership check")
+		return nil
+	}
+
+	_, err := svc.Convert(context.Background(), "conv-key-lookup", tenantID, service.ConvertRequest{Plan: "pro"})
+	require.Error(t, err)
 }
 
 // Convert's post-success cleanup must target the PERSISTED

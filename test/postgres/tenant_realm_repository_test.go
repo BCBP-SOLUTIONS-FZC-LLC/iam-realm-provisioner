@@ -67,6 +67,66 @@ func TestTenantRealmRepository(t *testing.T) {
 		assert.Nil(t, got.DeletedAt)
 	})
 
+	t.Run("TenantSlug_RoundTripsAndSurvivesASlugLessUpsert", func(t *testing.T) {
+		// RP-D20: RP-1 records the slug; RP-3's Update carries it through.
+		t.Parallel()
+		tenantID := uuid.New()
+		tctx := withTenant(ctx, tenantID)
+		row := newSharedTrial(tenantID)
+		row.TenantSlug = strPtr("acme-" + tenantID.String()[:8])
+		require.NoError(t, repo.Upsert(tctx, row))
+
+		row.TenantSlug = nil
+		require.NoError(t, repo.Upsert(tctx, row), "an upsert without a slug keeps the recorded one")
+		got, err := repo.FindByTenantID(tctx, tenantID)
+		require.NoError(t, err)
+		require.NotNil(t, got.TenantSlug)
+		assert.Equal(t, "acme-"+tenantID.String()[:8], *got.TenantSlug)
+
+		got.Strategy = domain.RealmStrategyDedicated
+		got.RealmName = "tenant-" + *got.TenantSlug
+		got.KeycloakShard = strPtr("kc-shard-1")
+		require.NoError(t, repo.Update(tctx, got))
+		updated, err := repo.FindByTenantID(tctx, tenantID)
+		require.NoError(t, err)
+		require.NotNil(t, updated.TenantSlug)
+		assert.Equal(t, *got.TenantSlug, *updated.TenantSlug)
+	})
+
+	t.Run("TenantSlug_LengthCheck", func(t *testing.T) {
+		t.Parallel()
+		tenantID := uuid.New()
+		row := newSharedTrial(tenantID)
+		row.TenantSlug = strPtr("")
+		require.Error(t, repo.Upsert(withTenant(ctx, tenantID), row))
+	})
+
+	t.Run("DedicatedRealmOwner_SeesOtherTenantsOnSysPool", func(t *testing.T) {
+		// RP-3's cross-tenant check: on the sysPool another tenant's live
+		// dedicated row is visible; shared and tombstoned rows never count.
+		t.Parallel()
+		owner, erased := uuid.New(), uuid.New()
+		name := "tenant-owner-" + owner.String()[:8]
+		require.NoError(t, repo.Upsert(withTenant(ctx, owner), newDedicated(owner, name, "kc-shard-1")))
+		erasedName := "tenant-erased-" + erased.String()[:8]
+		require.NoError(t, repo.Upsert(withTenant(ctx, erased), newDedicated(erased, erasedName, "kc-shard-1")))
+		_, err := rawPool.Exec(ctx, `UPDATE tenant_realms SET status = 'deleted', deleted_at = now() WHERE tenant_id = $1`, erased)
+		require.NoError(t, err)
+
+		got, ok, err := sysRepo.DedicatedRealmOwner(withTenant(ctx, uuid.New()), name)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, owner, got)
+
+		_, ok, err = sysRepo.DedicatedRealmOwner(ctx, erasedName)
+		require.NoError(t, err)
+		assert.False(t, ok, "a tombstoned realm does not hold the name")
+
+		_, ok, err = sysRepo.DedicatedRealmOwner(ctx, "trial")
+		require.NoError(t, err)
+		assert.False(t, ok, "the shared realm is never a dedicated owner")
+	})
+
 	t.Run("IsTombstoned_OnlyForSoftDeletedRows", func(t *testing.T) {
 		// tenant_consumer drops a TrialStarted for an erased tenant
 		// (orphaned-signup-reap, §8.7) — it must tell a tombstone apart from

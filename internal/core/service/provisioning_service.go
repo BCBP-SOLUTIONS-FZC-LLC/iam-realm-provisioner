@@ -70,6 +70,10 @@ type ProvisioningService struct {
 	// invitation emails (WithWebEntry). Empty webBaseURL = no link.
 	webBaseURL  string
 	webClientID string
+
+	// realmOwners checks, cross-tenant, that RP-3's tenant-<slug> is not
+	// another tenant's realm (WithRealmOwners). nil skips the check.
+	realmOwners port.DedicatedRealmOwners
 }
 
 // InvitationLifespan is how long an RP-5 invitation link stays valid: the
@@ -114,6 +118,13 @@ func (s *ProvisioningService) WithConvertTimeout(d time.Duration) *ProvisioningS
 	if d > 0 {
 		s.convertTimeout = d
 	}
+	return s
+}
+
+// WithRealmOwners sets the cross-tenant realm-name lookup RP-3 consults
+// before creating or resuming into tenant-<slug> (RP-D20) and returns s.
+func (s *ProvisioningService) WithRealmOwners(o port.DedicatedRealmOwners) *ProvisioningService {
+	s.realmOwners = o
 	return s
 }
 
@@ -470,7 +481,7 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 	err = s.tx.RunInTx(ctx, func(ctx context.Context) error {
 		if err := s.realms.Upsert(ctx, &domain.TenantRealm{
 			TenantID: req.TenantID, RealmName: s.sharedRealm, Strategy: domain.RealmStrategyShared,
-			Status:                    domain.RealmStatusActive,
+			Status: domain.RealmStatusActive, TenantSlug: &req.TenantSlug,
 			ServiceAccountPrincipalID: &principalID, ServiceAccountKeycloakClientID: &automationClientID,
 		}); err != nil {
 			return err
@@ -653,6 +664,7 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 			TenantID: req.TenantID, RealmName: realmName, Strategy: domain.RealmStrategyDedicated,
 			KeycloakShard: &shard, Status: domain.RealmStatusActive, ConvertedAt: nowPtr(),
 			ServiceAccountPrincipalID: &principalID, ServiceAccountKeycloakClientID: &automationClientID,
+			TenantSlug: &req.TenantSlug,
 		}); err != nil {
 			return err
 		}
@@ -800,21 +812,30 @@ func (s *ProvisioningService) convertClaimed(ctx context.Context, idempotencyKey
 		return nil, domain.NewError(domain.ErrRealmAlreadyDedicated, "tenant is already dedicated").WithDetails(map[string]any{"tenant_id": tenantID})
 	}
 
-	// derive a slug from the tenant id when none is tracked locally (this
-	// service persists no tenant_slug — see §5.2.1 field disposition); a
-	// caller-visible slug MUST be supplied via the realm-name convention
-	// upstream. Convert's request body carries no slug per §5.2, so this
-	// derives a stable name from the tenant id. Uses the FULL uuid, not a
-	// truncated prefix: the realm-name collision below is now treated as
-	// proof of "my own earlier partial attempt" and resumed against
-	// (rather than always a hard error), so an 8-hex-char (32-bit) prefix
-	// would let two different tenants collide onto the same realm at
-	// large-enough scale and have the second tenant's users migrated into
-	// the first tenant's realm — a tenant-isolation violation. The full
-	// UUID carries the same 128 bits of collision resistance this service
-	// already relies on for tenant-id uniqueness itself.
-	slug := tenantID.String()
+	// The dedicated realm is tenant-<slug> (HLD §4.2), the slug recorded at
+	// RP-1 (RP-D20) — RP-3's body carries none. The realm-name conflict
+	// below is resumed as this tenant's own earlier partial attempt, so
+	// first make sure no other live tenant holds the name: resuming into
+	// its realm would migrate this tenant's users into another tenant.
+	if current.TenantSlug == nil || *current.TenantSlug == "" {
+		s.failIdempotency(ctx, idempotencyKey)
+		return nil, domain.NewError(domain.ErrRealmNameUnavailable, "no tenant_slug is recorded for this tenant").
+			WithDetails(map[string]any{"tenant_id": tenantID})
+	}
+	slug := *current.TenantSlug
 	realmName := dedicatedRealmName(slug)
+	if s.realmOwners != nil {
+		owner, ok, err := s.realmOwners.DedicatedRealmOwner(ctx, realmName)
+		if err != nil {
+			s.failIdempotency(ctx, idempotencyKey)
+			return nil, err
+		}
+		if ok && owner != tenantID {
+			s.failIdempotency(ctx, idempotencyKey)
+			return nil, domain.NewError(domain.ErrRealmNameUnavailable, "the dedicated realm name is held by another tenant").
+				WithDetails(map[string]any{"tenant_id": tenantID, "realm": realmName})
+		}
+	}
 	shard, err := s.selectShard(ctx)
 	if err != nil {
 		s.failIdempotency(ctx, idempotencyKey)
@@ -837,7 +858,8 @@ func (s *ProvisioningService) convertClaimed(ctx context.Context, idempotencyKey
 			s.failIdempotency(ctx, idempotencyKey)
 			return nil, err
 		}
-		// realmName is deterministic per tenant (dedicatedRealmName), and
+		// realmName is this tenant's recorded slug (immutable in O&M, unique
+		// across tenants), no other live tenant holds it (checked above), and
 		// current.Strategy read above is still shared, so this conflict
 		// cannot be a different tenant's realm — it can only be this
 		// tenant's own earlier attempt that got partway through this same

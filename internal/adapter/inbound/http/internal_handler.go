@@ -238,7 +238,7 @@ type convertRequest struct {
 // @Failure      400      {object}  ProblemResponse  "invalid_request OR missing_idempotency_key"
 // @Failure      403      {object}  ProblemResponse  "insufficient_role (caller not in CD-19 allow-list)"
 // @Failure      404      {object}  ProblemResponse  "tenant_realm_not_found"
-// @Failure      409      {object}  ProblemResponse  "operation_in_progress OR realm_already_dedicated OR tenant_offboarded OR optimistic_lock_conflict OR credential_replay_expired"
+// @Failure      409      {object}  ProblemResponse  "operation_in_progress OR realm_already_dedicated OR realm_name_unavailable OR tenant_offboarded OR optimistic_lock_conflict OR credential_replay_expired"
 // @Failure      502      {object}  ProblemResponse  "conversion_failed"
 // @Failure      503      {object}  ProblemResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
 // @Failure      500      {object}  ProblemResponse

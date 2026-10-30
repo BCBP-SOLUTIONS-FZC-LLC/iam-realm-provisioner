@@ -155,6 +155,21 @@ type mockTenantRealmRepository struct {
 	UpdateErr        error
 	CountsByShardErr error
 	IsTombstonedErr  error
+	// DedicatedRealmOwnerErr fails DedicatedRealmOwner.
+	DedicatedRealmOwnerErr error
+}
+
+// DedicatedRealmOwner implements port.DedicatedRealmOwners over rows.
+func (m *mockTenantRealmRepository) DedicatedRealmOwner(_ context.Context, realmName string) (uuid.UUID, bool, error) {
+	if m.DedicatedRealmOwnerErr != nil {
+		return uuid.Nil, false, m.DedicatedRealmOwnerErr
+	}
+	for id, r := range m.rows {
+		if r.Strategy == domain.RealmStrategyDedicated && r.RealmName == realmName && r.DeletedAt == nil {
+			return id, true, nil
+		}
+	}
+	return uuid.Nil, false, nil
 }
 
 func newMockTenantRealmRepository() *mockTenantRealmRepository {

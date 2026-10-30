@@ -259,7 +259,7 @@ const docTemplate = `{
                         }
                     },
                     "409": {
-                        "description": "operation_in_progress OR realm_already_dedicated OR tenant_offboarded OR optimistic_lock_conflict OR credential_replay_expired",
+                        "description": "operation_in_progress OR realm_already_dedicated OR realm_name_unavailable OR tenant_offboarded OR optimistic_lock_conflict OR credential_replay_expired",
                         "schema": {
                             "$ref": "#/definitions/http.ProblemResponse"
                         }

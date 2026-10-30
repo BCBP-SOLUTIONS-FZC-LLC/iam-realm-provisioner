@@ -106,7 +106,7 @@ func TestTrialProvisionThenConvert(t *testing.T) {
 	assert.Equal(t, 0, convertResult.WebauthnReenrollRequired)
 	assert.True(t, convertResult.SharedSessionsTerminated)
 	dedicatedRealm := convertResult.Realm
-	assert.NotEqual(t, sharedRealm, dedicatedRealm)
+	assert.Equal(t, "tenant-"+slug, dedicatedRealm, "G-1: the converted realm is named from the RP-1 slug")
 
 	// tenant_realms row: now dedicated, pointing at the new realm.
 	assertTenantRealmRow(t, ctx, tenantID, "dedicated", dedicatedRealm, "active")
