@@ -16,6 +16,7 @@ This service has never been deployed to any environment — there is no released
 
 ### Changed
 
+- **A converted trial's realm is `tenant-<slug>` (RP-3, LLD v1.46, RP-D20, HLD v1.59 G-1).** It was `tenant-<tenant_id>`, which broke HLD §4.2's naming, PUB-1's slug fast path and the frontend SDK's `iss` check. New nullable `tenant_realms.tenant_slug` (in `000000`; re-create dev `provisioner` databases), recorded by RP-1/RP-2 from the `tenant_slug` they already receive; RP-3 names the realm from it. No recorded slug, or `tenant-<slug>` held by another live tenant (checked on the sysPool before RP-3 creates or resumes into the realm) → new `409 realm_name_unavailable`. RP-3's request/response shape is unchanged; `TenantConverted.realm` / `TenantRealmReady.realm` now carry `tenant-<slug>`.
 - **`tender-web` hardened (HLD §11.3).** Public, standard flow only, PKCE S256, exact redirect / post-logout URIs `<base>/*` and web origins `<base>` from config (no `https://*.bcbpsolutions.com/*`, no `+`). Realm token settings: access 5 min, client session 8 h idle / 12 h max, SSO 12 h / 24 h, refresh-token rotation (`revokeRefreshToken`, max reuse 0). Applied to new realms; dedicated realms created earlier are recreated in dev (nothing is in production).
 - **`tenant_id` user attribute is admin-only** in every realm's user profile, so a user cannot edit it in the account console and move into another trial tenant.
 - **RP-2 sends no creation-time email** (RP-D19, a stated choice): the direct-paid admin verifies at first login.
