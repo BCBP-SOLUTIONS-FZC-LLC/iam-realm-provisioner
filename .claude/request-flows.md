@@ -116,7 +116,7 @@ POST /tenants/provision-direct {..., billing_subscription_id, terms_acceptance} 
   -> 201 {tenant_id, realm, strategy:"dedicated", keycloak_shard, oidc_clients}
 ```
 
-Note `selectShard` reads `CountsByShard` from the **local mirror** of `tenant_realms` (this service is the single writer to Keycloak, so its own local count is authoritative without a live Keycloak query, §9.5).
+Note `selectShard` reads `CountsByShard` from the **local mirror** of `tenant_realms` (this service is the single writer to Keycloak, so its own local count is authoritative without a live Keycloak query, §9.5). The count is cross-tenant, so it goes through `port.ShardLoads`, wired to the **sysPool** repository (`WithShardLoads`, LLD v1.47). On the app pool the caller's tenant GUC would hide every other tenant's realm and log RLS violations; unwired, placement fails.
 
 ## RP-3: Trial → Dedicated Conversion (with user migration)
 

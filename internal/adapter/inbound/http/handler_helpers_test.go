@@ -71,7 +71,7 @@ func newServiceDeps() *serviceDeps {
 // just with fakes standing in for adapters.
 func (d *serviceDeps) handler() Handlers {
 	return NewInternalHandler(
-		service.NewProvisioningService(d.realms, d.idempotency, d.keycloak, d.tokenService, d.tx, &fakePendingAuditEntryRepository{}, "trial", []string{"kc-shard-1"}),
+		service.NewProvisioningService(d.realms, d.idempotency, d.keycloak, d.tokenService, d.tx, &fakePendingAuditEntryRepository{}, "trial", []string{"kc-shard-1"}).WithShardLoads(d.realms),
 		service.NewLifecycleService(d.realms, d.idempotency, d.keycloak, d.tx, "trial").WithIdpConfigs(d.idpConfigs),
 		service.NewMfaService(d.realms, d.keycloak, d.orgMembership),
 		service.NewIdpService(d.realms, d.idpConfigs, d.idpValidations, d.idempotency, d.openbao, d.keycloak, d.tx, &fakePendingAuditEntryRepository{}),

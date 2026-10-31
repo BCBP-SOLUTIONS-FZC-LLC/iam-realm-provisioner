@@ -392,6 +392,25 @@ func TestTenantRealmRepository(t *testing.T) {
 		assert.Equal(t, 1, counts["shard-beta"], "the soft-deleted dedicated row on shard-beta must not be counted")
 	})
 
+	// RP-2/RP-3 place a realm from inside a request, whose context carries the
+	// caller's tenant GUC. On the app pool that GUC hides every other tenant's
+	// row, which is why placement must read from the sysPool repository.
+	t.Run("CountsByShard_UnderTenantGUC_OnlySysPoolSeesOtherTenants", func(t *testing.T) {
+		t.Parallel()
+		caller, other := uuid.New(), uuid.New()
+		require.NoError(t, repo.Upsert(withTenant(ctx, other), newDedicated(other, "tenant-guc-other", "shard-guc")))
+		require.NoError(t, repo.Upsert(withTenant(ctx, caller), newSharedTrial(caller)))
+		reqCtx := withTenant(ctx, caller)
+
+		appCounts, err := repo.CountsByShard(reqCtx)
+		require.NoError(t, err)
+		assert.Zero(t, appCounts["shard-guc"], "the app pool hides the other tenant's realm")
+
+		sysCounts, err := sysRepo.CountsByShard(reqCtx)
+		require.NoError(t, err)
+		assert.Equal(t, 1, sysCounts["shard-guc"])
+	})
+
 	t.Run("ListExpiredTrials_FiltersOrdersAndLimits", func(t *testing.T) {
 		t.Parallel()
 		now := time.Now().UTC()

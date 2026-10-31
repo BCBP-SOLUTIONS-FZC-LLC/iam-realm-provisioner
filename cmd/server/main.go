@@ -309,11 +309,15 @@ func main() {
 
 	// ── 8b. Core services ─────────────────────────────────────────────────
 	sharedRealm := envOr("SHARED_TRIAL_REALM", "trial")
+	// Cross-tenant reads (realm-name owner, shard counts) go through the
+	// BYPASSRLS sysPool; the app pool would see only the request tenant.
+	sysRealmRepo := pgadapter.NewTenantRealmRepository(sysPool)
 	provisioningSvc := service.NewProvisioningService(
 		tenantRealmRepo, idempotencyRepo, keycloakAdmin, tokenServiceClient, txRunner, pendingAuditRepo, sharedRealm, nil,
 	).WithLogger(log).WithConvertTimeout(envDuration("CONVERT_TIMEOUT", service.DefaultConvertTimeout)).
 		WithWebEntry(webClient.BaseURLs[0], webClient.ClientID).
-		WithRealmOwners(pgadapter.NewTenantRealmRepository(sysPool))
+		WithRealmOwners(sysRealmRepo).
+		WithShardLoads(sysRealmRepo)
 	lifecycleSvc := service.NewLifecycleService(
 		tenantRealmRepo, idempotencyRepo, keycloakAdmin, txRunner, sharedRealm,
 	).WithLogger(log).WithIdpConfigs(idpConfigRepo)

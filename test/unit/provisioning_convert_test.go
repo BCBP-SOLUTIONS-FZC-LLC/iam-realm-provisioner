@@ -676,7 +676,7 @@ func TestConvert_NoEventPublisherInContext_StillCommitsLocally(t *testing.T) {
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx := newMockTxRunnerNoPublisher()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil).WithShardLoads(realms)
 	tenantID := uuid.New()
 	seedSharedRealm(realms, tenantID)
 	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
@@ -852,7 +852,7 @@ func TestConvert_PrincipalLifecycleSequence_TS4_TS1_TS2_ThenClientDelete(t *test
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx, _ := newMockTxRunner()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil).WithShardLoads(realms)
 
 	tenantID := uuid.New()
 	oldClientID := "platform-automation-" + tenantID.String()
@@ -887,7 +887,7 @@ func TestConvert_TS2RevokeCredentialFails_NonFatal(t *testing.T) {
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx, _ := newMockTxRunner()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil).WithShardLoads(realms)
 	svc.WithLogger(logger)
 
 	tenantID := uuid.New()
@@ -922,7 +922,7 @@ func TestConvert_NoPriorPrincipal_TS2Skipped(t *testing.T) {
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx, _ := newMockTxRunner()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil).WithShardLoads(realms)
 
 	tenantID := uuid.New()
 	seedSharedRealm(realms, tenantID)

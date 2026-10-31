@@ -21,7 +21,6 @@ import (
 // is nil, so any method other than CountsByShard panics if called — which is
 // the point, since selectShard must read nothing else.
 type countsRepo struct {
-	port.TenantRealmRepository
 	counts map[string]int
 	err    error
 }
@@ -66,10 +65,9 @@ func TestNewProvisioningService_Defaults(t *testing.T) {
 // from the local mirror only.
 func TestSelectShard_LeastLoadedWithLexicographicTieBreak(t *testing.T) {
 	svc := NewProvisioningService(
-		countsRepo{counts: map[string]int{"kc-shard-1": 2, "kc-shard-2": 1, "kc-shard-3": 1}},
-		nil, nil, nil, nil, nil, "trial",
+		nil, nil, nil, nil, nil, nil, "trial",
 		[]string{"kc-shard-2", "kc-shard-1", "kc-shard-3"},
-	)
+	).WithShardLoads(countsRepo{counts: map[string]int{"kc-shard-1": 2, "kc-shard-2": 1, "kc-shard-3": 1}})
 
 	// Least-loaded ties between shard-2 and shard-3; the tie-break picks 2.
 	got, err := svc.selectShard(context.Background())
@@ -81,10 +79,9 @@ func TestSelectShard_LeastLoadedWithLexicographicTieBreak(t *testing.T) {
 // lexicographic tie-break alone decides — independent of shardIDs order.
 func TestSelectShard_NoLoadYet_TieBreaksLexicographically(t *testing.T) {
 	svc := NewProvisioningService(
-		countsRepo{counts: map[string]int{}},
-		nil, nil, nil, nil, nil, "trial",
+		nil, nil, nil, nil, nil, nil, "trial",
 		[]string{"kc-shard-9", "kc-shard-1"},
-	)
+	).WithShardLoads(countsRepo{counts: map[string]int{}})
 
 	got, err := svc.selectShard(context.Background())
 	require.NoError(t, err)
@@ -93,12 +90,21 @@ func TestSelectShard_NoLoadYet_TieBreaksLexicographically(t *testing.T) {
 
 func TestSelectShard_CountsByShardFailure_Propagates(t *testing.T) {
 	svc := NewProvisioningService(
-		countsRepo{err: errors.New("db down")},
-		nil, nil, nil, nil, nil, "trial", nil,
-	)
+		nil, nil, nil, nil, nil, nil, "trial", nil,
+	).WithShardLoads(countsRepo{err: errors.New("db down")})
 
 	_, err := svc.selectShard(context.Background())
 	require.Error(t, err)
+}
+
+// Placement never falls back to the tenant realm repository: on the app pool
+// it sees only the request tenant's own row, so every realm would land on
+// the first shard and each hidden row would log an RLS violation.
+func TestSelectShard_NoShardLoads_Fails(t *testing.T) {
+	svc := NewProvisioningService(nil, nil, nil, nil, nil, nil, "trial", nil)
+
+	_, err := svc.selectShard(context.Background())
+	require.ErrorContains(t, err, "shard loads not configured")
 }
 
 // ── marshalIdempotencyResult (unexported helper) ──────────────────────────
