@@ -123,7 +123,7 @@ type fakeRealm struct {
 	profile       map[string]any
 	clients       map[string]*gocloak.Client // by internal id
 	updated       []gocloak.Client
-	mapperCreates map[string]int // internal client id -> count
+	mapperCreates map[string]int // "<internal client id>/<mapper name>" -> count
 	mapperUpdates int
 }
 
@@ -231,8 +231,15 @@ func (f *fakeRealm) register(t *testing.T, mux *http.ServeMux, realm string) {
 		defer f.mu.Unlock()
 		var m gocloak.ProtocolMapperRepresentation
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&m))
-		assert.Equal(t, tenantIDMapper(), m)
-		f.mapperCreates[r.PathValue("id")]++
+		switch *m.Name {
+		case tenantIDMapperName:
+			assert.Equal(t, tenantIDMapper(), m)
+		case audienceMapperName:
+			assert.Equal(t, audienceMapper(*f.clients[r.PathValue("id")].ClientID), m)
+		default:
+			t.Errorf("unexpected mapper %q", *m.Name)
+		}
+		f.mapperCreates[r.PathValue("id")+"/"+*m.Name]++
 		writeLocation(w, "mapper-id")
 		writeJSON(w, http.StatusCreated, `{}`)
 	})
@@ -305,6 +312,21 @@ func TestCreateRealmFromTemplate_WebClientFromConfigAndTokenSettings(t *testing.
 	}, f.tokenSettings)
 	assertAdminOnlyTenantID(t, f.profile)
 	assert.Empty(t, f.mapperCreates, "a dedicated realm's tenant is its iss — no tenant_id mapper")
+	assertCreatedWithAudienceMappers(t, f)
+}
+
+// assertCreatedWithAudienceMappers checks that the realm was created with an
+// audience mapper naming each public client itself, and none on
+// tender-gateway.
+func assertCreatedWithAudienceMappers(t *testing.T, f *fakeRealm) {
+	t.Helper()
+	for _, id := range []string{"tender-web", "tender-mobile"} {
+		c := f.clients["id-"+id]
+		require.NotNil(t, c, id)
+		require.NotNil(t, c.ProtocolMappers, id)
+		assert.Contains(t, *c.ProtocolMappers, audienceMapper(id), "%s puts itself in aud", id)
+	}
+	assert.Nil(t, f.clients["id-tender-gateway"].ProtocolMappers, "the confidential client gets no audience mapper")
 }
 
 func TestApplyRealmTokenSettings_TemplateWithoutSettingsIsNoop(t *testing.T) {
@@ -338,8 +360,9 @@ func TestEnsureSharedRealm_CreatesWhenAbsent(t *testing.T) {
 	assert.Equal(t, "trial", f.created["realm"])
 	require.NotEmpty(t, f.updated)
 	assertHardenedWebClient(t, f.updated[0])
-	assert.Equal(t, map[string]int{"id-tender-web": 1, "id-tender-mobile": 1}, f.mapperCreates,
-		"tenant_id mapper on every public client, not on tender-gateway")
+	assert.Equal(t, map[string]int{"id-tender-web/tenant_id": 1, "id-tender-mobile/tenant_id": 1}, f.mapperCreates,
+		"tenant_id mapper on every public client, not on tender-gateway; audience came with the create")
+	assertCreatedWithAudienceMappers(t, f)
 	assertAdminOnlyTenantID(t, f.profile)
 	assert.Equal(t, 300.0, f.tokenSettings["accessTokenLifespan"])
 }
@@ -375,7 +398,8 @@ func TestEnsureSharedRealm_ConvergesExisting(t *testing.T) {
 	assertHardenedWebClient(t, f.updated[0])
 	assert.Equal(t, "kept", (*f.updated[0].Attributes)["custom"])
 	assert.Equal(t, 1, f.mapperUpdates, "the drifted tender-web mapper is rewritten")
-	assert.Empty(t, f.mapperCreates, "the correct tender-mobile mapper is left alone")
+	assert.Equal(t, map[string]int{"id-tender-web/audience": 1, "id-tender-mobile/audience": 1}, f.mapperCreates,
+		"the missing audience mappers are added; the correct tender-mobile tenant_id mapper is left alone")
 }
 
 // Two replicas booting together: the loser's create gets 409 and it
