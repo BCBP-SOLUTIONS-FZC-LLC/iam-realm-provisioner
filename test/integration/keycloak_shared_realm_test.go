@@ -81,13 +81,12 @@ func TestKeycloakAdmin_EnsureSharedRealm_CreatesAndConverges(t *testing.T) {
 	assert.False(t, *web.ImplicitFlowEnabled)
 	assert.False(t, *web.DirectAccessGrantsEnabled)
 	require.NotNil(t, web.ProtocolMappers)
-	mappers := 0
+	mappers := map[string]int{}
 	for _, m := range *web.ProtocolMappers {
-		if *m.Name == "tenant_id" {
-			mappers++
-		}
+		mappers[*m.Name]++
 	}
-	assert.Equal(t, 1, mappers, "exactly one tenant_id mapper after two runs")
+	assert.Equal(t, 1, mappers["tenant_id"], "exactly one tenant_id mapper after two runs")
+	assert.Equal(t, 1, mappers["audience"], "exactly one audience mapper after two runs")
 
 	profile := rawJSON(t, client, tok, baseURL+"/admin/realms/"+realm+"/users/profile")
 	var decl map[string]any
@@ -114,6 +113,40 @@ func TestKeycloakAdmin_EnsureSharedRealm_CreatesAndConverges(t *testing.T) {
 			"/evaluate-scopes/generate-example-"+kind+"?scope=openid&userId="+userID.String())
 		assert.Equal(t, tenantID.String(), example["tenant_id"], "%s carries the tenant_id claim", kind)
 	}
+	assertAccessTokenAudience(t, client, tok, baseURL, realm, userID)
+}
+
+// assertAccessTokenAudience checks that each public client's access token
+// names that client in aud, which the gateway's jwt_authn audience check
+// requires (HLD §8.3 step 3); Keycloak alone puts it only in azp.
+func assertAccessTokenAudience(t *testing.T, client *gocloak.GoCloak, tok, baseURL, realm string, userID uuid.UUID) {
+	t.Helper()
+	ctx := context.Background()
+	for _, id := range []string{"tender-web", "tender-mobile"} {
+		cs, err := client.GetClients(ctx, tok, realm, gocloak.GetClientsParams{ClientID: gocloak.StringP(id)})
+		require.NoError(t, err)
+		require.Len(t, cs, 1, id)
+		example := rawJSON(t, client, tok, baseURL+"/admin/realms/"+realm+"/clients/"+*cs[0].ID+
+			"/evaluate-scopes/generate-example-access-token?scope=openid&userId="+userID.String())
+		assert.Contains(t, audiences(example["aud"]), id, "%s access token names %s in aud", id, id)
+	}
+}
+
+// audiences normalises a JWT aud claim, a string or an array, to a slice.
+func audiences(aud any) []string {
+	switch v := aud.(type) {
+	case string:
+		return []string{v}
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, a := range v {
+			if s, ok := a.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // A new dedicated realm gets the hardened tender-web client at creation:
@@ -141,6 +174,12 @@ func TestKeycloakAdmin_CreateRealmFromTemplate_HardenedWebClient(t *testing.T) {
 			assert.NotEqual(t, "tenant_id", *m.Name, "a dedicated realm gets no tenant_id mapper")
 		}
 	}
+
+	userID, err := admin.CreateInvitedUser(ctx, realm, port.CreateUserRequest{
+		Email: "owner@example.com", FullName: "Owner", TenantID: uuid.New(), EmailVerified: true,
+	})
+	require.NoError(t, err)
+	assertAccessTokenAudience(t, client, tok, baseURL, realm, userID)
 
 	settings := rawJSON(t, client, tok, baseURL+"/admin/realms/"+realm)
 	assert.EqualValues(t, 300, settings["accessTokenLifespan"])

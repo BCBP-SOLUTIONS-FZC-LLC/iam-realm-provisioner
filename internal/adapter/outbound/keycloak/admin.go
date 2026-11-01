@@ -169,7 +169,8 @@ func loadRealmTemplate() (gocloak.RealmRepresentation, error) {
 
 // CreateRealmFromTemplate clones the versioned realm template into a new
 // realm named realmName (RP-3, §12.2), with the tender-web client's
-// redirect URIs and origins taken from Config.Web.
+// redirect URIs and origins taken from Config.Web and an audience mapper on
+// every public client.
 func (a *Admin) CreateRealmFromTemplate(ctx context.Context, realmName, _ string) (err error) {
 	ctx, done := a.begin(ctx, "create_realm")
 	defer func() { done(err) }()
@@ -206,6 +207,7 @@ func (a *Admin) createRealm(ctx context.Context, tok, realmName string) (string,
 			}
 		}
 	}
+	withAudienceMappers(&rep)
 	// Deliberately NOT setting rep.ID: Keycloak's REALM.ID column is a
 	// VARCHAR(36) sized for a bare UUID, but realmName (the logical/URL
 	// realm name, used only for rep.Realm) can run longer — RP-3's

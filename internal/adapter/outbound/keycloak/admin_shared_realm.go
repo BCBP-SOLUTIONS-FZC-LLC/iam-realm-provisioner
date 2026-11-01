@@ -123,10 +123,58 @@ func tenantIDMapper() gocloak.ProtocolMapperRepresentation {
 	}
 }
 
+// audienceMapperName names the protocol mapper that puts a public client's
+// own ID in its access tokens' aud (HLD §8.3 step 3, LLD §12.2).
+const audienceMapperName = "audience"
+
+// audienceMapper adds clientID to the access token's aud. Keycloak names the
+// requesting client only in azp, so without it an access token has no aud
+// and the gateway's jwt_authn audience check rejects every API call. The ID
+// token already carries the client in aud, so the mapper leaves it alone.
+func audienceMapper(clientID string) gocloak.ProtocolMapperRepresentation {
+	return gocloak.ProtocolMapperRepresentation{
+		Name:           gocloak.StringP(audienceMapperName),
+		Protocol:       gocloak.StringP("openid-connect"),
+		ProtocolMapper: gocloak.StringP("oidc-audience-mapper"),
+		Config: &map[string]string{
+			"included.client.audience":  clientID,
+			"access.token.claim":        "true",
+			"id.token.claim":            "false",
+			"introspection.token.claim": "true",
+		},
+	}
+}
+
+// withAudienceMappers adds audienceMapper to every public client of rep that
+// does not already carry one, so a realm created from the template issues
+// access tokens the gateway accepts. Confidential clients (tender-gateway)
+// are left out: their tokens are not meant for the user-facing API.
+func withAudienceMappers(rep *gocloak.RealmRepresentation) {
+	if rep.Clients == nil {
+		return
+	}
+	for i := range *rep.Clients {
+		c := &(*rep.Clients)[i]
+		if c.ClientID == nil || c.PublicClient == nil || !*c.PublicClient {
+			continue
+		}
+		mappers := []gocloak.ProtocolMapperRepresentation{}
+		if c.ProtocolMappers != nil {
+			mappers = *c.ProtocolMappers
+		}
+		if !slices.ContainsFunc(mappers, func(m gocloak.ProtocolMapperRepresentation) bool {
+			return m.Name != nil && *m.Name == audienceMapperName
+		}) {
+			mappers = append(mappers, audienceMapper(*c.ClientID))
+		}
+		c.ProtocolMappers = &mappers
+	}
+}
+
 // EnsureSharedRealm creates the shared trial realm from the template when
 // it is absent, then converges it (RP-INV-2): requires-mfa role, user
-// profile, token settings, the tender-web client, and the tenant_id mapper
-// on every public client. A concurrent create by another replica (409) is
+// profile, token settings, the tender-web client, and the tenant_id and
+// audience mappers on every public client. A concurrent create by another replica (409) is
 // not an error — the realm exists, so it is converged like any other.
 func (a *Admin) EnsureSharedRealm(ctx context.Context, realmName string) (err error) {
 	ctx, done := a.begin(ctx, "ensure_shared_realm")
@@ -189,8 +237,11 @@ func (a *Admin) convergeSharedRealm(ctx context.Context, tok, realmName string) 
 		if c.ClientID == nil || c.PublicClient == nil || !*c.PublicClient {
 			continue
 		}
-		if err := a.ensureTenantIDMapper(ctx, tok, realmName, *c.ClientID); err != nil {
+		if err := a.ensureClientMapper(ctx, tok, realmName, *c.ClientID, tenantIDMapper()); err != nil {
 			return wrapErr("converge_realm: tenant_id_mapper", err)
+		}
+		if err := a.ensureClientMapper(ctx, tok, realmName, *c.ClientID, audienceMapper(*c.ClientID)); err != nil {
+			return wrapErr("converge_realm: audience_mapper", err)
 		}
 	}
 	return nil
@@ -258,26 +309,25 @@ func (a *Admin) ensureClient(ctx context.Context, tok, realmName string, want go
 	return nil
 }
 
-// ensureTenantIDMapper adds the tenant_id mapper to clientID, or rewrites
-// it when its config has drifted. A client the realm does not have is
-// skipped: it cannot issue tokens, so it needs no claim.
-func (a *Admin) ensureTenantIDMapper(ctx context.Context, tok, realmName, clientID string) error {
+// ensureClientMapper adds want (matched by name) to clientID, or rewrites it
+// when its config has drifted. A client the realm does not have is skipped:
+// it cannot issue tokens, so it needs no claim.
+func (a *Admin) ensureClientMapper(ctx context.Context, tok, realmName, clientID string, want gocloak.ProtocolMapperRepresentation) error {
 	existing, err := a.findClientByID(ctx, tok, realmName, clientID)
 	if err != nil {
 		return fmt.Errorf("get_clients: %w", err)
 	}
 	if existing == nil || existing.ID == nil {
-		a.log.Warn("tenant_id mapper: client absent, skipped", map[string]any{"realm": realmName, "client_id": clientID})
+		a.log.Warn("protocol mapper: client absent, skipped", map[string]any{"realm": realmName, "client_id": clientID, "mapper": *want.Name})
 		return nil
 	}
 	full, err := a.client.GetClient(ctx, tok, realmName, *existing.ID)
 	if err != nil {
 		return fmt.Errorf("get_client: %w", err)
 	}
-	want := tenantIDMapper()
 	if full.ProtocolMappers != nil {
 		for _, m := range *full.ProtocolMappers {
-			if m.Name == nil || *m.Name != tenantIDMapperName {
+			if m.Name == nil || *m.Name != *want.Name {
 				continue
 			}
 			if m.ProtocolMapper != nil && *m.ProtocolMapper == *want.ProtocolMapper && m.Config != nil && maps.Equal(*m.Config, *want.Config) {
