@@ -538,7 +538,7 @@ func TestProvisionDirect_NoEventPublisherInContext_StillCommitsLocally(t *testin
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx := newMockTxRunnerNoPublisher()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil).WithShardLoads(realms)
 	tenantID := uuid.New()
 	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
 	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) { return nil, nil }

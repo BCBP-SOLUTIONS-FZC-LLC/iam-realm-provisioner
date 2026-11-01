@@ -74,6 +74,10 @@ type ProvisioningService struct {
 	// realmOwners checks, cross-tenant, that RP-3's tenant-<slug> is not
 	// another tenant's realm (WithRealmOwners). nil skips the check.
 	realmOwners port.DedicatedRealmOwners
+
+	// shardLoads gives the cross-tenant per-shard realm counts RP-2/RP-3
+	// place a new dedicated realm by (WithShardLoads). nil fails placement.
+	shardLoads port.ShardLoads
 }
 
 // InvitationLifespan is how long an RP-5 invitation link stays valid: the
@@ -125,6 +129,14 @@ func (s *ProvisioningService) WithConvertTimeout(d time.Duration) *ProvisioningS
 // before creating or resuming into tenant-<slug> (RP-D20) and returns s.
 func (s *ProvisioningService) WithRealmOwners(o port.DedicatedRealmOwners) *ProvisioningService {
 	s.realmOwners = o
+	return s
+}
+
+// WithShardLoads sets the cross-tenant per-shard realm counts that shard
+// placement reads (§9.5) and returns s. It must be backed by the BYPASSRLS
+// sysPool.
+func (s *ProvisioningService) WithShardLoads(l port.ShardLoads) *ProvisioningService {
+	s.shardLoads = l
 	return s
 }
 
@@ -526,11 +538,15 @@ func tenantIdentityProvisionedEvent(ctx context.Context, tenantID, ownerUserID u
 }
 
 // selectShard places a new dedicated realm on the least-loaded shard,
-// reading current per-shard counts from the local mirror (§9.5). Ties
+// reading current per-shard counts across every tenant from the local
+// mirror (§9.5). Ties
 // break deterministically by shard id (lexicographic) so two concurrent
 // placements don't thrash.
 func (s *ProvisioningService) selectShard(ctx context.Context) (string, error) {
-	counts, err := s.realms.CountsByShard(ctx)
+	if s.shardLoads == nil {
+		return "", errors.New("provisioning: shard loads not configured")
+	}
+	counts, err := s.shardLoads.CountsByShard(ctx)
 	if err != nil {
 		return "", err
 	}
