@@ -207,7 +207,7 @@ func (a *Admin) createRealm(ctx context.Context, tok, realmName string) (string,
 			}
 		}
 	}
-	withAudienceMappers(&rep)
+	withPublicClientClaims(&rep)
 	// Deliberately NOT setting rep.ID: Keycloak's REALM.ID column is a
 	// VARCHAR(36) sized for a bare UUID, but realmName (the logical/URL
 	// realm name, used only for rep.Realm) can run longer — RP-3's
