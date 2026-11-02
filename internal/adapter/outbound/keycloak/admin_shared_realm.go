@@ -145,11 +145,73 @@ func audienceMapper(clientID string) gocloak.ProtocolMapperRepresentation {
 	}
 }
 
-// withAudienceMappers adds audienceMapper to every public client of rep that
-// does not already carry one, so a realm created from the template issues
-// access tokens the gateway accepts. Confidential clients (tender-gateway)
+// idTokenNameMapperName and idTokenEmailMapperName name the public
+// clients' own name and email mappers (LLD §12.2, RP-D22).
+const (
+	idTokenNameMapperName  = "id_token_name"
+	idTokenEmailMapperName = "id_token_email"
+)
+
+// idTokenNameMapper and idTokenEmailMapper put name and email in the ID
+// token (and userinfo) only. The public clients do not get the profile and
+// email scopes by default (publicClientDefaultScopes), so access tokens,
+// which travel to the gateway on every call, carry no personal data (HLD
+// §4.1), while the frontend SDK still reads both from the ID token.
+func idTokenNameMapper() gocloak.ProtocolMapperRepresentation {
+	return gocloak.ProtocolMapperRepresentation{
+		Name:           gocloak.StringP(idTokenNameMapperName),
+		Protocol:       gocloak.StringP("openid-connect"),
+		ProtocolMapper: gocloak.StringP("oidc-full-name-mapper"),
+		Config: &map[string]string{
+			"access.token.claim":        "false",
+			"id.token.claim":            "true",
+			"introspection.token.claim": "false",
+			"userinfo.token.claim":      "true",
+		},
+	}
+}
+
+func idTokenEmailMapper() gocloak.ProtocolMapperRepresentation {
+	return gocloak.ProtocolMapperRepresentation{
+		Name:           gocloak.StringP(idTokenEmailMapperName),
+		Protocol:       gocloak.StringP("openid-connect"),
+		ProtocolMapper: gocloak.StringP("oidc-usermodel-attribute-mapper"),
+		Config: &map[string]string{
+			"user.attribute":            "email",
+			"claim.name":                "email",
+			"jsonType.label":            "String",
+			"access.token.claim":        "false",
+			"id.token.claim":            "true",
+			"introspection.token.claim": "false",
+			"userinfo.token.claim":      "true",
+		},
+	}
+}
+
+// publicClientMappers are the mappers every public client carries besides
+// the shared realm's tenant_id mapper.
+func publicClientMappers(clientID string) []gocloak.ProtocolMapperRepresentation {
+	return []gocloak.ProtocolMapperRepresentation{audienceMapper(clientID), idTokenNameMapper(), idTokenEmailMapper()}
+}
+
+// optionalOnlyScopes are Keycloak's built-in scopes a public client must
+// not get by default: they put name and email in the access token.
+var optionalOnlyScopes = []string{"profile", "email"}
+
+// publicClientDefaultScopes and publicClientOptionalScopes are Keycloak
+// 26's built-in client defaults with optionalOnlyScopes moved to optional.
+// Keycloak ignores a name the realm does not have.
+var (
+	publicClientDefaultScopes  = []string{"web-origins", "acr", "roles", "basic"}
+	publicClientOptionalScopes = []string{"profile", "email", "address", "phone", "offline_access", "microprofile-jwt", "organization"}
+)
+
+// withPublicClientClaims gives every public client of rep publicClientMappers
+// (those it does not already carry) and the public-client scope lists, so a
+// realm created from the template issues access tokens the gateway accepts
+// and that carry no name or email. Confidential clients (tender-gateway)
 // are left out: their tokens are not meant for the user-facing API.
-func withAudienceMappers(rep *gocloak.RealmRepresentation) {
+func withPublicClientClaims(rep *gocloak.RealmRepresentation) {
 	if rep.Clients == nil {
 		return
 	}
@@ -162,19 +224,24 @@ func withAudienceMappers(rep *gocloak.RealmRepresentation) {
 		if c.ProtocolMappers != nil {
 			mappers = *c.ProtocolMappers
 		}
-		if !slices.ContainsFunc(mappers, func(m gocloak.ProtocolMapperRepresentation) bool {
-			return m.Name != nil && *m.Name == audienceMapperName
-		}) {
-			mappers = append(mappers, audienceMapper(*c.ClientID))
+		for _, want := range publicClientMappers(*c.ClientID) {
+			if !slices.ContainsFunc(mappers, func(m gocloak.ProtocolMapperRepresentation) bool {
+				return m.Name != nil && *m.Name == *want.Name
+			}) {
+				mappers = append(mappers, want)
+			}
 		}
 		c.ProtocolMappers = &mappers
+		defaults, optional := slices.Clone(publicClientDefaultScopes), slices.Clone(publicClientOptionalScopes)
+		c.DefaultClientScopes, c.OptionalClientScopes = &defaults, &optional
 	}
 }
 
 // EnsureSharedRealm creates the shared trial realm from the template when
 // it is absent, then converges it (RP-INV-2): requires-mfa role, user
-// profile, token settings, the tender-web client, and the tenant_id and
-// audience mappers on every public client. A concurrent create by another replica (409) is
+// profile, token settings, the tender-web client, and on every public
+// client the tenant_id, audience and ID-token-only name/email mappers, with
+// profile and email optional scopes. A concurrent create by another replica (409) is
 // not an error — the realm exists, so it is converged like any other.
 func (a *Admin) EnsureSharedRealm(ctx context.Context, realmName string) (err error) {
 	ctx, done := a.begin(ctx, "ensure_shared_realm")
@@ -240,8 +307,42 @@ func (a *Admin) convergeSharedRealm(ctx context.Context, tok, realmName string) 
 		if err := a.ensureClientMapper(ctx, tok, realmName, *c.ClientID, tenantIDMapper()); err != nil {
 			return wrapErr("converge_realm: tenant_id_mapper", err)
 		}
-		if err := a.ensureClientMapper(ctx, tok, realmName, *c.ClientID, audienceMapper(*c.ClientID)); err != nil {
-			return wrapErr("converge_realm: audience_mapper", err)
+		for _, m := range publicClientMappers(*c.ClientID) {
+			if err := a.ensureClientMapper(ctx, tok, realmName, *c.ClientID, m); err != nil {
+				return wrapErr("converge_realm: "+*m.Name+"_mapper", err)
+			}
+		}
+		if err := a.ensureOptionalOnlyScopes(ctx, tok, realmName, *c.ClientID); err != nil {
+			return wrapErr("converge_realm: client_scopes", err)
+		}
+	}
+	return nil
+}
+
+// ensureOptionalOnlyScopes moves optionalOnlyScopes from clientID's default
+// scopes to its optional ones, so an existing realm stops putting name and
+// email in access tokens. A client the realm does not have is skipped.
+func (a *Admin) ensureOptionalOnlyScopes(ctx context.Context, tok, realmName, clientID string) error {
+	existing, err := a.findClientByID(ctx, tok, realmName, clientID)
+	if err != nil {
+		return fmt.Errorf("get_clients: %w", err)
+	}
+	if existing == nil || existing.ID == nil {
+		return nil
+	}
+	defaults, err := a.client.GetClientsDefaultScopes(ctx, tok, realmName, *existing.ID)
+	if err != nil {
+		return fmt.Errorf("get_default_scopes: %w", err)
+	}
+	for _, sc := range defaults {
+		if sc == nil || sc.ID == nil || sc.Name == nil || !slices.Contains(optionalOnlyScopes, *sc.Name) {
+			continue
+		}
+		if err := a.client.RemoveDefaultScopeFromClient(ctx, tok, realmName, *existing.ID, *sc.ID); err != nil {
+			return fmt.Errorf("remove_default_scope %s: %w", *sc.Name, err)
+		}
+		if err := a.client.AddOptionalScopeToClient(ctx, tok, realmName, *existing.ID, *sc.ID); err != nil {
+			return fmt.Errorf("add_optional_scope %s: %w", *sc.Name, err)
 		}
 	}
 	return nil

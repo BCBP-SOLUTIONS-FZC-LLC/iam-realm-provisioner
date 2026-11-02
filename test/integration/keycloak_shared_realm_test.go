@@ -60,6 +60,24 @@ func TestKeycloakAdmin_EnsureSharedRealm_CreatesAndConverges(t *testing.T) {
 
 	client, tok := rawAdminClient(t, baseURL)
 
+	// A realm from before RP-D22 has profile as a default scope: converging
+	// makes it optional again.
+	webs, err := client.GetClients(ctx, tok, realm, gocloak.GetClientsParams{ClientID: gocloak.StringP("tender-web")})
+	require.NoError(t, err)
+	require.Len(t, webs, 1)
+	scopes, err := client.GetClientScopes(ctx, tok, realm)
+	require.NoError(t, err)
+	var profileID string
+	for _, sc := range scopes {
+		if *sc.Name == "profile" {
+			profileID = *sc.ID
+		}
+	}
+	require.NotEmpty(t, profileID)
+	require.NoError(t, client.RemoveOptionalScopeFromClient(ctx, tok, realm, *webs[0].ID, profileID))
+	require.NoError(t, client.AddDefaultScopeToClient(ctx, tok, realm, *webs[0].ID, profileID))
+	require.NoError(t, admin.EnsureSharedRealm(ctx, realm))
+
 	settings := rawJSON(t, client, tok, baseURL+"/admin/realms/"+realm)
 	assert.EqualValues(t, 300, settings["accessTokenLifespan"])
 	assert.EqualValues(t, 43200, settings["ssoSessionIdleTimeout"])
@@ -87,6 +105,8 @@ func TestKeycloakAdmin_EnsureSharedRealm_CreatesAndConverges(t *testing.T) {
 	}
 	assert.Equal(t, 1, mappers["tenant_id"], "exactly one tenant_id mapper after two runs")
 	assert.Equal(t, 1, mappers["audience"], "exactly one audience mapper after two runs")
+	assert.Equal(t, 1, mappers["id_token_name"], "exactly one id_token_name mapper after two runs")
+	assert.Equal(t, 1, mappers["id_token_email"], "exactly one id_token_email mapper after two runs")
 
 	profile := rawJSON(t, client, tok, baseURL+"/admin/realms/"+realm+"/users/profile")
 	var decl map[string]any
@@ -113,22 +133,35 @@ func TestKeycloakAdmin_EnsureSharedRealm_CreatesAndConverges(t *testing.T) {
 			"/evaluate-scopes/generate-example-"+kind+"?scope=openid&userId="+userID.String())
 		assert.Equal(t, tenantID.String(), example["tenant_id"], "%s carries the tenant_id claim", kind)
 	}
-	assertAccessTokenAudience(t, client, tok, baseURL, realm, userID)
+	assertPublicClientTokens(t, client, tok, baseURL, realm, userID)
 }
 
-// assertAccessTokenAudience checks that each public client's access token
-// names that client in aud, which the gateway's jwt_authn audience check
-// requires (HLD §8.3 step 3); Keycloak alone puts it only in azp.
-func assertAccessTokenAudience(t *testing.T, client *gocloak.GoCloak, tok, baseURL, realm string, userID uuid.UUID) {
+// assertPublicClientTokens checks each public client's tokens for the
+// frontend's scope=openid request:
+//   - the access token names that client in aud, which the gateway's
+//     jwt_authn audience check requires (HLD §8.3 step 3); Keycloak alone
+//     puts it only in azp;
+//   - the access token carries no name, email or other profile claim (HLD
+//     §4.1, RP-D22);
+//   - the ID token still has name and email, which the frontend SDK reads.
+func assertPublicClientTokens(t *testing.T, client *gocloak.GoCloak, tok, baseURL, realm string, userID uuid.UUID) {
 	t.Helper()
 	ctx := context.Background()
 	for _, id := range []string{"tender-web", "tender-mobile"} {
 		cs, err := client.GetClients(ctx, tok, realm, gocloak.GetClientsParams{ClientID: gocloak.StringP(id)})
 		require.NoError(t, err)
 		require.Len(t, cs, 1, id)
-		example := rawJSON(t, client, tok, baseURL+"/admin/realms/"+realm+"/clients/"+*cs[0].ID+
-			"/evaluate-scopes/generate-example-access-token?scope=openid&userId="+userID.String())
-		assert.Contains(t, audiences(example["aud"]), id, "%s access token names %s in aud", id, id)
+		example := func(kind string) map[string]any {
+			return rawJSON(t, client, tok, baseURL+"/admin/realms/"+realm+"/clients/"+*cs[0].ID+
+				"/evaluate-scopes/generate-example-"+kind+"?scope=openid&userId="+userID.String())
+		}
+		access, idToken := example("access-token"), example("id-token")
+		assert.Contains(t, audiences(access["aud"]), id, "%s access token names %s in aud", id, id)
+		for _, claim := range []string{"name", "email", "preferred_username", "given_name", "family_name", "email_verified"} {
+			assert.NotContains(t, access, claim, "%s access token carries no %s", id, claim)
+		}
+		assert.NotEmpty(t, idToken["name"], "%s ID token has name", id)
+		assert.NotEmpty(t, idToken["email"], "%s ID token has email", id)
 	}
 }
 
@@ -179,7 +212,7 @@ func TestKeycloakAdmin_CreateRealmFromTemplate_HardenedWebClient(t *testing.T) {
 		Email: "owner@example.com", FullName: "Owner", TenantID: uuid.New(), EmailVerified: true,
 	})
 	require.NoError(t, err)
-	assertAccessTokenAudience(t, client, tok, baseURL, realm, userID)
+	assertPublicClientTokens(t, client, tok, baseURL, realm, userID)
 
 	settings := rawJSON(t, client, tok, baseURL+"/admin/realms/"+realm)
 	assert.EqualValues(t, 300, settings["accessTokenLifespan"])

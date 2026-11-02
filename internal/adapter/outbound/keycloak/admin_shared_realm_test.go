@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -125,6 +127,24 @@ type fakeRealm struct {
 	updated       []gocloak.Client
 	mapperCreates map[string]int // "<internal client id>/<mapper name>" -> count
 	mapperUpdates int
+	scopeMoves    []string // "<internal client id>/<scope name>" moved from default to optional
+}
+
+// defaultScopes is a client's default scopes as Keycloak would list them:
+// its own list when it was created with one, else Keycloak 26's built-in
+// defaults (profile and email included). Moved scopes are gone.
+func (f *fakeRealm) defaultScopes(id string) []gocloak.ClientScope {
+	names := []string{"web-origins", "acr", "profile", "roles", "basic", "email"}
+	if c := f.clients[id]; c != nil && c.DefaultClientScopes != nil {
+		names = *c.DefaultClientScopes
+	}
+	out := []gocloak.ClientScope{}
+	for _, n := range names {
+		if !slices.Contains(f.scopeMoves, id+"/"+n) {
+			out = append(out, gocloak.ClientScope{ID: gocloak.StringP("scope-" + n), Name: gocloak.StringP(n)})
+		}
+	}
+	return out
 }
 
 func newFakeRealm(exists bool, clients ...gocloak.Client) *fakeRealm {
@@ -236,6 +256,10 @@ func (f *fakeRealm) register(t *testing.T, mux *http.ServeMux, realm string) {
 			assert.Equal(t, tenantIDMapper(), m)
 		case audienceMapperName:
 			assert.Equal(t, audienceMapper(*f.clients[r.PathValue("id")].ClientID), m)
+		case idTokenNameMapperName:
+			assert.Equal(t, idTokenNameMapper(), m)
+		case idTokenEmailMapperName:
+			assert.Equal(t, idTokenEmailMapper(), m)
 		default:
 			t.Errorf("unexpected mapper %q", *m.Name)
 		}
@@ -247,6 +271,25 @@ func (f *fakeRealm) register(t *testing.T, mux *http.ServeMux, realm string) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.mapperUpdates++
+		writeJSON(w, http.StatusNoContent, ``)
+	})
+	mux.HandleFunc("GET "+realmPath(realm, "clients", "{id}", "default-client-scopes"), func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		b, _ := json.Marshal(f.defaultScopes(r.PathValue("id")))
+		writeJSON(w, http.StatusOK, string(b))
+	})
+	mux.HandleFunc("DELETE "+realmPath(realm, "clients", "{id}", "default-client-scopes", "{sid}"), func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.scopeMoves = append(f.scopeMoves, r.PathValue("id")+"/"+strings.TrimPrefix(r.PathValue("sid"), "scope-"))
+		writeJSON(w, http.StatusNoContent, ``)
+	})
+	mux.HandleFunc("PUT "+realmPath(realm, "clients", "{id}", "optional-client-scopes", "{sid}"), func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		assert.Contains(t, f.scopeMoves, r.PathValue("id")+"/"+strings.TrimPrefix(r.PathValue("sid"), "scope-"),
+			"a scope becomes optional only after leaving the defaults")
 		writeJSON(w, http.StatusNoContent, ``)
 	})
 }
@@ -312,21 +355,30 @@ func TestCreateRealmFromTemplate_WebClientFromConfigAndTokenSettings(t *testing.
 	}, f.tokenSettings)
 	assertAdminOnlyTenantID(t, f.profile)
 	assert.Empty(t, f.mapperCreates, "a dedicated realm's tenant is its iss — no tenant_id mapper")
-	assertCreatedWithAudienceMappers(t, f)
+	assertCreatedWithPublicClientClaims(t, f)
 }
 
-// assertCreatedWithAudienceMappers checks that the realm was created with an
-// audience mapper naming each public client itself, and none on
-// tender-gateway.
-func assertCreatedWithAudienceMappers(t *testing.T, f *fakeRealm) {
+// assertCreatedWithPublicClientClaims checks that the realm was created with
+// each public client naming itself in aud, name and email in the ID token
+// only, and profile/email optional; tender-gateway gets none of it.
+func assertCreatedWithPublicClientClaims(t *testing.T, f *fakeRealm) {
 	t.Helper()
 	for _, id := range []string{"tender-web", "tender-mobile"} {
 		c := f.clients["id-"+id]
 		require.NotNil(t, c, id)
 		require.NotNil(t, c.ProtocolMappers, id)
 		assert.Contains(t, *c.ProtocolMappers, audienceMapper(id), "%s puts itself in aud", id)
+		assert.Contains(t, *c.ProtocolMappers, idTokenNameMapper(), id)
+		assert.Contains(t, *c.ProtocolMappers, idTokenEmailMapper(), id)
+		require.NotNil(t, c.DefaultClientScopes, id)
+		assert.NotContains(t, *c.DefaultClientScopes, "profile", id)
+		assert.NotContains(t, *c.DefaultClientScopes, "email", id)
+		assert.Contains(t, *c.OptionalClientScopes, "profile", id)
+		assert.Contains(t, *c.OptionalClientScopes, "email", id)
 	}
-	assert.Nil(t, f.clients["id-tender-gateway"].ProtocolMappers, "the confidential client gets no audience mapper")
+	gw := f.clients["id-tender-gateway"]
+	assert.Nil(t, gw.ProtocolMappers, "the confidential client gets no public-client mapper")
+	assert.Nil(t, gw.DefaultClientScopes, "the confidential client keeps the realm's default scopes")
 }
 
 func TestApplyRealmTokenSettings_TemplateWithoutSettingsIsNoop(t *testing.T) {
@@ -361,8 +413,9 @@ func TestEnsureSharedRealm_CreatesWhenAbsent(t *testing.T) {
 	require.NotEmpty(t, f.updated)
 	assertHardenedWebClient(t, f.updated[0])
 	assert.Equal(t, map[string]int{"id-tender-web/tenant_id": 1, "id-tender-mobile/tenant_id": 1}, f.mapperCreates,
-		"tenant_id mapper on every public client, not on tender-gateway; audience came with the create")
-	assertCreatedWithAudienceMappers(t, f)
+		"tenant_id mapper on every public client, not on tender-gateway; the others came with the create")
+	assert.Empty(t, f.scopeMoves, "a realm created with the public-client scope lists needs no move")
+	assertCreatedWithPublicClientClaims(t, f)
 	assertAdminOnlyTenantID(t, f.profile)
 	assert.Equal(t, 300.0, f.tokenSettings["accessTokenLifespan"])
 }
@@ -398,8 +451,14 @@ func TestEnsureSharedRealm_ConvergesExisting(t *testing.T) {
 	assertHardenedWebClient(t, f.updated[0])
 	assert.Equal(t, "kept", (*f.updated[0].Attributes)["custom"])
 	assert.Equal(t, 1, f.mapperUpdates, "the drifted tender-web mapper is rewritten")
-	assert.Equal(t, map[string]int{"id-tender-web/audience": 1, "id-tender-mobile/audience": 1}, f.mapperCreates,
-		"the missing audience mappers are added; the correct tender-mobile tenant_id mapper is left alone")
+	assert.Equal(t, map[string]int{
+		"id-tender-web/audience": 1, "id-tender-mobile/audience": 1,
+		"id-tender-web/id_token_name": 1, "id-tender-mobile/id_token_name": 1,
+		"id-tender-web/id_token_email": 1, "id-tender-mobile/id_token_email": 1,
+	}, f.mapperCreates, "the missing mappers are added; the correct tender-mobile tenant_id mapper is left alone")
+	assert.ElementsMatch(t, []string{
+		"id-tender-web/profile", "id-tender-web/email", "id-tender-mobile/profile", "id-tender-mobile/email",
+	}, f.scopeMoves, "profile and email move from default to optional; other scopes stay")
 }
 
 // Two replicas booting together: the loser's create gets 409 and it
@@ -446,4 +505,38 @@ func TestEnsureSharedRealm_UpdateClientError(t *testing.T) {
 	err := a.EnsureSharedRealm(context.Background(), "trial")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "web_client")
+}
+
+// --- ensureOptionalOnlyScopes failure paths ---
+
+func TestEnsureOptionalOnlyScopes_ClientAbsentIsSkipped(t *testing.T) {
+	f := newFakeRealm(true)
+	a := newSharedRealmAdmin(t, "trial", f)
+	require.NoError(t, a.ensureOptionalOnlyScopes(context.Background(), "tok", "trial", "tender-mobile"))
+	assert.Empty(t, f.scopeMoves)
+}
+
+func TestEnsureOptionalOnlyScopes_Errors(t *testing.T) {
+	webID := "id-tender-web"
+	for _, tc := range []struct{ name, method, path, want string }{
+		{"list clients", "GET", realmPath("trial", "clients"), "get_clients"},
+		{"list default scopes", "GET", realmPath("trial", "clients", webID, "default-client-scopes"), "get_default_scopes"},
+		{"remove default", "DELETE", realmPath("trial", "clients", webID, "default-client-scopes", "scope-profile"), "remove_default_scope profile"},
+		{"add optional", "PUT", realmPath("trial", "clients", webID, "optional-client-scopes", "scope-profile"), "add_optional_scope profile"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeRealm(true, gocloak.Client{ID: &webID, ClientID: gocloak.StringP("tender-web"), PublicClient: gocloak.BoolP(true)})
+			a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
+				mux.HandleFunc(tc.method+" "+tc.path, func(w http.ResponseWriter, _ *http.Request) {
+					writeJSON(w, http.StatusForbidden, `{}`)
+				})
+				if tc.want != "get_clients" { // the same pattern cannot be registered twice
+					f.register(t, mux, "trial")
+				}
+			})
+			err := a.ensureOptionalOnlyScopes(context.Background(), "tok", "trial", "tender-web")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
 }
