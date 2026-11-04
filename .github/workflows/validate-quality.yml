@@ -1,8 +1,10 @@
 # Reusable workflow - quality gate.
 # fmt · tidy · vet · lint (golangci-lint via go tool) · vuln-check ·
-# Dockerfile checks. Called by ci.yml. Must pass before push; does NOT gate
-# coverage, trivy, or smoke (those only need validate-test.yml). Mirrors the
-# sibling IAM services' validate-quality.yml.
+# Dockerfile checks · Helm lint + template + kubeconform + CD-19 access matrix.
+# Called by ci.yml and release.yml. Must pass before push; does NOT gate
+# coverage, trivy, or smoke (those only need validate-test.yml). Helm runs
+# inline here (not as a separate job) to keep the parallel job count flat —
+# mirrors iam-org-membership's validate-quality.yml approach.
 name: Validate / Quality
 
 "on":
@@ -24,7 +26,7 @@ jobs:
   quality:
     name: quality
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -166,3 +168,32 @@ jobs:
             exit 1
           fi
           echo "Dockerfile base images are digest-pinned."
+
+      # Helm lint (--strict) + helm template × 4 values combos + kubeconform.
+      # Runs inline here (same job as the Go quality checks) so there is no
+      # extra parallel job slot — mirrors iam-org-membership's flat job count.
+      #
+      # Values combinations exercised:
+      #   base only | base+values-dev.yaml | base+values-staging.yaml | base+values-prod.yaml
+      #
+      # kubeconform validates standard K8s resources (K8s 1.31.0 schemas).
+      # CRD kinds (ServiceMonitor, PrometheusRule, HTTPRoute, SecurityPolicy,
+      # AuthorizationPolicy) are skipped via -ignore-missing-schemas — see
+      # .github/scripts/helm-check.sh for the full rationale.
+      - name: Cache helm + kubeconform binaries
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/go/bin
+          key: helm-check-tools-${{ runner.os }}-helm3.16.3-kubeconform0.6.7
+
+      # PyYAML is required by the CD-19 access-matrix check in helm-check.sh.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyYAML
+        run: pip install --no-cache-dir 'pyyaml==6.0.2'
+
+      - name: Helm lint + template + kubeconform + CD-19 access matrix
+        run: bash .github/scripts/helm-check.sh
