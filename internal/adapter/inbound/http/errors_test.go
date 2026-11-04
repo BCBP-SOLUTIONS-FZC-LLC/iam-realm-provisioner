@@ -36,7 +36,7 @@ func TestDomainErrToProblem_FullTaxonomy(t *testing.T) {
 		{domain.ErrTenantOffboarded, http.StatusConflict, "TENANT_OFFBOARDED"},
 		{domain.ErrOperationInProgress, http.StatusConflict, "OPERATION_IN_PROGRESS"},
 		{domain.ErrOptimisticLockConflict, http.StatusConflict, "OPTIMISTIC_LOCK_CONFLICT"},
-		{domain.ErrUserEmailConflict, http.StatusConflict, "USER_EMAIL_CONFLICT"},
+		{domain.ErrUserEmailConflict, http.StatusConflict, "EMAIL_ALREADY_REGISTERED"},
 		{domain.ErrServiceAccountRotationInFlight, http.StatusConflict, "SERVICE_ACCOUNT_ROTATION_IN_FLIGHT"},
 		{domain.ErrCredentialReplayRevoked, http.StatusConflict, "CREDENTIAL_REPLAY_REVOKED"},
 		{domain.ErrCredentialReplayExpired, http.StatusConflict, "CREDENTIAL_REPLAY_EXPIRED"},

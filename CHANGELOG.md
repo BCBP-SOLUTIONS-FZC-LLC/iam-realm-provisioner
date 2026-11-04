@@ -4,11 +4,21 @@ All notable changes to this service are documented here. Format follows [Keep a 
 
 This service has never been deployed to any environment — there is no released version yet, so everything lives under `[Unreleased]`. Because of that, this file tracks only what is currently true and what is still outstanding, not a phase-by-phase build history; the full development diary is available via `git log` if it's ever needed.
 
+## [Unreleased — 2026-11-04]
+
+### Fixed
+
+- **`buildCredential` JSON-parse error now returns 400 `INVALID_REQUEST` instead of 502 `KEYCLOAK_UNAVAILABLE`.** When `HashedPasswordSeed` is not valid JSON (or fails new field validation — see below), `buildUser` returned an error that was passed through `wrapErr`, which unconditionally produces `domain.ErrKeycloakUnavailable`. The caller received HTTP 502 for what is clearly a client-supplied invalid payload. Fixed: `CreateTrialUser` and `CreateInvitedUser` now return `domain.NewError(domain.ErrInvalidRequest, ...)` for `buildUser` failures, keeping `wrapErr` exclusively for Keycloak transport errors.
+
+- **`buildCredential` now validates seed field values.** After `json.Unmarshal` succeeds, the following are now checked before the credential is forwarded to Keycloak: (1) `algorithm` must be `"pbkdf2-sha512"` (the only algorithm the realm's `passwordPolicy` enforces — submitting a weaker algorithm like `argon2` with fewer iterations would have bypassed the realm's security guarantee silently); (2) `iterations` must be > 0; (3) `hash` and `salt` must not be empty. All failures surface as `ErrInvalidRequest` (400) via the fix above.
+
+---
+
 ## [Unreleased — 2026-10-26 patch 2]
 
 ### Fixed
 
-- **RP-2 201 response now includes `keycloak_user_id` and `email_verification_sent` (Phase 1.5 blocker, LLD v1.43).** `ProvisionDirectResult` was missing these two fields that bff-signup requires to call O&M's I-1 with the correct `owner_user_id` (SB-INV-4: RP before I-1, `owner_user_id` = `keycloak_user_id` from RP response). Without `keycloak_user_id`, the I-1 call would send `owner_user_id: ""` → O&M validation failure → direct-paid signup broken. `kcUserID` is already resolved by the time the result is built (via `CreateInvitedUser` / `resolveUserCreateConflict`). `EmailVerificationSent` is always `true` for RP-2 (admin user is created with `RequiredActions: ["VERIFY_EMAIL"]`). Both fields now set at result-build time, mirroring `ProvisionTrialResult`'s pattern (`provisioning_service.go:612`).
+- **RP-2 201 response now includes `keycloak_user_id` and `email_verification_sent` (Phase 1.5 blocker, LLD v1.43).** `ProvisionDirectResult` was missing `EmailVerificationSent bool` (`json:"email_verification_sent"`). `ProvisionTrialResult` had the field; `ProvisionDirectResult` did not, contradicting the CHANGELOG and the LLD v1.43 contract. Fixed: field added to struct and set to `true` at result-build time (`EmailVerificationSent` is always `true` for RP-2 — admin user is created with `RequiredActions: ["VERIFY_EMAIL"]`). `kcUserID` was already present from a prior fix.
 
 ### Changed
 

@@ -3,6 +3,7 @@ package keycloak
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/Nerzal/gocloak/v13"
@@ -130,9 +131,48 @@ func TestBuildUser_WithHashedPasswordSeed(t *testing.T) {
 }
 
 func TestBuildUser_InvalidHashedPasswordSeed(t *testing.T) {
-	_, err := buildUser(port.CreateUserRequest{
-		Email: "a@example.com", FullName: "A", TenantID: uuid.New(), HashedPasswordSeed: "not-json",
-	})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "hashed_password_seed is not valid JSON")
+	cases := []struct {
+		name    string
+		seed    string
+		wantMsg string
+	}{
+		{"not JSON", "not-json", "hashed_password_seed is not valid JSON"},
+		{"wrong algorithm", `{"algorithm":"argon2","iterations":3,"salt":"c2FsdA==","hash":"aGFzaA=="}`, "unsupported algorithm"},
+		{"zero iterations", `{"algorithm":"pbkdf2-sha512","iterations":0,"salt":"c2FsdA==","hash":"aGFzaA=="}`, "iterations must be > 0"},
+		{"empty hash", `{"algorithm":"pbkdf2-sha512","iterations":210000,"salt":"c2FsdA==","hash":""}`, "hash and salt must not be empty"},
+		{"empty salt", `{"algorithm":"pbkdf2-sha512","iterations":210000,"salt":"","hash":"aGFzaA=="}`, "hash and salt must not be empty"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := buildUser(port.CreateUserRequest{
+				Email: "a@example.com", FullName: "A", TenantID: uuid.New(), HashedPasswordSeed: tc.seed,
+			})
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.wantMsg)
+		})
+	}
+}
+
+// TestRealmTemplates_PasswordPolicyMatchesRequiredHashAlgorithm asserts that
+// both realm template JSON files enforce the same algorithm constant that
+// buildCredential validates against. If a template is updated but the constant
+// is not (or vice versa), new credentials will be rejected or silently bypass
+// the realm's intended security policy.
+func TestRealmTemplates_PasswordPolicyMatchesRequiredHashAlgorithm(t *testing.T) {
+	templates := []string{
+		"realm-template.json",
+		"../../../../deploy/keycloak/realm-template.json",
+	}
+	for _, path := range templates {
+		t.Run(path, func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			require.NoError(t, err, "realm template must be readable")
+			var realm struct {
+				PasswordPolicy string `json:"passwordPolicy"`
+			}
+			require.NoError(t, json.Unmarshal(data, &realm))
+			require.Contains(t, realm.PasswordPolicy, requiredHashAlgorithm,
+				"realm template passwordPolicy must reference the algorithm enforced by buildCredential")
+		})
+	}
 }

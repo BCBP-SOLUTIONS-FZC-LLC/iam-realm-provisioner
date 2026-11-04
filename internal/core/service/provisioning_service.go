@@ -302,6 +302,15 @@ func isUserEmailConflict(err error) bool {
 	return errors.As(err, &de) && de.Code == domain.ErrUserEmailConflict
 }
 
+// isInvalidRequest reports whether err is domain.ErrInvalidRequest — a
+// caller-supplied validation error (e.g. malformed HashedPasswordSeed) that
+// does not reflect a Keycloak failure and should not trigger compensating
+// teardown that undoes successfully-created Keycloak resources.
+func isInvalidRequest(err error) bool {
+	var de *domain.Error
+	return errors.As(err, &de) && de.Code == domain.ErrInvalidRequest
+}
+
 // marshalIdempotencyResult marshals v for storage in the idempotency
 // ledger. A marshal failure is logged, not propagated — the caller stores
 // whatever bytes result (matching the pre-existing best-effort semantics)
@@ -530,12 +539,13 @@ type ProvisionDirectRequest struct {
 // same-tenant user, and it is stored in the idempotency ledger so a replay
 // returns it too.
 type ProvisionDirectResult struct {
-	TenantID       uuid.UUID `json:"tenant_id"`
-	Realm          string    `json:"realm"`
-	Strategy       string    `json:"strategy"`
-	KeycloakUserID uuid.UUID `json:"keycloak_user_id"`
-	KeycloakShard  string    `json:"keycloak_shard"`
-	OIDCClients    []string  `json:"oidc_clients"`
+	TenantID              uuid.UUID `json:"tenant_id"`
+	Realm                 string    `json:"realm"`
+	Strategy              string    `json:"strategy"`
+	KeycloakUserID        uuid.UUID `json:"keycloak_user_id"`
+	EmailVerificationSent bool      `json:"email_verification_sent"`
+	KeycloakShard         string    `json:"keycloak_shard"`
+	OIDCClients           []string  `json:"oidc_clients"`
 }
 
 // ProvisionDirect implements RP-2 (§8.2): provision the dedicated realm
@@ -597,7 +607,13 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 		kcUserID, err = s.resolveUserCreateConflict(ctx, realmName, req.AdminEmail, req.TenantID, err)
 	}
 	if err != nil {
-		s.bestEffortDeleteRealm(ctx, realmName)
+		// A caller-supplied invalid credential (ErrInvalidRequest from
+		// buildCredential) must not trigger realm teardown — the realm itself
+		// is valid; only the caller's input was malformed. Only transient
+		// Keycloak failures warrant compensating cleanup of a good realm.
+		if !isInvalidRequest(err) {
+			s.bestEffortDeleteRealm(ctx, realmName)
+		}
 		s.failIdempotency(ctx, idempotencyKey)
 		return nil, err
 	}
@@ -614,7 +630,7 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 
 	result := &ProvisionDirectResult{
 		TenantID: req.TenantID, Realm: realmName, Strategy: string(domain.RealmStrategyDedicated),
-		KeycloakUserID: kcUserID, KeycloakShard: shard, OIDCClients: clients,
+		KeycloakUserID: kcUserID, EmailVerificationSent: true, KeycloakShard: shard, OIDCClients: clients,
 	}
 
 	automationClientID := dedicatedPlatformAutomationClientID

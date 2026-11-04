@@ -14,6 +14,11 @@ import (
 
 const tenantIDAttribute = "tenant_id"
 
+// requiredHashAlgorithm is the algorithm enforced by the realm template's
+// passwordPolicy. Credentials imported via HashedPasswordSeed must match it
+// so the realm's security guarantee is not bypassed by a caller-supplied algo.
+const requiredHashAlgorithm = "pbkdf2-sha512"
+
 // buildCredential converts bff-signup's HashedPasswordSeed JSON blob into
 // Keycloak's import format. SecretData/CredentialData tell Keycloak to store
 // the credential without re-hashing (contrast with Value, which Keycloak
@@ -28,19 +33,28 @@ func buildCredential(hashedPasswordSeed string) (*gocloak.CredentialRepresentati
 	if err := json.Unmarshal([]byte(hashedPasswordSeed), &seed); err != nil {
 		return nil, fmt.Errorf("hashed_password_seed is not valid JSON: %w", err)
 	}
+	if seed.Algorithm != requiredHashAlgorithm {
+		return nil, fmt.Errorf("hashed_password_seed: unsupported algorithm %q (must be %s)", seed.Algorithm, requiredHashAlgorithm)
+	}
+	if seed.Iterations <= 0 {
+		return nil, fmt.Errorf("hashed_password_seed: iterations must be > 0, got %d", seed.Iterations)
+	}
+	if seed.Hash == "" || seed.Salt == "" {
+		return nil, fmt.Errorf("hashed_password_seed: hash and salt must not be empty")
+	}
 	secretData, err := json.Marshal(map[string]any{
 		"value": seed.Hash,
 		"salt":  seed.Salt,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("hashed_password_seed: marshal secretData: %w", err)
 	}
 	credentialData, err := json.Marshal(map[string]any{
 		"hashIterations": seed.Iterations,
 		"algorithm":      seed.Algorithm,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("hashed_password_seed: marshal credentialData: %w", err)
 	}
 	return &gocloak.CredentialRepresentation{
 		Type:           gocloak.StringP("password"),
@@ -85,19 +99,23 @@ func splitName(full string) (first, last string) {
 
 // CreateTrialUser creates a user in the shared trial realm (RP-1, RP-INV-2).
 func (a *Admin) CreateTrialUser(ctx context.Context, req port.CreateUserRequest) (userID uuid.UUID, err error) {
+	if len(req.RequiredActions) == 0 {
+		req.RequiredActions = []string{"VERIFY_EMAIL"}
+	}
+	// Build before entering the instrumented section: a bad HashedPasswordSeed
+	// is a caller error, not a Keycloak failure, and must not increment Keycloak
+	// dependency metrics or mark a Keycloak span as errored.
+	user, buildErr := buildUser(req)
+	if buildErr != nil {
+		return uuid.Nil, domain.NewError(domain.ErrInvalidRequest, buildErr.Error())
+	}
+
 	ctx, done := a.begin(ctx, "create_trial_user")
 	defer func() { done(err) }()
 
 	tok, err := a.token(ctx)
 	if err != nil {
 		return uuid.Nil, wrapErr("create_trial_user: token", err)
-	}
-	if len(req.RequiredActions) == 0 {
-		req.RequiredActions = []string{"VERIFY_EMAIL"}
-	}
-	user, err := buildUser(req)
-	if err != nil {
-		return uuid.Nil, wrapErr("create_trial_user: build_user", err)
 	}
 	id, err := a.client.CreateUser(ctx, tok, "trial", user)
 	if err != nil {
@@ -112,16 +130,18 @@ func (a *Admin) CreateTrialUser(ctx context.Context, req port.CreateUserRequest)
 // CreateInvitedUser creates a user in realmName with requiredActions
 // applied verbatim (RP-5, F5).
 func (a *Admin) CreateInvitedUser(ctx context.Context, realmName string, req port.CreateUserRequest) (userID uuid.UUID, err error) {
+	// Build before entering the instrumented section (same reasoning as CreateTrialUser).
+	user, buildErr := buildUser(req)
+	if buildErr != nil {
+		return uuid.Nil, domain.NewError(domain.ErrInvalidRequest, buildErr.Error())
+	}
+
 	ctx, done := a.begin(ctx, "create_invited_user")
 	defer func() { done(err) }()
 
 	tok, err := a.token(ctx)
 	if err != nil {
 		return uuid.Nil, wrapErr("create_invited_user: token", err)
-	}
-	user, err := buildUser(req)
-	if err != nil {
-		return uuid.Nil, wrapErr("create_invited_user: build_user", err)
 	}
 	id, err := a.client.CreateUser(ctx, tok, realmName, user)
 	if err != nil {

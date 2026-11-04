@@ -63,6 +63,28 @@ func TestCreateTrialUser_ConflictReturnsDistinguishableCode(t *testing.T) {
 	assert.Equal(t, domain.ErrUserEmailConflict, de.Code)
 }
 
+func TestCreateTrialUser_InvalidSeedReturnsErrInvalidRequest(t *testing.T) {
+	// newFakeAdmin with no routes registered: any HTTP call to the fake Keycloak
+	// server would return 404 and cause an additional error. This asserts that
+	// buildUser is called BEFORE a.begin() — no Keycloak HTTP call is made.
+	keycloakCalled := false
+	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
+		mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+			keycloakCalled = true
+			writeJSON(w, http.StatusInternalServerError, `{}`)
+		})
+	})
+	_, err := a.CreateTrialUser(context.Background(), port.CreateUserRequest{
+		Email: "a@example.com", FullName: "A", TenantID: uuid.New(),
+		HashedPasswordSeed: `{"algorithm":"argon2","iterations":3,"salt":"s","hash":"h"}`,
+	})
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrInvalidRequest, de.Code, "credential build failure must be a client error (400), not a Keycloak outage (502)")
+	assert.False(t, keycloakCalled, "no Keycloak HTTP call must be made for a client validation error")
+}
+
 func TestCreateTrialUser_SendVerifyEmailFailureIsWarnedNotFatal(t *testing.T) {
 	newID := uuid.New()
 	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
@@ -120,6 +142,18 @@ func TestCreateInvitedUser_ConflictReturnsDistinguishableCode(t *testing.T) {
 	de, ok := err.(*domain.Error)
 	require.True(t, ok)
 	assert.Equal(t, domain.ErrUserEmailConflict, de.Code)
+}
+
+func TestCreateInvitedUser_InvalidSeedReturnsErrInvalidRequest(t *testing.T) {
+	a := newFakeAdmin(t, nil, nil)
+	_, err := a.CreateInvitedUser(context.Background(), "acme", port.CreateUserRequest{
+		Email: "a@example.com", FullName: "A", TenantID: uuid.New(),
+		HashedPasswordSeed: "not-json",
+	})
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrInvalidRequest, de.Code, "credential build failure must be a client error (400), not a Keycloak outage (502)")
 }
 
 // --- FindUserByEmail ---
