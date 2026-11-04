@@ -104,7 +104,7 @@ const docTemplate = `{
                         }
                     },
                     "409": {
-                        "description": "operation_in_progress OR realm_already_dedicated OR tenant_offboarded",
+                        "description": "operation_in_progress OR realm_already_dedicated OR tenant_offboarded OR email_already_registered",
                         "schema": {
                             "$ref": "#/definitions/http.ProblemResponse"
                         }
@@ -170,7 +170,7 @@ const docTemplate = `{
                         }
                     },
                     "409": {
-                        "description": "operation_in_progress OR realm_already_dedicated OR tenant_offboarded",
+                        "description": "operation_in_progress OR realm_already_dedicated OR tenant_offboarded OR email_already_registered",
                         "schema": {
                             "$ref": "#/definitions/http.ProblemResponse"
                         }
@@ -1645,6 +1645,9 @@ const docTemplate = `{
         "service.ProvisionDirectResult": {
             "type": "object",
             "properties": {
+                "email_verification_sent": {
+                    "type": "boolean"
+                },
                 "keycloak_shard": {
                     "type": "string"
                 },
