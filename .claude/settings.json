@@ -3,6 +3,30 @@
     "bgIsolation": "none"
   },
   "enabledPlugins": {
-    "claude-code-setup@claude-plugins-official": true
+    "claude-code-setup@anthropic-plugin-directory": true
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/guard-invariants.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/gofmt.sh"
+          }
+        ]
+      }
+    ]
   }
 }
