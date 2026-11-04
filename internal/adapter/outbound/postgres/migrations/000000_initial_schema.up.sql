@@ -142,6 +142,11 @@ CREATE TABLE public.tenant_realms (
   -- that table, not this one.
   service_account_principal_id     uuid,
   service_account_keycloak_client_id text,
+  -- RP-D20: the tenant's workspace slug as received on RP-1/RP-2 (O&M's
+  -- tenants.slug, immutable there). RP-3's request carries no slug, so the
+  -- dedicated realm it creates is named tenant-<tenant_slug> from this
+  -- column. Not personal data.
+  tenant_slug            text CHECK (tenant_slug IS NULL OR char_length(tenant_slug) BETWEEN 1 AND 63),
   record_version         bigint NOT NULL DEFAULT 1 CHECK (record_version > 0),
   created_at             timestamptz NOT NULL DEFAULT now(),
   updated_at             timestamptz NOT NULL DEFAULT now(),

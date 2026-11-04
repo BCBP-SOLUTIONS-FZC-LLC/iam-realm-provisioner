@@ -50,6 +50,8 @@ func TestProvisionDirect_Success(t *testing.T) {
 	assert.Equal(t, domain.RealmStrategyDedicated, row.Strategy)
 	require.NotNil(t, row.KeycloakShard)
 	assert.Equal(t, "kc-shard-1", *row.KeycloakShard)
+	require.NotNil(t, row.TenantSlug)
+	assert.Equal(t, "acme", *row.TenantSlug)
 
 	// TenantIdentityProvisioned first (BFF-2 backstop), owner = the admin
 	// user RP-2 just created, then the three existing events in order.
@@ -536,7 +538,7 @@ func TestProvisionDirect_NoEventPublisherInContext_StillCommitsLocally(t *testin
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx := newMockTxRunnerNoPublisher()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil).WithShardLoads(realms)
 	tenantID := uuid.New()
 	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
 	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) { return nil, nil }
@@ -593,7 +595,7 @@ func TestCreateInvitedUser_Success(t *testing.T) {
 	}
 
 	result, err := svc.CreateInvitedUser(context.Background(), "ciu-1", tenantID, service.CreateInvitedUserRequest{
-		Email: "b@acme.example", FullName: "B", RequiredActions: []string{"VERIFY_EMAIL"},
+		Email: "b@acme.example", FullName: "B", RequiredActions: []string{"VERIFY_EMAIL"}, TenantSlug: "acme",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, userID, result.KeycloakUserID)
@@ -609,7 +611,7 @@ func TestCreateInvitedUser_BeginError_Propagates(t *testing.T) {
 		return uuid.Nil, nil
 	}
 
-	_, err := svc.CreateInvitedUser(context.Background(), "ciu-6", uuid.New(), service.CreateInvitedUserRequest{Email: "x@example.com"})
+	_, err := svc.CreateInvitedUser(context.Background(), "ciu-6", uuid.New(), service.CreateInvitedUserRequest{Email: "x@example.com", TenantSlug: "acme"})
 	require.Error(t, err)
 }
 
@@ -617,7 +619,7 @@ func TestCreateInvitedUser_TenantNotFound(t *testing.T) {
 	svc, _, _, idem, _ := newProvisioningTestService(t)
 	tenantID := uuid.New()
 
-	_, err := svc.CreateInvitedUser(context.Background(), "ciu-2", tenantID, service.CreateInvitedUserRequest{Email: "x@example.com"})
+	_, err := svc.CreateInvitedUser(context.Background(), "ciu-2", tenantID, service.CreateInvitedUserRequest{Email: "x@example.com", TenantSlug: "acme"})
 	require.Error(t, err)
 	assert.Equal(t, domain.OpStatusFailed, idem.rows["ciu-2"].Status)
 }
@@ -630,7 +632,7 @@ func TestCreateInvitedUser_KeycloakFailure(t *testing.T) {
 		return uuid.Nil, domain.NewError(domain.ErrKeycloakUnavailable, "down")
 	}
 
-	_, err := svc.CreateInvitedUser(context.Background(), "ciu-3", tenantID, service.CreateInvitedUserRequest{Email: "x@example.com"})
+	_, err := svc.CreateInvitedUser(context.Background(), "ciu-3", tenantID, service.CreateInvitedUserRequest{Email: "x@example.com", TenantSlug: "acme"})
 	require.Error(t, err)
 	assert.Equal(t, domain.OpStatusFailed, idem.rows["ciu-3"].Status)
 }
@@ -650,7 +652,7 @@ func TestCreateInvitedUser_EmailConflict_SameTenant_ResolvesAsIdempotentSuccess(
 		return &port.ExistingUser{ID: existingID, TenantID: tenantID}, nil
 	}
 
-	result, err := svc.CreateInvitedUser(context.Background(), "ciu-conflict-1", tenantID, service.CreateInvitedUserRequest{Email: "x@example.com"})
+	result, err := svc.CreateInvitedUser(context.Background(), "ciu-conflict-1", tenantID, service.CreateInvitedUserRequest{Email: "x@example.com", TenantSlug: "acme"})
 	require.NoError(t, err)
 	assert.Equal(t, existingID, result.KeycloakUserID)
 	assert.Equal(t, domain.OpStatusSucceeded, idem.rows["ciu-conflict-1"].Status)
@@ -667,7 +669,7 @@ func TestCreateInvitedUser_EmailConflict_DifferentTenant_ReturnsConflict(t *test
 		return &port.ExistingUser{ID: uuid.New(), TenantID: uuid.New()}, nil
 	}
 
-	_, err := svc.CreateInvitedUser(context.Background(), "ciu-conflict-2", tenantID, service.CreateInvitedUserRequest{Email: "x@example.com"})
+	_, err := svc.CreateInvitedUser(context.Background(), "ciu-conflict-2", tenantID, service.CreateInvitedUserRequest{Email: "x@example.com", TenantSlug: "acme"})
 	require.Error(t, err)
 	de, ok := err.(*domain.Error)
 	require.True(t, ok)
@@ -685,7 +687,7 @@ func TestCreateInvitedUser_IdempotentReplay(t *testing.T) {
 		return uuid.New(), nil
 	}
 
-	req := service.CreateInvitedUserRequest{Email: "x@example.com"}
+	req := service.CreateInvitedUserRequest{Email: "x@example.com", TenantSlug: "acme"}
 	first, err := svc.CreateInvitedUser(context.Background(), "ciu-4", tenantID, req)
 	require.NoError(t, err)
 	second, err := svc.CreateInvitedUser(context.Background(), "ciu-4", tenantID, req)
@@ -707,7 +709,7 @@ func TestCreateInvitedUser_IdempotencyCompleteFailure_LoggedNotPropagated(t *tes
 		return uuid.New(), nil
 	}
 
-	result, err := svc.CreateInvitedUser(context.Background(), "ciu-5", tenantID, service.CreateInvitedUserRequest{Email: "x@example.com"})
+	result, err := svc.CreateInvitedUser(context.Background(), "ciu-5", tenantID, service.CreateInvitedUserRequest{Email: "x@example.com", TenantSlug: "acme"})
 	require.NoError(t, err)
 	assert.NotNil(t, result)
 	assert.GreaterOrEqual(t, logger.warnCalls, 1)

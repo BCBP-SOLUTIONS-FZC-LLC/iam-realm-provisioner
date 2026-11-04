@@ -266,6 +266,12 @@ func main() {
 
 	// ── 7. Outbound adapters (Keycloak — RP-INV-1 sole seam — OpenBao,
 	// Org & Membership, S3) ──────────────────────────────────────────────
+	// tender-web's exact redirect URIs/origins (HLD §11.3) and the emailed
+	// /t/<slug>/ links share one base URL.
+	webClient, err := keycloakadapter.WebClientConfigFromEnv()
+	if err != nil {
+		panic(fmt.Sprintf("web client config: %v", err))
+	}
 	keycloakAdmin := keycloakadapter.New(keycloakadapter.Config{
 		BaseURL:        mustEnv("KEYCLOAK_BASE_URL", appEnv),
 		AdminRealm:     envOr("KEYCLOAK_ADMIN_REALM", "master"),
@@ -273,6 +279,7 @@ func main() {
 		SecretProvider: keycloakadapter.EnvSecretFn("KEYCLOAK_ADMIN_CLIENT_SECRET"),
 		RateLimitRPS:   envInt("KEYCLOAK_RATE_LIMIT_RPS", 20),
 		Timeout:        envDuration("KEYCLOAK_TIMEOUT_MS", 8*time.Second),
+		Web:            webClient,
 	}, log)
 
 	openbaoClient := openbao.New(openbao.Config{
@@ -302,9 +309,15 @@ func main() {
 
 	// ── 8b. Core services ─────────────────────────────────────────────────
 	sharedRealm := envOr("SHARED_TRIAL_REALM", "trial")
+	// Cross-tenant reads (realm-name owner, shard counts) go through the
+	// BYPASSRLS sysPool; the app pool would see only the request tenant.
+	sysRealmRepo := pgadapter.NewTenantRealmRepository(sysPool)
 	provisioningSvc := service.NewProvisioningService(
 		tenantRealmRepo, idempotencyRepo, keycloakAdmin, tokenServiceClient, txRunner, pendingAuditRepo, sharedRealm, nil,
-	).WithLogger(log).WithConvertTimeout(envDuration("CONVERT_TIMEOUT", service.DefaultConvertTimeout))
+	).WithLogger(log).WithConvertTimeout(envDuration("CONVERT_TIMEOUT", service.DefaultConvertTimeout)).
+		WithWebEntry(webClient.BaseURLs[0], webClient.ClientID).
+		WithRealmOwners(sysRealmRepo).
+		WithShardLoads(sysRealmRepo)
 	lifecycleSvc := service.NewLifecycleService(
 		tenantRealmRepo, idempotencyRepo, keycloakAdmin, txRunner, sharedRealm,
 	).WithLogger(log).WithIdpConfigs(idpConfigRepo)
@@ -389,6 +402,9 @@ func main() {
 	// Drains pending_audit_entries (TenantIdpConfigChanged) to Audit Log's
 	// direct-write ingest, cross-tenant on the BYPASSRLS sysPool.
 	startAuditDelivery(ctx, sysPool, log)
+
+	// ── 9d. Shared trial realm bootstrap (§12.2, RP-INV-2) ────────────────
+	startSharedRealmEnsure(ctx, keycloakAdmin, sharedRealm, log)
 
 	// ── 10. Router ────────────────────────────────────────────────────────
 	router := httpadapter.NewRouter(httpadapter.RouterConfig{

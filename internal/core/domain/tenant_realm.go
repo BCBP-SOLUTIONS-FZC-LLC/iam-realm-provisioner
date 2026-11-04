@@ -44,10 +44,14 @@ type TenantRealm struct {
 	// realm cannot hold two clients with the same clientId).
 	ServiceAccountPrincipalID      *uuid.UUID
 	ServiceAccountKeycloakClientID *string
-	RecordVersion                  int64
-	CreatedAt                      time.Time
-	UpdatedAt                      time.Time
-	DeletedAt                      *time.Time
+	// TenantSlug is the workspace slug received on RP-1/RP-2 (RP-D20). RP-3
+	// names the dedicated realm tenant-<TenantSlug>; nil only for a row
+	// written before the column existed.
+	TenantSlug    *string
+	RecordVersion int64
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	DeletedAt     *time.Time
 }
 
 // IsOffboarded reports whether the realm has reached the terminal state

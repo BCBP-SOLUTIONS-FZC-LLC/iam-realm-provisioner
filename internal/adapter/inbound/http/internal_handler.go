@@ -238,7 +238,7 @@ type convertRequest struct {
 // @Failure      400      {object}  ProblemResponse  "invalid_request OR missing_idempotency_key"
 // @Failure      403      {object}  ProblemResponse  "insufficient_role (caller not in CD-19 allow-list)"
 // @Failure      404      {object}  ProblemResponse  "tenant_realm_not_found"
-// @Failure      409      {object}  ProblemResponse  "operation_in_progress OR realm_already_dedicated OR tenant_offboarded OR optimistic_lock_conflict OR credential_replay_expired"
+// @Failure      409      {object}  ProblemResponse  "operation_in_progress OR realm_already_dedicated OR realm_name_unavailable OR tenant_offboarded OR optimistic_lock_conflict OR credential_replay_expired"
 // @Failure      502      {object}  ProblemResponse  "conversion_failed"
 // @Failure      503      {object}  ProblemResponse                "db_unavailable OR keycloak_unavailable OR token_service_unavailable"
 // @Failure      500      {object}  ProblemResponse
@@ -322,12 +322,15 @@ type createInvitedUserRequest struct {
 	Email           string   `json:"email" binding:"required,email,max=254"`
 	FullName        string   `json:"full_name" binding:"required,max=256"`
 	RequiredActions []string `json:"required_actions" binding:"omitempty,max=10,dive,max=64"`
+	// TenantSlug builds the invitation link /t/<slug>/ (required for both
+	// realm strategies: the shared trial realm's name carries no slug).
+	TenantSlug string `json:"tenant_slug" binding:"required,max=63"`
 }
 
 // CreateInvitedUser handles RP-5 (POST /tenants/:id/users).
 //
 // @Summary      RP-5 — Create invited user in tenant realm
-// @Description  Creates a Keycloak user in the tenant's realm for an accepted invitation. Sets required_actions (e.g. VERIFY_EMAIL, UPDATE_PASSWORD). Idempotent on Idempotency-Key reuse.
+// @Description  Creates a Keycloak user in the tenant's realm for an accepted invitation. Sets required_actions (e.g. VERIFY_EMAIL, UPDATE_PASSWORD), then sends the execute-actions invitation email linking to <WEB_APP_BASE_URL>/t/<tenant_slug>/ (a send failure fails the call). Idempotent on Idempotency-Key reuse.
 // @Tags         Users
 // @Accept       json
 // @Produce      json
@@ -359,7 +362,7 @@ func (h *InternalHandler) CreateInvitedUser(c *gin.Context) {
 		return
 	}
 	result, err := h.Provisioning.CreateInvitedUser(c.Request.Context(), idempotencyKey(c), tenantID, service.CreateInvitedUserRequest{
-		Email: req.Email, FullName: req.FullName, RequiredActions: req.RequiredActions,
+		Email: req.Email, FullName: req.FullName, RequiredActions: req.RequiredActions, TenantSlug: req.TenantSlug,
 	})
 	if err != nil {
 		gincommon.AbortWithProblem(c, domainErrToProblem(err))

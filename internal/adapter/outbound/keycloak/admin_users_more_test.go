@@ -2,9 +2,12 @@ package keycloak
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -747,4 +750,91 @@ func TestForceLogoutRealm_LogoutGenericErrorPropagates(t *testing.T) {
 	err := a.ForceLogoutRealm(context.Background(), "acme")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "force_logout_realm: logout")
+}
+
+// --- Action-email links (HLD §8.2.7) ---
+
+func TestCreateTrialUser_VerifyEmailCarriesLink(t *testing.T) {
+	newID := uuid.New()
+	var query url.Values
+	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
+		mux.HandleFunc("POST "+realmPath("trial", "users"), func(w http.ResponseWriter, _ *http.Request) {
+			writeLocation(w, newID.String())
+			writeJSON(w, http.StatusCreated, `{}`)
+		})
+		mux.HandleFunc("PUT "+realmPath("trial", "users", newID.String(), "send-verify-email"), func(w http.ResponseWriter, r *http.Request) {
+			query = r.URL.Query()
+			writeJSON(w, http.StatusNoContent, ``)
+		})
+	})
+	_, err := a.CreateTrialUser(context.Background(), port.CreateUserRequest{
+		Email: "a@example.com", FullName: "A", TenantID: uuid.New(),
+		Link: &port.ActionLink{ClientID: "tender-web", RedirectURI: "https://app.example/t/acme/"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "tender-web", query.Get("client_id"))
+	assert.Equal(t, "https://app.example/t/acme/", query.Get("redirect_uri"))
+}
+
+// A link Keycloak refuses (no tender-web client in the trial realm, or an
+// unregistered redirect URI) must cost only the link, never the email.
+func TestCreateTrialUser_RefusedLink_RetriesWithoutIt(t *testing.T) {
+	newID := uuid.New()
+	var calls []url.Values
+	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
+		mux.HandleFunc("POST "+realmPath("trial", "users"), func(w http.ResponseWriter, _ *http.Request) {
+			writeLocation(w, newID.String())
+			writeJSON(w, http.StatusCreated, `{}`)
+		})
+		mux.HandleFunc("PUT "+realmPath("trial", "users", newID.String(), "send-verify-email"), func(w http.ResponseWriter, r *http.Request) {
+			calls = append(calls, r.URL.Query())
+			if r.URL.Query().Get("client_id") != "" {
+				writeJSON(w, http.StatusBadRequest, `{"errorMessage":"Client doesn't exist"}`)
+				return
+			}
+			writeJSON(w, http.StatusNoContent, ``)
+		})
+	})
+	_, err := a.CreateTrialUser(context.Background(), port.CreateUserRequest{
+		Email: "a@example.com", FullName: "A", TenantID: uuid.New(),
+		Link: &port.ActionLink{ClientID: "tender-web", RedirectURI: "https://app.example/t/acme/"},
+	})
+	require.NoError(t, err)
+	require.Len(t, calls, 2)
+	assert.Empty(t, calls[1].Get("client_id"), "the retry sends the plain verify email")
+}
+
+func TestSendActionsEmail_SendsActionsLifespanAndLink(t *testing.T) {
+	userID := uuid.New()
+	var query url.Values
+	var actions []string
+	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
+		mux.HandleFunc("PUT "+realmPath("tenant-acme", "users", userID.String(), "execute-actions-email"), func(w http.ResponseWriter, r *http.Request) {
+			query = r.URL.Query()
+			body, _ := io.ReadAll(r.Body)
+			require.NoError(t, json.Unmarshal(body, &actions))
+			writeJSON(w, http.StatusNoContent, ``)
+		})
+	})
+	err := a.SendActionsEmail(context.Background(), "tenant-acme", userID, []string{"VERIFY_EMAIL", "UPDATE_PASSWORD"}, 7*24*time.Hour,
+		&port.ActionLink{ClientID: "tender-web", RedirectURI: "https://app.example/t/acme/"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"VERIFY_EMAIL", "UPDATE_PASSWORD"}, actions)
+	assert.Equal(t, "604800", query.Get("lifespan"))
+	assert.Equal(t, "tender-web", query.Get("client_id"))
+	assert.Equal(t, "https://app.example/t/acme/", query.Get("redirect_uri"))
+}
+
+func TestSendActionsEmail_Error(t *testing.T) {
+	userID := uuid.New()
+	a := newFakeAdmin(t, nil, func(mux *http.ServeMux) {
+		mux.HandleFunc("PUT "+realmPath("tenant-acme", "users", userID.String(), "execute-actions-email"), func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusInternalServerError, `{}`)
+		})
+	})
+	err := a.SendActionsEmail(context.Background(), "tenant-acme", userID, []string{"VERIFY_EMAIL"}, time.Hour, nil)
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrKeycloakUnavailable, de.Code)
 }

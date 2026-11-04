@@ -259,7 +259,7 @@ const docTemplate = `{
                         }
                     },
                     "409": {
-                        "description": "operation_in_progress OR realm_already_dedicated OR tenant_offboarded OR optimistic_lock_conflict OR credential_replay_expired",
+                        "description": "operation_in_progress OR realm_already_dedicated OR realm_name_unavailable OR tenant_offboarded OR optimistic_lock_conflict OR credential_replay_expired",
                         "schema": {
                             "$ref": "#/definitions/http.ProblemResponse"
                         }
@@ -928,7 +928,7 @@ const docTemplate = `{
                         "IdempotencyKey": []
                     }
                 ],
-                "description": "Creates a Keycloak user in the tenant's realm for an accepted invitation. Sets required_actions (e.g. VERIFY_EMAIL, UPDATE_PASSWORD). Idempotent on Idempotency-Key reuse.",
+                "description": "Creates a Keycloak user in the tenant's realm for an accepted invitation. Sets required_actions (e.g. VERIFY_EMAIL, UPDATE_PASSWORD), then sends the execute-actions invitation email linking to \u003cWEB_APP_BASE_URL\u003e/t/\u003ctenant_slug\u003e/ (a send failure fails the call). Idempotent on Idempotency-Key reuse.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1326,7 +1326,8 @@ const docTemplate = `{
             "type": "object",
             "required": [
                 "email",
-                "full_name"
+                "full_name",
+                "tenant_slug"
             ],
             "properties": {
                 "email": {
@@ -1343,6 +1344,11 @@ const docTemplate = `{
                     "items": {
                         "type": "string"
                     }
+                },
+                "tenant_slug": {
+                    "description": "TenantSlug builds the invitation link /t/\u003cslug\u003e/ (required for both\nrealm strategies: the shared trial realm's name carries no slug).",
+                    "type": "string",
+                    "maxLength": 63
                 }
             }
         },

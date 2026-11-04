@@ -11,7 +11,7 @@ import (
 
 const tenantRealmColumns = `tenant_id, realm_name, strategy, keycloak_shard, status,
 	realm_template_version, trial_ends_at, converted_at, disabled_at, suspension_source, exported_at,
-	export_s3_key, service_account_principal_id, service_account_keycloak_client_id,
+	export_s3_key, service_account_principal_id, service_account_keycloak_client_id, tenant_slug,
 	record_version, created_at, updated_at, deleted_at`
 
 // TenantRealmRepository implements port.TenantRealmRepository (§4.2).
@@ -29,7 +29,7 @@ func scanTenantRealm(row pgcommon.Row) (*domain.TenantRealm, error) {
 	var t domain.TenantRealm
 	err := row.Scan(&t.TenantID, &t.RealmName, &t.Strategy, &t.KeycloakShard, &t.Status,
 		&t.RealmTemplateVersion, &t.TrialEndsAt, &t.ConvertedAt, &t.DisabledAt, &t.SuspensionSource, &t.ExportedAt,
-		&t.ExportS3Key, &t.ServiceAccountPrincipalID, &t.ServiceAccountKeycloakClientID,
+		&t.ExportS3Key, &t.ServiceAccountPrincipalID, &t.ServiceAccountKeycloakClientID, &t.TenantSlug,
 		&t.RecordVersion, &t.CreatedAt, &t.UpdatedAt, &t.DeletedAt)
 	if err != nil {
 		return nil, err
@@ -84,8 +84,8 @@ func (r *TenantRealmRepository) Upsert(ctx context.Context, t *domain.TenantReal
 		tag, err := tx.Exec(ctx, `
 			INSERT INTO tenant_realms (tenant_id, realm_name, strategy, keycloak_shard, status,
 				realm_template_version, trial_ends_at, converted_at, disabled_at, suspension_source, exported_at, export_s3_key,
-				service_account_principal_id, service_account_keycloak_client_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+				service_account_principal_id, service_account_keycloak_client_id, tenant_slug)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 			ON CONFLICT (tenant_id) DO UPDATE SET
 				realm_name = EXCLUDED.realm_name,
 				strategy = EXCLUDED.strategy,
@@ -100,12 +100,13 @@ func (r *TenantRealmRepository) Upsert(ctx context.Context, t *domain.TenantReal
 				export_s3_key = EXCLUDED.export_s3_key,
 				service_account_principal_id = EXCLUDED.service_account_principal_id,
 				service_account_keycloak_client_id = EXCLUDED.service_account_keycloak_client_id,
+				tenant_slug = COALESCE(EXCLUDED.tenant_slug, tenant_realms.tenant_slug),
 				record_version = tenant_realms.record_version + 1,
 				updated_at = now()
 			WHERE tenant_realms.deleted_at IS NULL`,
 			t.TenantID, t.RealmName, t.Strategy, t.KeycloakShard, t.Status,
 			t.RealmTemplateVersion, t.TrialEndsAt, t.ConvertedAt, t.DisabledAt, t.SuspensionSource, t.ExportedAt, t.ExportS3Key,
-			t.ServiceAccountPrincipalID, t.ServiceAccountKeycloakClientID)
+			t.ServiceAccountPrincipalID, t.ServiceAccountKeycloakClientID, t.TenantSlug)
 		if err != nil {
 			return err
 		}
@@ -128,11 +129,12 @@ func (r *TenantRealmRepository) Update(ctx context.Context, t *domain.TenantReal
 				realm_template_version = $6, trial_ends_at = $7, converted_at = $8,
 				disabled_at = $9, suspension_source = $10, exported_at = $11, export_s3_key = $12,
 				service_account_principal_id = $13, service_account_keycloak_client_id = $14,
+				tenant_slug = $16,
 				record_version = record_version + 1, updated_at = now()
 			WHERE tenant_id = $1 AND record_version = $15 AND deleted_at IS NULL`,
 			t.TenantID, t.RealmName, t.Strategy, t.KeycloakShard, t.Status,
 			t.RealmTemplateVersion, t.TrialEndsAt, t.ConvertedAt, t.DisabledAt, t.SuspensionSource, t.ExportedAt,
-			t.ExportS3Key, t.ServiceAccountPrincipalID, t.ServiceAccountKeycloakClientID, t.RecordVersion)
+			t.ExportS3Key, t.ServiceAccountPrincipalID, t.ServiceAccountKeycloakClientID, t.RecordVersion, t.TenantSlug)
 		if err != nil {
 			return err
 		}
@@ -142,6 +144,24 @@ func (r *TenantRealmRepository) Update(ctx context.Context, t *domain.TenantReal
 		}
 		return nil
 	})
+}
+
+// DedicatedRealmOwner implements port.DedicatedRealmOwners. Construct the
+// repository on the BYPASSRLS sysPool for this: under a tenant GUC another
+// tenant's row is invisible and the check would always pass.
+func (r *TenantRealmRepository) DedicatedRealmOwner(ctx context.Context, realmName string) (uuid.UUID, bool, error) {
+	var owner uuid.UUID
+	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
+		return tx.QueryRow(ctx, `SELECT tenant_id FROM tenant_realms
+			WHERE realm_name = $1 AND strategy = 'dedicated' AND deleted_at IS NULL`, realmName).Scan(&owner)
+	})
+	if errors.Is(err, pgcommon.ErrNoRows) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	return owner, true, nil
 }
 
 // CountsByShard returns the current live dedicated-realm count per

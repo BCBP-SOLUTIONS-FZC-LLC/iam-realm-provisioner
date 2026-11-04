@@ -4,43 +4,31 @@ All notable changes to this service are documented here. Format follows [Keep a 
 
 This service has never been deployed to any environment — there is no released version yet, so everything lives under `[Unreleased]`. Because of that, this file tracks only what is currently true and what is still outstanding, not a phase-by-phase build history; the full development diary is available via `git log` if it's ever needed.
 
-## [Unreleased — 2026-11-04]
+## [Unreleased — 2026-10-30]
 
-### Fixed
+### Added
 
-- **`buildCredential` JSON-parse error now returns 400 `INVALID_REQUEST` instead of 502 `KEYCLOAK_UNAVAILABLE`.** When `HashedPasswordSeed` is not valid JSON (or fails new field validation — see below), `buildUser` returned an error that was passed through `wrapErr`, which unconditionally produces `domain.ErrKeycloakUnavailable`. The caller received HTTP 502 for what is clearly a client-supplied invalid payload. Fixed: `CreateTrialUser` and `CreateInvitedUser` now return `domain.NewError(domain.ErrInvalidRequest, ...)` for `buildUser` failures, keeping `wrapErr` exclusively for Keycloak transport errors.
-
-- **`buildCredential` now validates seed field values.** After `json.Unmarshal` succeeds, the following are now checked before the credential is forwarded to Keycloak: (1) `algorithm` must be `"pbkdf2-sha512"` (the only algorithm the realm's `passwordPolicy` enforces — submitting a weaker algorithm like `argon2` with fewer iterations would have bypassed the realm's security guarantee silently); (2) `iterations` must be > 0; (3) `hash` and `salt` must not be empty. All failures surface as `ErrInvalidRequest` (400) via the fix above.
-
----
-
-## [Unreleased — 2026-10-26 patch 2]
-
-### Fixed
-
-- **RP-2 201 response now includes `keycloak_user_id` and `email_verification_sent` (Phase 1.5 blocker, LLD v1.43).** `ProvisionDirectResult` was missing `EmailVerificationSent bool` (`json:"email_verification_sent"`). `ProvisionTrialResult` had the field; `ProvisionDirectResult` did not, contradicting the CHANGELOG and the LLD v1.43 contract. Fixed: field added to struct and set to `true` at result-build time (`EmailVerificationSent` is always `true` for RP-2 — admin user is created with `RequiredActions: ["VERIFY_EMAIL"]`). `kcUserID` was already present from a prior fix.
+- **Multi-tab refresh rotation test (LLD v1.45, frontend round-2 ask L).** `test/integration/keycloak_multitab_refresh_test.go` signs one user into `tender-web` twice in one SSO session (two tabs, Auth Code + PKCE), then refreshes each tab's lineage alternately for 5 rounds with the v1.44 rotation settings. Every refresh succeeds: Keycloak 26 tracks reuse per lineage (`reuse_id`), so tabs don't invalidate each other. A replayed old token is refused and revokes the whole SSO session. No setting change needed.
+- **Invitation email (RP-5, LLD v1.44).** RP-5 now sends Keycloak's execute-actions email after creating the invited user, for the `required_actions` O&M sent: valid 7 days, ending on `<WEB_APP_BASE_URL>/t/<tenant_slug>/` through `tender-web`. Before this, no IAM code sent an invitation email, so an invitee had no way in. `tenant_slug` is a new **required** body field (≤ 63, missing → `400`). A send failure fails RP-5 (`502 KEYCLOAK_UNAVAILABLE`); O&M's retry resends. New port method `SendActionsEmail`, Keycloak op `send_actions_email`.
+- **Verify email link (RP-1).** The trial verification email ends on the tenant's `/t/<slug>/` URL. Still best-effort; a link Keycloak refuses is retried once without it.
+- **Shared trial realm provisioned by code (RP-D18).** Each server pod runs `EnsureSharedRealm(SHARED_TRIAL_REALM)` in the background at startup (retry every 30 s): create from the template when absent, then converge the `requires-mfa` role, the user profile, token settings, the hardened `tender-web` client and the `tenant_id` protocol mapper (access + ID token). Integration test against Keycloak 26.
+- **Config:** `WEB_APP_BASE_URL` (default `https://app.bcbpsolutions.com`), `WEB_APP_EXTRA_BASE_URLS`, `WEB_CLIENT_ID` (default `tender-web`). An invalid value fails startup.
 
 ### Changed
 
-- **RP-2 `@Failure 409` Swagger annotation updated** to list `email_already_registered` alongside `operation_in_progress`, `realm_already_dedicated`, and `tenant_offboarded` — the service layer already handles it via `resolveUserCreateConflict`, as on RP-1. Documentation-only fix, no behaviour change.
-
----
-
-## [Unreleased — 2026-10-26]
-
-### Fixed
-
-- **Wire `errorCode` for email conflicts corrected to `EMAIL_ALREADY_REGISTERED` (LLD v1.42, §17).** A BFF-Signup ↔ RP cross-service compatibility check on 2026-10-26 found that `internal/adapter/inbound/http/errors.go` emitted `USER_EMAIL_CONFLICT` in the RFC 9457 `errorCode` field for `domain.ErrUserEmailConflict` (RP-1/RP-2/RP-5), while bff-signup's `realmprovisioner/client.go` branches on `"EMAIL_ALREADY_REGISTERED"`. The mismatch meant the BFF's `case "EMAIL_ALREADY_REGISTERED"` never matched RP's response, and a duplicate-email error surfaced as a generic failure instead of `domain.ErrEmailUnavailable`. Fix: the `problem.MustType` `errorCode` argument in `errors.go:41` changed from `"USER_EMAIL_CONFLICT"` to `"EMAIL_ALREADY_REGISTERED"`. The domain error code (`user_email_conflict`, `ErrUserEmailConflict`) and internal logic are unchanged. Swagger `@Failure 409` annotation on the RP-1 handler updated to include `email_already_registered`.
-
-- **RP-1 201 response includes `strategy` field (confirmed, no change).** `ProvisionTrialResult.Strategy` is populated with `domain.RealmStrategyShared` (`"shared"`) — the field bff-signup's `ProvisionTrialResponse` struct expects. ✅
-
-### Notes (bff-signup open item — fix in BFF, not here)
-
-- `RequireSystemRole` checks `rc.IsSystem()` → `rc.HasRole("iam-system")` from the `x-tenant-roles` header. bff-signup's ProvisionTrial and ProvisionDirect calls are missing this header — add `req.Header.Set("x-tenant-roles", "iam-system")` to both in `internal/adapter/outbound/realmprovisioner/client.go` (same fix applied for O&M in bff-signup commit `4af2499`).
-
----
+- **Access tokens carry no name or email (LLD v1.49, RP-D22, frontend integrated-deployment Issue 16).** `profile` and `email` were default scopes on the public clients, so every access token carried `name`, `email`, `preferred_username` and the like (HLD §4.1). On `tender-web` and `tender-mobile` they are now optional, and two client mappers (`id_token_name`, `id_token_email`) put name and email in the ID token and userinfo only, where the frontend SDK reads them. `sub`, `auth_time`, `aud` and `tenant_id` stay in the access token. Set at realm creation and converged on the shared `trial` realm at startup. Re-create dev dedicated realms made before this change. A Keycloak 26 test checks the claims on tokens from a real sign-in.
+- **Access tokens carry `aud` (LLD v1.48, RP-D21, frontend integrated-deployment Issue 13).** Keycloak named the client only in `azp`, so the gateway's `jwt_authn` audience check rejected every API call. Every public client (`tender-web`, `tender-mobile`) now gets an `oidc-audience-mapper` with its own ID, access token only. It is added at realm creation and converged on the shared `trial` realm at startup; `tender-gateway` gets none. Platform must set the gateway's `jwt_authn` `audiences: [tender-web, tender-mobile]`. Re-create dev dedicated realms made before this change.
+- **Shard placement counts realms on the sysPool (RP-2/RP-3, LLD v1.47).** `CountsByShard` ran on the app pool under the caller's tenant GUC, so RLS hid every other tenant's realm. Placement would always pick the first shard once several are configured, and each hidden row logged a `cross_tenant_access` RLS violation (sampled), which feeds the RLS alert. It is now its own port, `port.ShardLoads`, wired to the sysPool repository (`WithShardLoads`); unwired, placement fails rather than use the app pool.
+- **A converted trial's realm is `tenant-<slug>` (RP-3, LLD v1.46, RP-D20, HLD v1.59 G-1).** It was `tenant-<tenant_id>`, which broke HLD §4.2's naming, PUB-1's slug fast path and the frontend SDK's `iss` check. New nullable `tenant_realms.tenant_slug` (in `000000`; re-create dev `provisioner` databases), recorded by RP-1/RP-2 from the `tenant_slug` they already receive; RP-3 names the realm from it. No recorded slug, or `tenant-<slug>` held by another live tenant (checked on the sysPool before RP-3 creates or resumes into the realm) → new `409 realm_name_unavailable`. RP-3's request/response shape is unchanged; `TenantConverted.realm` / `TenantRealmReady.realm` now carry `tenant-<slug>`.
+- **`tender-web` hardened (HLD §11.3).** Public, standard flow only, PKCE S256, exact redirect / post-logout URIs `<base>/*` and web origins `<base>` from config (no `https://*.bcbpsolutions.com/*`, no `+`). Realm token settings: access 5 min, client session 8 h idle / 12 h max, SSO 12 h / 24 h, refresh-token rotation (`revokeRefreshToken`, max reuse 0). Applied to new realms; dedicated realms created earlier are recreated in dev (nothing is in production).
+- **`tenant_id` user attribute is admin-only** in every realm's user profile, so a user cannot edit it in the account console and move into another trial tenant.
+- **RP-2 sends no creation-time email** (RP-D19, a stated choice): the direct-paid admin verifies at first login.
 
 ## [Unreleased — 2026-10-21]
+
+### Security (2026-10-30 — Trivy: tzdata DLA-4867-1 suppressed)
+
+- **`.trivyignore` suppresses DLA-4867-1** (`tzdata` 2026b → 2026f, Trivy UNKNOWN), with `exp:2026-11-30`. The newest `gcr.io/distroless/static-debian12:nonroot` (`sha256:afa5c872…`) still ships 2026b, and the service never loads a time zone (all timestamps UTC). Same handling as DLA-4854-1. Remove both entries and re-pin once distroless ships tzdata ≥ 2026f.
 
 ### Added
 

@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,7 +65,24 @@ type ProvisioningService struct {
 	// inflight tracks detached conversions so shutdown can wait for them
 	// (Drain) before the pools close.
 	inflight sync.WaitGroup
+
+	// webBaseURL and webClientID build the link at the end of the verify and
+	// invitation emails (WithWebEntry). Empty webBaseURL = no link.
+	webBaseURL  string
+	webClientID string
+
+	// realmOwners checks, cross-tenant, that RP-3's tenant-<slug> is not
+	// another tenant's realm (WithRealmOwners). nil skips the check.
+	realmOwners port.DedicatedRealmOwners
+
+	// shardLoads gives the cross-tenant per-shard realm counts RP-2/RP-3
+	// place a new dedicated realm by (WithShardLoads). nil fails placement.
+	shardLoads port.ShardLoads
 }
+
+// InvitationLifespan is how long an RP-5 invitation link stays valid: the
+// 7-day expiry O&M stores on the pending invitation (HLD §8.2.2 step 4).
+const InvitationLifespan = 7 * 24 * time.Hour
 
 // DefaultConvertTimeout bounds a detached RP-3 conversion. The LLD budget is
 // p95 ≤ 8s + ~0.3s per migrated user (§11.1), so 10 minutes covers ~2,000
@@ -106,6 +125,21 @@ func (s *ProvisioningService) WithConvertTimeout(d time.Duration) *ProvisioningS
 	return s
 }
 
+// WithRealmOwners sets the cross-tenant realm-name lookup RP-3 consults
+// before creating or resuming into tenant-<slug> (RP-D20) and returns s.
+func (s *ProvisioningService) WithRealmOwners(o port.DedicatedRealmOwners) *ProvisioningService {
+	s.realmOwners = o
+	return s
+}
+
+// WithShardLoads sets the cross-tenant per-shard realm counts that shard
+// placement reads (§9.5) and returns s. It must be backed by the BYPASSRLS
+// sysPool.
+func (s *ProvisioningService) WithShardLoads(l port.ShardLoads) *ProvisioningService {
+	s.shardLoads = l
+	return s
+}
+
 // Drain waits for detached conversions to finish, or for ctx to be done.
 // Called at shutdown before the pools close; a conversion cut off by the
 // shutdown budget leaves its key in_progress until the ledger lease expires,
@@ -120,6 +154,24 @@ func (s *ProvisioningService) Drain(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// WithWebEntry sets the web app's base URL (e.g. https://app.bcbpsolutions.com)
+// and its OIDC client (tender-web), so the verify and invitation emails end
+// on the tenant's workspace URL <baseURL>/t/<slug>/ (HLD §8.2.7: the emailed
+// link carries the workspace). Returns s for chaining.
+func (s *ProvisioningService) WithWebEntry(baseURL, clientID string) *ProvisioningService {
+	s.webBaseURL, s.webClientID = strings.TrimRight(baseURL, "/"), clientID
+	return s
+}
+
+// workspaceLink is the email link for slug, or nil when the web entry is not
+// configured or the slug is unknown (Keycloak then shows its own page).
+func (s *ProvisioningService) workspaceLink(slug string) *port.ActionLink {
+	if s.webBaseURL == "" || s.webClientID == "" || slug == "" {
+		return nil
+	}
+	return &port.ActionLink{ClientID: s.webClientID, RedirectURI: s.webBaseURL + "/t/" + url.PathEscape(slug) + "/"}
 }
 
 // WithLogger attaches a logger and returns s for chaining.
@@ -421,6 +473,7 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 	kcUserID, err := s.keycloak.CreateTrialUser(ctx, port.CreateUserRequest{
 		Email: req.AdminEmail, FullName: req.AdminName, TenantID: req.TenantID,
 		HashedPasswordSeed: req.HashedPasswordSeed, EmailVerified: false,
+		Link: s.workspaceLink(req.TenantSlug),
 	})
 	if isUserEmailConflict(err) {
 		kcUserID, err = s.resolveUserCreateConflict(ctx, s.sharedRealm, req.AdminEmail, req.TenantID, err)
@@ -449,7 +502,7 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 	err = s.tx.RunInTx(ctx, func(ctx context.Context) error {
 		if err := s.realms.Upsert(ctx, &domain.TenantRealm{
 			TenantID: req.TenantID, RealmName: s.sharedRealm, Strategy: domain.RealmStrategyShared,
-			Status:                    domain.RealmStatusActive,
+			Status: domain.RealmStatusActive, TenantSlug: &req.TenantSlug,
 			ServiceAccountPrincipalID: &principalID, ServiceAccountKeycloakClientID: &automationClientID,
 		}); err != nil {
 			return err
@@ -494,11 +547,15 @@ func tenantIdentityProvisionedEvent(ctx context.Context, tenantID, ownerUserID u
 }
 
 // selectShard places a new dedicated realm on the least-loaded shard,
-// reading current per-shard counts from the local mirror (§9.5). Ties
+// reading current per-shard counts across every tenant from the local
+// mirror (§9.5). Ties
 // break deterministically by shard id (lexicographic) so two concurrent
 // placements don't thrash.
 func (s *ProvisioningService) selectShard(ctx context.Context) (string, error) {
-	counts, err := s.realms.CountsByShard(ctx)
+	if s.shardLoads == nil {
+		return "", errors.New("provisioning: shard loads not configured")
+	}
+	counts, err := s.shardLoads.CountsByShard(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -639,6 +696,7 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 			TenantID: req.TenantID, RealmName: realmName, Strategy: domain.RealmStrategyDedicated,
 			KeycloakShard: &shard, Status: domain.RealmStatusActive, ConvertedAt: nowPtr(),
 			ServiceAccountPrincipalID: &principalID, ServiceAccountKeycloakClientID: &automationClientID,
+			TenantSlug: &req.TenantSlug,
 		}); err != nil {
 			return err
 		}
@@ -786,21 +844,30 @@ func (s *ProvisioningService) convertClaimed(ctx context.Context, idempotencyKey
 		return nil, domain.NewError(domain.ErrRealmAlreadyDedicated, "tenant is already dedicated").WithDetails(map[string]any{"tenant_id": tenantID})
 	}
 
-	// derive a slug from the tenant id when none is tracked locally (this
-	// service persists no tenant_slug — see §5.2.1 field disposition); a
-	// caller-visible slug MUST be supplied via the realm-name convention
-	// upstream. Convert's request body carries no slug per §5.2, so this
-	// derives a stable name from the tenant id. Uses the FULL uuid, not a
-	// truncated prefix: the realm-name collision below is now treated as
-	// proof of "my own earlier partial attempt" and resumed against
-	// (rather than always a hard error), so an 8-hex-char (32-bit) prefix
-	// would let two different tenants collide onto the same realm at
-	// large-enough scale and have the second tenant's users migrated into
-	// the first tenant's realm — a tenant-isolation violation. The full
-	// UUID carries the same 128 bits of collision resistance this service
-	// already relies on for tenant-id uniqueness itself.
-	slug := tenantID.String()
+	// The dedicated realm is tenant-<slug> (HLD §4.2), the slug recorded at
+	// RP-1 (RP-D20) — RP-3's body carries none. The realm-name conflict
+	// below is resumed as this tenant's own earlier partial attempt, so
+	// first make sure no other live tenant holds the name: resuming into
+	// its realm would migrate this tenant's users into another tenant.
+	if current.TenantSlug == nil || *current.TenantSlug == "" {
+		s.failIdempotency(ctx, idempotencyKey)
+		return nil, domain.NewError(domain.ErrRealmNameUnavailable, "no tenant_slug is recorded for this tenant").
+			WithDetails(map[string]any{"tenant_id": tenantID})
+	}
+	slug := *current.TenantSlug
 	realmName := dedicatedRealmName(slug)
+	if s.realmOwners != nil {
+		owner, ok, err := s.realmOwners.DedicatedRealmOwner(ctx, realmName)
+		if err != nil {
+			s.failIdempotency(ctx, idempotencyKey)
+			return nil, err
+		}
+		if ok && owner != tenantID {
+			s.failIdempotency(ctx, idempotencyKey)
+			return nil, domain.NewError(domain.ErrRealmNameUnavailable, "the dedicated realm name is held by another tenant").
+				WithDetails(map[string]any{"tenant_id": tenantID, "realm": realmName})
+		}
+	}
 	shard, err := s.selectShard(ctx)
 	if err != nil {
 		s.failIdempotency(ctx, idempotencyKey)
@@ -823,7 +890,8 @@ func (s *ProvisioningService) convertClaimed(ctx context.Context, idempotencyKey
 			s.failIdempotency(ctx, idempotencyKey)
 			return nil, err
 		}
-		// realmName is deterministic per tenant (dedicatedRealmName), and
+		// realmName is this tenant's recorded slug (immutable in O&M, unique
+		// across tenants), no other live tenant holds it (checked above), and
 		// current.Strategy read above is still shared, so this conflict
 		// cannot be a different tenant's realm — it can only be this
 		// tenant's own earlier attempt that got partway through this same
@@ -1039,6 +1107,9 @@ type CreateInvitedUserRequest struct {
 	Email           string
 	FullName        string
 	RequiredActions []string
+	// TenantSlug (required) builds the invitation link's /t/<slug>/ for
+	// both realm strategies — the shared trial realm's name carries no slug.
+	TenantSlug string
 }
 
 // CreateInvitedUserResult is the RP-5 response body.
@@ -1050,6 +1121,9 @@ type CreateInvitedUserResult struct {
 // tenant's realm (resolved from tenant_realms). No local persistence — RP
 // has no per-user table (§5.2.1).
 func (s *ProvisioningService) CreateInvitedUser(ctx context.Context, idempotencyKey string, tenantID uuid.UUID, req CreateInvitedUserRequest) (*CreateInvitedUserResult, error) {
+	if req.TenantSlug == "" {
+		return nil, domain.NewError(domain.ErrInvalidRequest, "tenant_slug is required: it builds the invitation link")
+	}
 	existing, found, err := s.idempotency.Begin(ctx, idempotencyKey, tenantID, domain.OpCreateInvitedUser)
 	if err != nil {
 		return nil, err
@@ -1073,6 +1147,17 @@ func (s *ProvisioningService) CreateInvitedUser(ctx context.Context, idempotency
 	if err != nil {
 		s.failIdempotency(ctx, idempotencyKey)
 		return nil, err
+	}
+	// The invitation email (HLD §8.2.2 step 4). An invitee has no password,
+	// so this link is their only way in: a send failure fails RP-5, and the
+	// caller's retry lands in the conflict resolution above and sends again.
+	if len(req.RequiredActions) > 0 {
+		if err := s.keycloak.SendActionsEmail(ctx, row.RealmName, userID, req.RequiredActions, InvitationLifespan, s.workspaceLink(req.TenantSlug)); err != nil {
+			s.failIdempotency(ctx, idempotencyKey)
+			return nil, err
+		}
+	} else {
+		s.log.WarnContext(ctx, "create_invited_user: no required actions, no invitation email sent", "tenant_id", tenantID)
 	}
 	result := &CreateInvitedUserResult{KeycloakUserID: userID}
 	body := marshalIdempotencyResult(ctx, s.log, "create_invited_user", result)

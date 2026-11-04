@@ -112,7 +112,7 @@ func (f *fakeKeycloakServer) handle(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case strings.HasSuffix(path, "/users/profile"):
-		// enableUnmanagedAttributes: GET then PUT the User Profile config.
+		// applyUserProfile: GET then PUT the User Profile config.
 		if r.Method == http.MethodGet {
 			writeJSON(w, http.StatusOK, `{"attributes":[]}`)
 			return

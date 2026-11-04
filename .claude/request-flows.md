@@ -116,7 +116,7 @@ POST /tenants/provision-direct {..., billing_subscription_id, terms_acceptance} 
   -> 201 {tenant_id, realm, strategy:"dedicated", keycloak_shard, oidc_clients, keycloak_user_id, email_verification_sent:true}
 ```
 
-Note `selectShard` reads `CountsByShard` from the **local mirror** of `tenant_realms` (this service is the single writer to Keycloak, so its own local count is authoritative without a live Keycloak query, §9.5).
+Note `selectShard` reads `CountsByShard` from the **local mirror** of `tenant_realms` (this service is the single writer to Keycloak, so its own local count is authoritative without a live Keycloak query, §9.5). The count is cross-tenant, so it goes through `port.ShardLoads`, wired to the **sysPool** repository (`WithShardLoads`, LLD v1.47). On the app pool the caller's tenant GUC would hide every other tenant's realm and log RLS violations; unwired, placement fails.
 
 ## RP-3: Trial → Dedicated Conversion (with user migration)
 
@@ -126,19 +126,17 @@ Note `selectShard` reads `CountsByShard` from the **local mirror** of `tenant_re
 POST /tenants/:id/convert {plan, billing_subscription_id, payment_method_id (accepted, never stored/used — PCI/Billing domain)}
   current := tenant_realms.FindByTenantID(tenant_id)
   current.Strategy != "shared" -> 409 realm_already_dedicated
-  slug := tenant_id.String()   -- the FULL uuid, not a truncated prefix (§9.3 fix below): Convert's request
-                                  body carries no slug (§5.2), and this service persists no tenant_slug of
-                                  its own, so a stable name is derived from the tenant id itself
-  realmName := "tenant-" + slug   -- 43 chars; CreateRealmFromTemplate must set only rep.Realm to this,
-                                     never Keycloak's internal REALM.ID PK (VARCHAR(36)) -- doing so once
-                                     overflowed that column on every real conversion, surfaced as an opaque
-                                     409 the conflict branch below misread as "resume a prior attempt" (fixed,
-                                     LLD rev 1.6)
+  current.TenantSlug == nil -> 409 realm_name_unavailable (no Keycloak call)
+  slug := *current.TenantSlug   -- recorded at RP-1/RP-2 (RP-D20, LLD rev 1.46); Convert's body carries none
+  realmName := "tenant-" + slug   -- CreateRealmFromTemplate sets only rep.Realm to this, never Keycloak's
+                                     internal REALM.ID PK (VARCHAR(36), LLD rev 1.6)
+  realmOwners.DedicatedRealmOwner(realmName)   -- sysPool, cross-tenant: another live tenant holds the name
+                                                  -> 409 realm_name_unavailable; lookup error -> fail
   shard := selectShard()
   realmMayHaveMigratedUsers := false
   Keycloak.CreateRealmFromTemplate(realmName, "v1")
-    conflict (ErrRealmAlreadyDedicated) -> realmName is deterministic per tenant and current.Strategy is
-                                            still "shared", so this can only be my OWN earlier partial
+    conflict (ErrRealmAlreadyDedicated) -> realmName is this tenant's slug, no other tenant holds it (checked
+                                            above) and current.Strategy is still "shared", so this can only be my OWN earlier partial
                                             attempt's realm -- resume against it, realmMayHaveMigratedUsers = true
     any other failure -> failIdempotency, return err (nothing created yet, no teardown needed)
   Keycloak.RegisterOIDCClients(realmName, slug)

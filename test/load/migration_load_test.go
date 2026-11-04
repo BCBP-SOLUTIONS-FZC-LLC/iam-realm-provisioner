@@ -144,12 +144,13 @@ func runConversionLoad(t *testing.T, n, rps int, callLatency time.Duration) load
 	idem := newLoadIdempotencyStore()
 	tx := &loadTxRunner{}
 
-	svc := service.NewProvisioningService(realms, idem, admin, loadTokenServiceClient{}, tx, nil, sharedRealm, []string{"kc-shard-1"}).WithLogger(noopLogger{})
+	svc := service.NewProvisioningService(realms, idem, admin, loadTokenServiceClient{}, tx, nil, sharedRealm, []string{"kc-shard-1"}).WithShardLoads(realms).WithLogger(noopLogger{})
 
 	tenantID := uuid.New()
+	loadSlug := "load-" + tenantID.String()[:8]
 	realms.seed(&domain.TenantRealm{
 		TenantID: tenantID, RealmName: sharedRealm, Strategy: domain.RealmStrategyShared,
-		Status: domain.RealmStatusActive, RecordVersion: 1,
+		Status: domain.RealmStatusActive, RecordVersion: 1, TenantSlug: &loadSlug,
 	})
 
 	userIDs := make([]uuid.UUID, n)

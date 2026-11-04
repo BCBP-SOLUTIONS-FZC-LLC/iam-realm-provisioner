@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/Nerzal/gocloak/v13"
 	"github.com/google/uuid"
@@ -121,10 +122,28 @@ func (a *Admin) CreateTrialUser(ctx context.Context, req port.CreateUserRequest)
 	if err != nil {
 		return uuid.Nil, wrapCreateUserErr("create_trial_user", req.Email, err)
 	}
+	a.sendVerifyEmail(ctx, tok, id, req.Link)
+	return uuid.Parse(id)
+}
+
+// sendVerifyEmail is best-effort, as before the link existed: a failure is
+// logged, never returned. A send with a link that Keycloak refuses (the
+// trial realm has no such client, or the redirect URI is not registered on
+// it) is retried once without the link, so a misconfigured link can only
+// cost the "back to application" button, never the email itself.
+func (a *Admin) sendVerifyEmail(ctx context.Context, tok, id string, link *port.ActionLink) {
+	if link != nil {
+		err := a.client.SendVerifyEmail(ctx, tok, id, "trial", gocloak.SendVerificationMailParams{
+			ClientID: gocloak.StringP(link.ClientID), RedirectURI: gocloak.StringP(link.RedirectURI),
+		})
+		if err == nil {
+			return
+		}
+		a.log.Warn("send verify email with link failed, retrying without it", map[string]any{"error": err.Error(), "user_id": id})
+	}
 	if err := a.client.SendVerifyEmail(ctx, tok, id, "trial"); err != nil {
 		a.log.Warn("send verify email failed", map[string]any{"error": err.Error(), "user_id": id})
 	}
-	return uuid.Parse(id)
 }
 
 // CreateInvitedUser creates a user in realmName with requiredActions
@@ -148,6 +167,29 @@ func (a *Admin) CreateInvitedUser(ctx context.Context, realmName string, req por
 		return uuid.Nil, wrapCreateUserErr("create_invited_user", req.Email, err)
 	}
 	return uuid.Parse(id)
+}
+
+// SendActionsEmail sends the execute-actions email (RP-5 invitation). Unlike
+// the trial verify email it returns its error: an invitee has no password,
+// so without this email they have no way in at all.
+func (a *Admin) SendActionsEmail(ctx context.Context, realmName string, userID uuid.UUID, actions []string, lifespan time.Duration, link *port.ActionLink) (err error) {
+	ctx, done := a.begin(ctx, "send_actions_email")
+	defer func() { done(err) }()
+
+	tok, err := a.token(ctx)
+	if err != nil {
+		return wrapErr("send_actions_email: token", err)
+	}
+	params := gocloak.ExecuteActionsEmail{
+		UserID:   gocloak.StringP(userID.String()),
+		Actions:  &actions,
+		Lifespan: gocloak.IntP(int(lifespan.Seconds())),
+	}
+	if link != nil {
+		params.ClientID = gocloak.StringP(link.ClientID)
+		params.RedirectURI = gocloak.StringP(link.RedirectURI)
+	}
+	return wrapErr("send_actions_email", a.client.ExecuteActionsEmail(ctx, tok, realmName, params))
 }
 
 // wrapCreateUserErr classifies a CreateUser failure: a 409 (Keycloak's

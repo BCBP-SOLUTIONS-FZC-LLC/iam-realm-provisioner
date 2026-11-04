@@ -35,6 +35,7 @@ var (
 	realmIdpRequiresDedicatedRealm      = problem.MustType("realm", "idp-requires-dedicated-realm", "IdP Requires Dedicated Realm", 409, "IDP_REQUIRES_DEDICATED_REALM")
 	realmAlreadyDedicated               = problem.MustType("realm", "realm-already-dedicated", "Realm Already Dedicated", 409, "REALM_ALREADY_DEDICATED")
 	realmRevertWindowExpired            = problem.MustType("realm", "revert-window-expired", "Revert Window Expired", 409, "REVERT_WINDOW_EXPIRED")
+	realmNameUnavailable                = problem.MustType("realm", "realm-name-unavailable", "Realm Name Unavailable", 409, "REALM_NAME_UNAVAILABLE")
 	realmTenantOffboarded               = problem.MustType("realm", "tenant-offboarded", "Tenant Offboarded", 409, "TENANT_OFFBOARDED")
 	realmOperationInProgress            = problem.MustType("realm", "operation-in-progress", "Operation In Progress", 409, "OPERATION_IN_PROGRESS")
 	realmOptimisticLockConflict         = problem.MustType("realm", "optimistic-lock-conflict", "Optimistic Lock Conflict", 409, "OPTIMISTIC_LOCK_CONFLICT")
@@ -72,6 +73,7 @@ var domainCodeTypes = map[domain.ErrorCode]problem.Type{
 	domain.ErrIdpRequiresDedicatedRealm:      realmIdpRequiresDedicatedRealm,
 	domain.ErrRealmAlreadyDedicated:          realmAlreadyDedicated,
 	domain.ErrRevertWindowExpired:            realmRevertWindowExpired,
+	domain.ErrRealmNameUnavailable:           realmNameUnavailable,
 	domain.ErrTenantOffboarded:               realmTenantOffboarded,
 	domain.ErrOperationInProgress:            realmOperationInProgress,
 	domain.ErrOptimisticLockConflict:         realmOptimisticLockConflict,

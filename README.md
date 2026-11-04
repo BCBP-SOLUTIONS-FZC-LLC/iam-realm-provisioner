@@ -172,6 +172,7 @@ iam-realm-provisioner/
 ├── docs/runbook.md                    # Operator procedures for the headline incident scenarios (§24)
 ├── docs/runbook-schema-registry.md    # Schema-governance operator runbook (shared iam-tenant-events registry)
 ├── .githooks/pre-commit               # tidy + fmt-check + vet + lint; installed via `make setup`/`make install-hooks`
+├── .githooks/pre-push                 # make trivy (image build + Trivy CVE scan); installed via `make setup`/`make install-hooks`
 ├── VERSIONING.md                      # SemVer policy + maintainer release process
 └── test/                              # test/unit (black-box), plus white-box tests colocated in internal/; test/postgres (RLS), test/integration, test/e2e, test/load, test/dbseed
 ```
@@ -398,7 +399,7 @@ Every job is idempotent per tenant (safe to re-run) and batched (`RECONCILER_BAT
 ```bash
 git clone https://github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner
 cd iam-realm-provisioner
-make setup       # copies .env-example → .env; installs .githooks/pre-commit (run once before anything else)
+make setup       # copies .env-example → .env; installs .githooks/pre-commit + pre-push (run once before anything else)
 make tidy        # go mod tidy
 make docker-up   # start Postgres + Floci + Floci UI + Keycloak + OpenBao
 make migrate-up  # apply pending migrations (the server also self-migrates at startup)
@@ -409,8 +410,9 @@ make run         # start the server on :8080 (metrics on :9090)
 
 | Command | Description |
 |---|---|
-| `make setup` | Copy `.env-example` → `.env`; install `.githooks/pre-commit` |
-| `make install-hooks` | Install `.githooks/pre-commit` (tidy + fmt-check + vet + lint); also run by `make setup` |
+| `make setup` | Copy `.env-example` → `.env`; install `.githooks/pre-commit` + `pre-push` |
+| `make install-hooks` | Install `.githooks/pre-commit` (tidy + fmt-check + vet + lint) and `.githooks/pre-push` (`make trivy`); also run by `make setup` |
+| `make trivy` | Build the image and Trivy-scan it like CI (CRITICAL/HIGH/UNKNOWN, fixed only); `GO_PRIVATE_TOKEN` or `gh auth token` supplies the build secret |
 | `make tidy` / `make fmt` / `make fmt-check` / `make vet` | Go basics; `fmt-check` mirrors CI, does not modify files |
 | `make lint` | `golangci-lint` via `go tool` — default build plus every test build tag |
 | `make arch-lint` | `go-arch-lint` dependency-rule enforcement + RP-INV-1/RLS-6 greps + observability/database/events architectural-invariant greps (gincommon/pgcommon/platform-events-only) |

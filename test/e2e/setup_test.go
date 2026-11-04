@@ -234,6 +234,14 @@ func runE2ESuite(m *testing.M) (int, error) {
 	}
 	defer appPool.Close()
 
+	// sysPool stands in for the server's BYPASSRLS pool (the superuser
+	// bypasses RLS) for the cross-tenant reads: shard counts, realm owners.
+	sysPool, err := pgcommon.NewPool(ctx, pgcommon.Config{DSN: superDSN, PGBouncerMode: false})
+	if err != nil {
+		return 0, fmt.Errorf("connect sys pool: %w", err)
+	}
+	defer sysPool.Close()
+
 	kcContainer, err := startKeycloakContainer(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("start keycloak container: %w", err)
@@ -285,9 +293,11 @@ func runE2ESuite(m *testing.M) (int, error) {
 	reconRepo := pgadapter.NewReconciliationRepository(appPool)
 	idempotencyRepo := pgadapter.NewIdempotencyRepository(appPool)
 
+	sysRealmRepo := pgadapter.NewTenantRealmRepository(sysPool)
 	provisioningSvc := service.NewProvisioningService(
 		tenantRealmRepo, idempotencyRepo, kcAdmin, fakeTokenService{}, txRunner, pgadapter.NewPendingAuditEntryRepository(appPool), sharedRealm, nil,
-	).WithLogger(noopLogger{})
+	).WithLogger(noopLogger{}).
+		WithRealmOwners(sysRealmRepo).WithShardLoads(sysRealmRepo)
 	lifecycleSvc := service.NewLifecycleService(
 		tenantRealmRepo, idempotencyRepo, kcAdmin, txRunner, sharedRealm,
 	).WithLogger(noopLogger{})

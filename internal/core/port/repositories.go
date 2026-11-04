@@ -9,6 +9,27 @@ import (
 	"github.com/google/uuid"
 )
 
+// DedicatedRealmOwners answers which live tenant holds a dedicated realm
+// name. It reads across tenants, so it is backed by the BYPASSRLS sysPool
+// (RP-D20: RP-3 resumes into an existing tenant-<slug> realm only when no
+// other tenant owns it).
+type DedicatedRealmOwners interface {
+	// DedicatedRealmOwner returns the tenant whose live dedicated row is
+	// named realmName, or ok=false when none is.
+	DedicatedRealmOwner(ctx context.Context, realmName string) (tenantID uuid.UUID, ok bool, err error)
+}
+
+// ShardLoads reports the live dedicated-realm count per keycloak_shard,
+// read from the local mirror (§9.5 shard placement — this service is the
+// single writer, so the count is authoritative without re-querying
+// Keycloak). It counts every tenant's realms, so it is backed by the
+// BYPASSRLS sysPool: on the app pool the request tenant's GUC hides every
+// other tenant's row and each hidden row is logged as a cross-tenant RLS
+// violation.
+type ShardLoads interface {
+	CountsByShard(ctx context.Context) (map[string]int, error)
+}
+
 // TenantRealmRepository persists `tenant_realms` (§4.2). Every method binds
 // the RLS GUC transaction-locally via the caller's ctx (RLS-6).
 type TenantRealmRepository interface {
@@ -22,11 +43,6 @@ type TenantRealmRepository interface {
 	// RP-C3 billing-lapse sweep (never operator suspensions, §8.8) whose
 	// disabled_at is older than retentionDays, limited to limit rows.
 	ListSuspendedPastRetention(ctx context.Context, retentionDays, limit int) ([]*domain.TenantRealm, error)
-	// CountsByShard returns the current live dedicated-realm count per
-	// keycloak_shard, read from the local mirror (§9.5 shard placement —
-	// this service is the single writer, so the count is authoritative
-	// without re-querying Keycloak).
-	CountsByShard(ctx context.Context) (map[string]int, error)
 	// IsTombstoned reports whether tenantID's tenant_realms row exists but
 	// is soft-deleted (deleted_at set — trial-hard-delete, orphaned-signup-
 	// reap, offboarding). FindByTenantID hides such a row, so this is how a

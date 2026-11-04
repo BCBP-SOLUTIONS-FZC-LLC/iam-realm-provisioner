@@ -90,8 +90,9 @@ func newTermsTestService(t *testing.T) *termsTestDeps {
 	idem := newMockIdempotencyStore()
 	tx, pub := newMockTxRunner()
 	audit := &mockPendingAuditEntryRepository{}
+	realms := newMockTenantRealmRepository()
 	d := &termsTestDeps{
-		svc: service.NewProvisioningService(newMockTenantRealmRepository(), idem, kc, ts, tx, audit, "trial", nil),
+		svc: service.NewProvisioningService(realms, idem, kc, ts, tx, audit, "trial", nil).WithShardLoads(realms),
 		kc:  kc, idem: idem, pub: pub, audit: audit, owner: uuid.New(),
 	}
 	kc.CreateTrialUserFn = func(context.Context, port.CreateUserRequest) (uuid.UUID, error) { return d.owner, nil }

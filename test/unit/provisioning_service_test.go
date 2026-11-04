@@ -22,7 +22,7 @@ func newProvisioningTestService(t *testing.T) (*service.ProvisioningService, *mo
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx, pub := newMockTxRunner()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil).WithShardLoads(realms)
 	return svc, kc, realms, idem, pub
 }
 
@@ -54,6 +54,8 @@ func TestProvisionTrial_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, domain.RealmStrategyShared, row.Strategy)
 	assert.Equal(t, domain.RealmStatusActive, row.Status)
+	require.NotNil(t, row.TenantSlug, "RP-D20: RP-3 later names the realm from it")
+	assert.Equal(t, "acme", *row.TenantSlug)
 
 	// Exactly one TenantIdentityProvisioned event (the BFF-2 signup
 	// backstop), carrying the request's tenant fields verbatim.
@@ -163,7 +165,7 @@ func TestProvisionTrial_MintPlatformAutomation_RegisterPrincipalFails_OrphanedCl
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx, _ := newMockTxRunner()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil).WithShardLoads(realms)
 
 	tenantID := uuid.New()
 	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
@@ -200,7 +202,7 @@ func TestProvisionTrial_MintPlatformAutomation_RegisterPrincipalFails_ResumedCli
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx, _ := newMockTxRunner()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil).WithShardLoads(realms)
 
 	tenantID := uuid.New()
 	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
@@ -236,7 +238,7 @@ func TestProvisionTrial_MintPlatformAutomation_IssueOrRotateCredentialFails_Clie
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx, _ := newMockTxRunner()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil).WithShardLoads(realms)
 
 	tenantID := uuid.New()
 	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
@@ -267,7 +269,7 @@ func TestProvisionTrial_MintPlatformAutomation_IssueOrRotateCredentialFails_Resu
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx, _ := newMockTxRunner()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil).WithShardLoads(realms)
 
 	tenantID := uuid.New()
 	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return uuid.New(), nil }
@@ -581,7 +583,7 @@ func TestProvisionTrial_NoEventPublisherInContext_StillCommitsLocally(t *testing
 	realms := newMockTenantRealmRepository()
 	idem := newMockIdempotencyStore()
 	tx := newMockTxRunnerNoPublisher()
-	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil)
+	svc := service.NewProvisioningService(realms, idem, kc, ts, tx, &mockPendingAuditEntryRepository{}, "trial", nil).WithShardLoads(realms)
 	tenantID := uuid.New()
 	kcUserID := uuid.New()
 	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) { return kcUserID, nil }
