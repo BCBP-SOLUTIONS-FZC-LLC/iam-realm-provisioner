@@ -219,6 +219,22 @@ func TestMigrationLoad_FullScale500(t *testing.T) {
 	result := runConversionLoad(t, n, rps, callLatency)
 	result.logSummary(t)
 	assertRateLimiterBudget(t, result)
+	assertP95SLO(t, result)
+}
+
+// assertP95SLO asserts the p95 per-user migration latency is below 2s even
+// on the fake Keycloak (loopback, ~2ms simulated latency per call). The LLD
+// §21.2 SLO of p95 ≤ 8s + ~0.3s/user at N=500 is for real production
+// Keycloak — this service's own rate-limiter and loop overhead alone should
+// never account for more than 2s p95. A regression that slows the loop past
+// 2s fake-latency p95 would be even worse in production. (L7)
+func assertP95SLO(t *testing.T, r loadRunResult) {
+	t.Helper()
+	sorted := append([]time.Duration(nil), r.latencies...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	p95 := percentile(sorted, 0.95)
+	require.Less(t, p95.Milliseconds(), int64(2000),
+		"p95 per-user migration latency %s exceeds 2s even on fake Keycloak — rate limiter or loop regression", p95)
 }
 
 // assertRateLimiterBudget asserts the achieved per-user migration

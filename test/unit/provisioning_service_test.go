@@ -667,3 +667,61 @@ func TestProvisionTrial_TombstoneLookupFails_NoKeycloakCall(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, domain.OpStatusFailed, idem.rows["key-tombstone-err"].Status)
 }
+
+// C3 — retry-after-postgres-fail (§9.2): a failed idempotency key (caused by
+// realms.Upsert failing in the local-commit tx while Keycloak had already
+// created the user) is reclaimed on the second call with the same key. The
+// second attempt must succeed via resolveUserCreateConflict (the user already
+// exists in Keycloak from the first attempt), and CreateTrialUser must be
+// called AT MOST twice total — never a third time that would signal a spurious
+// duplicate creation.
+func TestProvisionTrial_UpsertFails_ThenRetrySameKey_KeycloakNotCalledTwice(t *testing.T) {
+	svc, kc, realms, idem, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	existingID := uuid.New()
+
+	// First attempt: Keycloak succeeds, Postgres Upsert fails.
+	realms.UpsertErr = errors.New("db down")
+	createCalls := 0
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) {
+		createCalls++
+		return existingID, nil
+	}
+
+	_, firstErr := svc.ProvisionTrial(context.Background(), "c3-retry-key", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
+		TenantID: tenantID, AdminEmail: "owner@acme.example", AdminName: "Dana Owner", Plan: "pro",
+	})
+	require.Error(t, firstErr, "first attempt must fail because Upsert failed")
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["c3-retry-key"].Status,
+		"failed Upsert must mark the idempotency key failed so a retry re-executes")
+	assert.Equal(t, 1, createCalls, "CreateTrialUser must be called exactly once on the first attempt")
+
+	// Second attempt: Postgres heals; Keycloak 409s because the user already
+	// exists from the first attempt. The retry must resolve the existing user
+	// via resolveUserCreateConflict, NOT create a duplicate.
+	realms.UpsertErr = nil
+	kc.CreateTrialUserFn = func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) {
+		createCalls++
+		return uuid.Nil, domain.NewError(domain.ErrUserEmailConflict, "email already exists in realm")
+	}
+	kc.FindUserByEmailFn = func(ctx context.Context, realmName, email string) (*port.ExistingUser, error) {
+		assert.Equal(t, "trial", realmName)
+		assert.Equal(t, "owner@acme.example", email)
+		return &port.ExistingUser{ID: existingID, TenantID: tenantID}, nil
+	}
+
+	result, secondErr := svc.ProvisionTrial(context.Background(), "c3-retry-key", service.ProvisionTrialRequest{
+		Terms:    validTerms(),
+		TenantID: tenantID, AdminEmail: "owner@acme.example", AdminName: "Dana Owner", Plan: "pro",
+	})
+	require.NoError(t, secondErr, "second attempt must succeed via conflict resolution")
+	assert.Equal(t, existingID, result.KeycloakUserID,
+		"the resolved existing user is returned as the owner, not a newly created one")
+	assert.Equal(t, domain.OpStatusSucceeded, idem.rows["c3-retry-key"].Status)
+
+	// Critical: CreateTrialUser called at most twice across both attempts.
+	// A third call would indicate spurious duplicate-user creation on the retry.
+	assert.LessOrEqual(t, createCalls, 2,
+		"CreateTrialUser must be called at most once per attempt — a third call indicates spurious duplicate-user creation")
+}

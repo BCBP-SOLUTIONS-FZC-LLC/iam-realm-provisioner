@@ -3,6 +3,8 @@ package jobs
 import (
 	"context"
 	"time"
+
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 )
 
 // OutboxPrune calls platform-events' outbox.Runner.PrunePublished on a
@@ -20,6 +22,9 @@ func OutboxPrune(ctx context.Context, jctx *Context) (Result, error) {
 	}
 	res.Attempted = int(n)
 	res.Succeeded = int(n)
+	if n > 0 {
+		metrics.PruneRowsTotal.WithLabelValues("outbox", "outbox_events").Add(float64(n))
+	}
 	jctx.Logger.InfoContext(ctx, "outbox-prune complete", "pruned", n)
 	return res, nil
 }

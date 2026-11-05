@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 )
 
@@ -40,6 +41,9 @@ func ProcessedEventsPrune(ctx context.Context, jctx *Context) (Result, error) {
 		n, err := jctx.ProcessedEvents.Prune(ctx, consumer, retention, batchLimit)
 		res.Attempted += int(n)
 		res.Succeeded += int(n)
+		if n > 0 {
+			metrics.PruneRowsTotal.WithLabelValues("processed_events", "processed_events").Add(float64(n))
+		}
 		if err != nil {
 			return res, err
 		}

@@ -150,7 +150,7 @@ func (s *LifecycleService) Reactivate(ctx context.Context, idempotencyKey string
 		return nil, err
 	}
 	if found {
-		return replayOrConflict[ReactivateResult](existing)
+		return replayOrConflict[ReactivateResult](existing, "reactivate")
 	}
 
 	row, err := s.realms.FindByTenantID(ctx, tenantID)
@@ -245,7 +245,7 @@ func (s *LifecycleService) ExpireTrial(ctx context.Context, idempotencyKey strin
 		return nil, err
 	}
 	if found {
-		return replayOrConflict[ExpireTrialResult](existing)
+		return replayOrConflict[ExpireTrialResult](existing, "expire_trial")
 	}
 
 	row, err := s.realms.FindByTenantID(ctx, tenantID)
@@ -322,7 +322,7 @@ func (s *LifecycleService) Suspend(ctx context.Context, idempotencyKey string, t
 		return nil, err
 	}
 	if found {
-		return replayOrConflict[SuspendResult](existing)
+		return replayOrConflict[SuspendResult](existing, "suspend")
 	}
 
 	row, err := s.realms.FindByTenantID(ctx, tenantID)

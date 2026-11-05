@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/httpx"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 )
@@ -105,10 +106,12 @@ func (c *Client) writeKV(ctx context.Context, logicalPath string, data map[strin
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
+		metrics.OpenBaoErrorsTotal.WithLabelValues("write_secret", "error").Inc()
 		return wrapErr("write_secret", err)
 	}
 	defer closeBody(c.log, "write_secret", resp.Body)
 	if resp.StatusCode >= 300 {
+		metrics.OpenBaoErrorsTotal.WithLabelValues("write_secret", "error").Inc()
 		return statusErr("write_secret", resp)
 	}
 	return nil
@@ -127,6 +130,7 @@ func (c *Client) readKV(ctx context.Context, logicalPath string) (map[string]any
 	req.Header.Set("X-Vault-Token", tok)
 	resp, err := c.http.Do(req)
 	if err != nil {
+		metrics.OpenBaoErrorsTotal.WithLabelValues("read_secret", "error").Inc()
 		return nil, wrapErr("read_secret", err)
 	}
 	defer closeBody(c.log, "read_secret", resp.Body)
@@ -134,6 +138,7 @@ func (c *Client) readKV(ctx context.Context, logicalPath string) (map[string]any
 		return nil, domain.NewError(domain.ErrIdpConfigNotFound, "no secret at this path")
 	}
 	if resp.StatusCode >= 300 {
+		metrics.OpenBaoErrorsTotal.WithLabelValues("read_secret", "error").Inc()
 		return nil, statusErr("read_secret", resp)
 	}
 	var out struct {
@@ -163,10 +168,12 @@ func (c *Client) deleteKV(ctx context.Context, logicalPath string) error {
 	req.Header.Set("X-Vault-Token", tok)
 	resp, err := c.http.Do(req)
 	if err != nil {
+		metrics.OpenBaoErrorsTotal.WithLabelValues("delete_secret", "error").Inc()
 		return wrapErr("delete_secret", err)
 	}
 	defer closeBody(c.log, "delete_secret", resp.Body)
 	if resp.StatusCode >= 300 && resp.StatusCode != http.StatusNotFound {
+		metrics.OpenBaoErrorsTotal.WithLabelValues("delete_secret", "error").Inc()
 		return statusErr("delete_secret", resp)
 	}
 	return nil
@@ -198,10 +205,12 @@ func (c *Client) token(ctx context.Context) (string, error) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
+		metrics.OpenBaoErrorsTotal.WithLabelValues("kubernetes_login", "error").Inc()
 		return "", wrapErr("kubernetes_login", err)
 	}
 	defer closeBody(c.log, "kubernetes_login", resp.Body)
 	if resp.StatusCode >= 300 {
+		metrics.OpenBaoErrorsTotal.WithLabelValues("kubernetes_login", "error").Inc()
 		return "", statusErr("kubernetes_login", resp)
 	}
 	var out struct {

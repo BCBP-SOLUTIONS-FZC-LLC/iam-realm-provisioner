@@ -117,7 +117,7 @@ func (s *IdpService) ConfigureIdp(ctx context.Context, idempotencyKey string, te
 		return nil, err
 	}
 	if found {
-		return replayOrConflict[ConfigureIdpResult](existing)
+		return replayOrConflict[ConfigureIdpResult](existing, "idp_configure")
 	}
 
 	realm, err := s.realms.FindByTenantID(ctx, tenantID)

@@ -49,6 +49,7 @@ type RouterConfig struct {
 	SysPostgres Pinger
 	Outbox      Pinger
 	Keycloak    Pinger
+	OpenBao     Pinger
 }
 
 // Router owns the Gin engine for this service.
@@ -93,10 +94,11 @@ type healthHandlers struct {
 	sysPostgres Pinger
 	outbox      Pinger
 	keycloak    Pinger
+	openBao     Pinger
 }
 
 func registerInfraRoutes(r *gin.Engine, cfg RouterConfig) {
-	h := &healthHandlers{postgres: cfg.Postgres, sysPostgres: cfg.SysPostgres, outbox: cfg.Outbox, keycloak: cfg.Keycloak}
+	h := &healthHandlers{postgres: cfg.Postgres, sysPostgres: cfg.SysPostgres, outbox: cfg.Outbox, keycloak: cfg.Keycloak, openBao: cfg.OpenBao}
 	r.GET("/healthz", h.healthz)
 	r.GET("/readyz", h.readyz)
 	// /metrics is served on its own dedicated port (METRICS_PORT, §3.1) —
@@ -126,6 +128,7 @@ func (h *healthHandlers) readyz(c *gin.Context) {
 		{"sys_database", h.sysPostgres},
 		{"outbox", h.outbox},
 		{"keycloak", h.keycloak},
+		{"openbao", h.openBao},
 	}
 
 	type result struct {

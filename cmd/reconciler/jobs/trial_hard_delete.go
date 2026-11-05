@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 )
 
@@ -27,9 +28,11 @@ func TrialHardDelete(ctx context.Context, jctx *Context) (Result, error) {
 		if err := hardDeleteTrialTenant(ctx, jctx, tenantID); err != nil {
 			jctx.Logger.WarnContext(ctx, "trial-hard-delete: defer", "tenant_id", tenantID, "error", err.Error())
 			res.Failed++
+			metrics.TrialHardDeleteTotal.WithLabelValues("failed").Inc()
 			continue
 		}
 		res.Succeeded++
+		metrics.TrialHardDeleteTotal.WithLabelValues("succeeded").Inc()
 	}
 	jctx.Logger.InfoContext(ctx, "trial-hard-delete complete", "attempted", res.Attempted, "succeeded", res.Succeeded, "failed", res.Failed)
 	return res, nil

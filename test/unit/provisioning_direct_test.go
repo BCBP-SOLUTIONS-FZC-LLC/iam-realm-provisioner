@@ -319,6 +319,9 @@ func TestProvisionDirect_TeardownFailure_LoggedNotEscalated(t *testing.T) {
 		return nil, originalErr
 	}
 	kc.DeleteRealmIfExistsFn = func(ctx context.Context, realmName string) error {
+		// M10: compensating teardown must run on a detached context — verify
+		// the context is not already cancelled (e.g. by a request timeout).
+		assert.NoError(t, ctx.Err(), "compensating teardown must use a detached context, not the cancelled request context")
 		return errors.New("teardown transport error")
 	}
 

@@ -3,6 +3,8 @@ package jobs
 import (
 	"context"
 	"time"
+
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 )
 
 // LedgerPrune deletes rows past their retention window from the tables no
@@ -24,12 +26,18 @@ func LedgerPrune(ctx context.Context, jctx *Context) (Result, error) {
 	ops, err := jctx.Retention.PruneProvisioningOperations(ctx, time.Duration(jctx.ProvisioningOperationsTTLDays)*day, jctx.BatchLimit)
 	res.Attempted += int(ops)
 	res.Succeeded += int(ops)
+	if ops > 0 {
+		metrics.PruneRowsTotal.WithLabelValues("ledger", "provisioning_operations").Add(float64(ops))
+	}
 	if err != nil {
 		return res, err
 	}
 	rls, err := jctx.Retention.PruneRLSViolationLog(ctx, time.Duration(jctx.RLSViolationLogTTLDays)*day, jctx.BatchLimit)
 	res.Attempted += int(rls)
 	res.Succeeded += int(rls)
+	if rls > 0 {
+		metrics.PruneRowsTotal.WithLabelValues("ledger", "rls_violation_log").Add(float64(rls))
+	}
 	if err != nil {
 		return res, err
 	}

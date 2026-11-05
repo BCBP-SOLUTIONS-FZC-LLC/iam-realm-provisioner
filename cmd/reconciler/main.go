@@ -82,6 +82,17 @@ func run() int {
 	}
 
 	appEnv := resolveAppEnv()
+
+	// Job-specific fail-fast: reject missing dependencies for the jobs that
+	// actually need them, rather than silently degrading mid-run (M7).
+	if jobName == "subscription-lapse" && !isDevEnv(appEnv) && os.Getenv("ORG_MEMBERSHIP_BASE_URL") == "" {
+		die("startup aborted: subscription-lapse requires ORG_MEMBERSHIP_BASE_URL — the suspend phase polls O&M's I-16 subscription-lapse endpoint")
+		return 1
+	}
+	if jobName == "orphaned-signup-reap" && !isDevEnv(appEnv) && os.Getenv("TOKEN_SERVICE_BASE_URL") == "" {
+		die("startup aborted: orphaned-signup-reap requires TOKEN_SERVICE_BASE_URL — TS-7 principal revocation on reap requires it")
+		return 1
+	}
 	rawLog, err := logger.NewLogger(loggerEnv(appEnv))
 	if err != nil {
 		panic("init logger: " + err.Error())
@@ -244,7 +255,7 @@ func run() int {
 	// registered principal when it is missing.
 	var tokenService port.TokenServiceClient
 	if tsBaseURL := envOr("TOKEN_SERVICE_BASE_URL", ""); tsBaseURL != "" {
-		tokenService = tokenserviceclient.New(tsBaseURL, rawLog)
+		tokenService = tokenserviceclient.New(tsBaseURL, envDuration("TOKEN_SERVICE_TIMEOUT", 5*time.Second), rawLog)
 	}
 
 	var outboxRunner *outbox.Runner

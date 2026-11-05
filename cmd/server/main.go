@@ -291,7 +291,7 @@ func main() {
 	}, log)
 
 	orgMembershipClient := orgmembershipclient.New(mustEnv("ORG_MEMBERSHIP_BASE_URL", appEnv), envDuration("ORG_MEMBERSHIP_TIMEOUT_MS", 5*time.Second), log)
-	tokenServiceClient := tokenserviceclient.New(mustEnv("TOKEN_SERVICE_BASE_URL", appEnv), log)
+	tokenServiceClient := tokenserviceclient.New(mustEnv("TOKEN_SERVICE_BASE_URL", appEnv), envDuration("TOKEN_SERVICE_TIMEOUT", 5*time.Second), log)
 
 	objectStore := s3adapter.New(s3Client, s3adapter.Config{
 		Bucket: envOr("REALM_EXPORT_BUCKET", "iam-realm-exports"),
@@ -444,6 +444,11 @@ func main() {
 			defer cancel()
 			return keycloakAdmin.Ready(pingCtx)
 		}),
+		OpenBao: pingerFunc(func(ctx context.Context) error {
+			pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			return openbaoClient.Ping(pingCtx)
+		}),
 	})
 
 	// ── 11. Graceful shutdown ─────────────────────────────────────────────
@@ -498,16 +503,21 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), httpDrainTimeout)
 	defer cancel()
 	var drain sync.WaitGroup
-	drain.Add(2)
+	drain.Add(1)
 	go func() {
 		defer drain.Done()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Error("HTTP server shutdown error", map[string]interface{}{"error": err.Error()})
 		}
+	}()
+	drain.Add(1)
+	go func() {
+		defer drain.Done()
 		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
 			log.Error("metrics server shutdown error", map[string]interface{}{"error": err.Error()})
 		}
 	}()
+	drain.Add(1)
 	go func() {
 		defer drain.Done()
 		if err := provisioningSvc.Drain(shutdownCtx); err != nil {
@@ -654,6 +664,10 @@ func validateRequiredEnv(appEnv string) {
 		{"TOKEN_SERVICE_BASE_URL", true, "Token Service base URL — TS-1/TS-4 mint/rotate handshake (§2.5, RP-17)"},
 		{"SNS_TOPIC_TENANT_ARN", true, "iam-tenant-events topic ARN; events queue in outbox but never publish without it"},
 		{"GLUE_REGISTRY_TENANT_NAME", true, "iam-tenant-events Glue registry name; NoopCodec (plain JSON) used without it"},
+		{"AUDIT_LOG_BASE_URL", true, "Audit Log AL-5 direct-write endpoint — TenantIdpConfigChanged and TermsAccepted audit entries accumulate forever without it"},
+		{"BAO_ADDR", true, "OpenBao/Vault address — IdP operations (RP-6/RP-7) fail at runtime without it"},
+		{"BAO_AUTH_ROLE", true, "OpenBao Kubernetes auth role — IdP operations (RP-6/RP-7) fail at runtime without it"},
+		{"WEB_APP_BASE_URL", true, "SPA base URL embedded in Keycloak invitation emails (RP-5) — wrong value silently sends invitation links to the wrong host"},
 	}
 	var missing []string
 	for _, r := range reqs {
