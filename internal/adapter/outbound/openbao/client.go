@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/httpx"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 )
@@ -105,10 +106,12 @@ func (c *Client) writeKV(ctx context.Context, logicalPath string, data map[strin
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
+		recordError("write_secret")
 		return wrapErr("write_secret", err)
 	}
 	defer closeBody(c.log, "write_secret", resp.Body)
 	if resp.StatusCode >= 300 {
+		recordError("write_secret")
 		return statusErr("write_secret", resp)
 	}
 	return nil
@@ -127,6 +130,7 @@ func (c *Client) readKV(ctx context.Context, logicalPath string) (map[string]any
 	req.Header.Set("X-Vault-Token", tok)
 	resp, err := c.http.Do(req)
 	if err != nil {
+		recordError("read_secret")
 		return nil, wrapErr("read_secret", err)
 	}
 	defer closeBody(c.log, "read_secret", resp.Body)
@@ -134,6 +138,7 @@ func (c *Client) readKV(ctx context.Context, logicalPath string) (map[string]any
 		return nil, domain.NewError(domain.ErrIdpConfigNotFound, "no secret at this path")
 	}
 	if resp.StatusCode >= 300 {
+		recordError("read_secret")
 		return nil, statusErr("read_secret", resp)
 	}
 	var out struct {
@@ -163,10 +168,12 @@ func (c *Client) deleteKV(ctx context.Context, logicalPath string) error {
 	req.Header.Set("X-Vault-Token", tok)
 	resp, err := c.http.Do(req)
 	if err != nil {
+		recordError("delete_secret")
 		return wrapErr("delete_secret", err)
 	}
 	defer closeBody(c.log, "delete_secret", resp.Body)
 	if resp.StatusCode >= 300 && resp.StatusCode != http.StatusNotFound {
+		recordError("delete_secret")
 		return statusErr("delete_secret", resp)
 	}
 	return nil
@@ -198,10 +205,12 @@ func (c *Client) token(ctx context.Context) (string, error) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
+		recordError("kubernetes_login")
 		return "", wrapErr("kubernetes_login", err)
 	}
 	defer closeBody(c.log, "kubernetes_login", resp.Body)
 	if resp.StatusCode >= 300 {
+		recordError("kubernetes_login")
 		return "", statusErr("kubernetes_login", resp)
 	}
 	var out struct {
@@ -217,6 +226,15 @@ func (c *Client) token(ctx context.Context) (string, error) {
 	// 30s safety margin, mirroring the Keycloak admin-token cache pattern.
 	c.expiresAt = time.Now().Add(time.Duration(out.Auth.LeaseDuration)*time.Second - 30*time.Second)
 	return c.cachedToken, nil
+}
+
+// recordError increments OpenBaoErrorsTotal when it has been registered.
+// The openbao package is a low-level adapter whose tests do not call
+// metrics.Register(), so the counter may be nil in unit-test contexts.
+func recordError(op string) {
+	if metrics.OpenBaoErrorsTotal != nil {
+		metrics.OpenBaoErrorsTotal.WithLabelValues(op, "error").Inc()
+	}
 }
 
 func wrapErr(op string, err error) error {

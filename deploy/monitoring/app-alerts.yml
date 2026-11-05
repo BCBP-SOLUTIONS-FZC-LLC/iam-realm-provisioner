@@ -155,6 +155,7 @@ groups:
       - alert: IAMRealmProvisionerAdminTokenRefresh401Spike
         expr: |
           increase(iam_realm_provisioner_admin_token_refresh_total{trigger="401"}[15m]) > 3
+        for: 2m
         labels:
           severity: warning
           team: platform
@@ -546,3 +547,61 @@ groups:
           summary: "Audit-log entries (TenantIdpConfigChanged, TermsAccepted) are not reaching Audit Log"
           description: >-
             pending_audit_entries has held undelivered rows for 30 minutes: Audit Log is unreachable, does not know the entry type yet (422 UNKNOWN_ENTRY_TYPE, retried), or AUDIT_LOG_BASE_URL is unset (the drainer is then off). Nothing is lost — rows deliver once the cause is fixed.
+
+      # ── OpenBao auth/KV errors (C2 — no prior alert existed) ─────────────
+      # iam_realm_provisioner_openbao_errors_total is defined in
+      # internal/adapter/outbound/metrics/metrics.go.
+      - alert: IAMRealmProvisionerOpenBaoErrors
+        expr: |
+          sum(rate(iam_realm_provisioner_openbao_errors_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          runbook: "docs/observability/runbooks.md#iamrealmprovisioneropenbaoerrors"
+          summary: iam-realm-provisioner OpenBao operations are failing
+          description: >-
+            OpenBao KV or Kubernetes-auth operations are returning errors
+            (iam_realm_provisioner_openbao_errors_total{op}). RP-6/RP-7
+            (IdP configure/remove) will fail completely when OpenBao is
+            unreachable. Check pod ServiceAccount token validity, OpenBao
+            health, and BAO_ADDR/BAO_AUTH_ROLE configuration.
+
+      # ── RP-C2 trial-hard-delete GDPR failures (M2 — no prior alert) ───────
+      # iam_realm_provisioner_trial_hard_delete_total is defined in
+      # internal/adapter/outbound/metrics/metrics.go.
+      - alert: IAMRealmProvisionerTrialHardDeleteFailure
+        expr: |
+          max by (domain, service, environment) (iam_realm_provisioner_trial_hard_delete_total{service="iam-realm-provisioner", cronjob="trial-hard-delete", result="failed"}) > 0
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          runbook: "docs/observability/runbooks.md#iamrealmprovisionertrialharddeletefailure"
+          summary: iam-realm-provisioner trial-hard-delete (RP-C2) GDPR erasure is failing
+          description: >-
+            {{ $value | humanize }} trial tenant(s) failed GDPR hard-delete
+            in the last trial-hard-delete CronJob run (RP-C2). PII erasure
+            and Keycloak user deletion are not completing on schedule.
+            Check reconciler logs for Keycloak or database errors.
+
+      # ── Prune jobs not deleting rows — table growth risk (M3) ──────────────
+      # iam_realm_provisioner_prune_rows_total is defined in
+      # internal/adapter/outbound/metrics/metrics.go.
+      - alert: IAMRealmProvisionerPruneJobsStale
+        expr: |
+          sum by (job) (increase(iam_realm_provisioner_prune_rows_total[26h])) == 0
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          runbook: "docs/observability/runbooks.md#iamrealmprovisionerprunejobsstale"
+          summary: "iam-realm-provisioner prune job {{ $labels.job }} deleted no rows in 26h"
+          description: >-
+            The {{ $labels.job }} prune job has not deleted any rows in
+            the last 26 hours. Either the job is not running (check
+            CronJob schedules) or its tables are growing unbounded.
+            outbox, processed_events, and ledger tables must be pruned
+            regularly to prevent unbounded growth.

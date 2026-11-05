@@ -85,6 +85,28 @@ func ValidateIdpConfig(protocol domain.IdpProtocol, cfg map[string]any, acked ma
 		return ""
 	}
 
+	// Check 0a (CRITICAL): Reject any config key that is known to carry
+	// secret material — these belong in the separate `secret` field which is
+	// routed exclusively to OpenBao, never Postgres (RP-D10, §10.2). A caller
+	// mistake (putting {"clientSecret": "..."} in the config body instead of
+	// the secret body field) would otherwise silently persist secret material
+	// to keycloak_idp_configs.config (M12).
+	secretKeyDenylist := []string{
+		"clientSecret", "client_secret",
+		"saml.signing.private.key", "saml.encrypt.private.key",
+		"saml.signing.certificate", "saml.encryption.certificate",
+		"privateKey", "private_key",
+		"secret", "password",
+	}
+	configNoSecrets := true
+	for _, banned := range secretKeyDenylist {
+		if _, ok := cfg[banned]; ok {
+			configNoSecrets = false
+			break
+		}
+	}
+	record("config_no_secrets", configNoSecrets, true)
+
 	record(domain.CheckConfigSafe, !hasInjection(cfg), true)
 
 	if protocol == domain.IdpProtocolSAML {

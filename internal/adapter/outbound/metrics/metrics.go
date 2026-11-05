@@ -122,9 +122,27 @@ var (
 	// ServiceAccountKeyRefreshTotal counts RP-17 calls by result.
 	ServiceAccountKeyRefreshTotal *prometheus.CounterVec
 
-	// ServiceAccountBackfillTotal counts RP-C5 backfill-reconciler
-	// per-tenant attempts by result (§8.14 Part 4, RP-D19).
-	ServiceAccountBackfillTotal *prometheus.CounterVec
+	// OpenBaoErrorsTotal counts OpenBao KV/auth operation errors by op
+	// (write_secret|read_secret|delete_secret|kubernetes_login) and result.
+	// C2 — no silent failure path for vault operations.
+	OpenBaoErrorsTotal *prometheus.CounterVec
+
+	// TrialHardDeleteTotal counts RP-C2 trial-hard-delete per-tenant
+	// outcomes by result (succeeded|failed). M2 — GDPR erasure observability.
+	TrialHardDeleteTotal *prometheus.CounterVec
+
+	// PruneRowsTotal counts rows deleted by each prune job by job
+	// (outbox|processed_events|ledger) and table. M3 — table growth alertability.
+	PruneRowsTotal *prometheus.CounterVec
+
+	// IdempotencyReplayTotal counts provisioning requests served from the
+	// idempotency ledger replay (not fresh execution), by kind. L1.
+	IdempotencyReplayTotal *prometheus.CounterVec
+
+	// CompensationTotal counts compensating teardown outcomes by op
+	// (delete_realm|delete_service_account_client) and result
+	// (success|failure). L2 — systematic cleanup failures visible in dashboards.
+	CompensationTotal *prometheus.CounterVec
 
 	// TemplateDrift is the report-only count of dedicated realms whose
 	// realm_template_version differs from REALM_TEMPLATE_VERSION.
@@ -351,11 +369,35 @@ func registerMetrics() {
 		ConstLabels: labels,
 	}, []string{"result"})
 
-	ServiceAccountBackfillTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name:        prefix + "service_account_backfill_total",
-		Help:        "RP-C5 automation-principal backfill reconciler per-tenant attempts by result.",
+	OpenBaoErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        prefix + "openbao_errors_total",
+		Help:        "OpenBao KV/auth operation errors by op (write_secret|read_secret|delete_secret|kubernetes_login) and result.",
+		ConstLabels: labels,
+	}, []string{"op", "result"})
+
+	TrialHardDeleteTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        prefix + "trial_hard_delete_total",
+		Help:        "RP-C2 trial-hard-delete per-tenant outcomes by result (succeeded|failed).",
 		ConstLabels: labels,
 	}, []string{"result"})
+
+	PruneRowsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        prefix + "prune_rows_total",
+		Help:        "Rows deleted by prune jobs by job (outbox|processed_events|ledger) and table.",
+		ConstLabels: labels,
+	}, []string{"job", "table"})
+
+	IdempotencyReplayTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        prefix + "idempotency_replay_total",
+		Help:        "Provisioning requests served from idempotency ledger replay (not fresh execution), by kind.",
+		ConstLabels: labels,
+	}, []string{"kind"})
+
+	CompensationTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        prefix + "compensation_total",
+		Help:        "Compensating teardown outcomes by op (delete_realm|delete_service_account_client) and result (success|failure).",
+		ConstLabels: labels,
+	}, []string{"op", "result"})
 
 	TemplateDrift = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name:        prefix + "template_drift",
@@ -409,7 +451,11 @@ func registerMetrics() {
 		AuditEntryBacklogGauge,
 		ServiceAccountRegisterTotal,
 		ServiceAccountKeyRefreshTotal,
-		ServiceAccountBackfillTotal,
+		OpenBaoErrorsTotal,
+		TrialHardDeleteTotal,
+		PruneRowsTotal,
+		IdempotencyReplayTotal,
+		CompensationTotal,
 		TemplateDrift,
 		RLSViolationsTotal,
 		UnknownEventAcknowledged,

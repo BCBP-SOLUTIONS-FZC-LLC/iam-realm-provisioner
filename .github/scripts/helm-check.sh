@@ -3,7 +3,7 @@
 # validation for all four values combinations:
 #   base | base+dev | base+staging | base+prod
 #
-# Invoked by .github/workflows/validate-helm.yml in CI and by
+# Invoked by validate-quality.yml (inline steps) in CI and by
 # `make helm-check` locally. Both paths use the same script so the
 # local run is representative of what CI runs.
 #
@@ -62,7 +62,7 @@ SHARED_SETS=(
 # ── Install tools if absent ───────────────────────────────────────────────
 # Follows the same pattern as .github/scripts/arch-lint.sh: check for the
 # binary first, install via `go install` only when missing. In CI,
-# ~/go/bin is cached by the validate-helm.yml action cache step so
+# ~/go/bin is cached by the validate-quality.yml action cache step so
 # re-downloads are rare. Locally, the first run compiles the tools once.
 echo "::group::Tool setup"
 if ! command -v helm >/dev/null 2>&1; then

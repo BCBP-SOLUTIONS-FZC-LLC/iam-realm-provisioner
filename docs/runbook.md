@@ -182,6 +182,24 @@ ORDER BY disabled_at;
 
 ---
 
+## 11. One-time: apply `passwordPolicy` to realms created before 2026-11-04
+
+**When:** first deploy that includes commit `feat/allign-with-bff` to any environment that already has provisioned realms.
+
+**Why:** the realm template (`deploy/keycloak/realm-template.json`, `internal/adapter/outbound/keycloak/realm-template.json`) now includes `"passwordPolicy": "hashAlgorithm(pbkdf2-sha512) and hashIterations(210000)"`. This policy is applied only at realm-creation time. Realms created before this change have no password policy set, meaning Keycloak uses its default (no iteration enforcement) for password validation. Without this fix, a realm's credential-import semantics and its login-time validation rules are inconsistent.
+
+**Scope:** all trial and dedicated realms whose `realm_config_reconciliations` table has no pending row for `passwordPolicy`. The shared `trial` realm is always affected; dedicated realms are affected if they predate this deploy.
+
+**Fix (Keycloak Admin Console):** for each affected realm, navigate to **Realm Settings → Security Defenses → Password Policy** and add:
+- Algorithm: `pbkdf2-sha512`
+- Hash Iterations: `210000`
+
+**Fix (Keycloak Admin REST API):** `PUT /admin/realms/{realmName}` with body `{"passwordPolicy": "hashAlgorithm(pbkdf2-sha512) and hashIterations(210000)"}` using a `realm-admin` or master-admin token.
+
+**Verify:** `GET /admin/realms/{realmName}` → confirm `passwordPolicy` field is set. Repeat for all managed realms.
+
+---
+
 ## Open items — operational impact
 
 - **RP-C3's suspend phase needs `ORG_MEMBERSHIP_BASE_URL` set.** The `subscription-lapse` job polls O&M's I-16 `GET /api/v1/internal/subscription-lapses` via `port.SubscriptionLapseReader` (`internal/adapter/outbound/orgmembership`) for its suspend phase. If `ORG_MEMBERSHIP_BASE_URL` is unset, the job does **not** fail — it logs a WARN, skips the suspend phase, and still runs its offboard phase (retention-driven, purely local against `suspension_source='billing_lapse'` rows). Check `iam_realm_provisioner_lapse_processed_total{transition="suspend"}` staying at zero alongside a healthy `lastSuccessfulTime` as the signal this env var is missing in a deployment where it should be set.

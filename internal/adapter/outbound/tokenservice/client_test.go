@@ -28,7 +28,7 @@ func (noopLogger) Error(string, map[string]any) {}
 
 func TestJWKSURLFor(t *testing.T) {
 	tenantID := uuid.New()
-	c := New("http://token-service.iam.svc.cluster.local", noopLogger{})
+	c := New("http://token-service.iam.svc.cluster.local", 0, noopLogger{})
 	got := c.JWKSURLFor(tenantID)
 	want := fmt.Sprintf("http://token-service.iam.svc.cluster.local/api/v1/internal/tenants/%s/service-accounts/platform-automation/jwks.json", tenantID)
 	assert.Equal(t, want, got)
@@ -37,7 +37,7 @@ func TestJWKSURLFor(t *testing.T) {
 // ── newRequest ────────────────────────────────────────────────────────────
 
 func TestNewRequest_MarshalErrorPropagates(t *testing.T) {
-	c := New("http://example.com", noopLogger{})
+	c := New("http://example.com", 0, noopLogger{})
 	// A channel value cannot be JSON-marshaled.
 	_, err := c.newRequest(context.Background(), http.MethodPost, "http://example.com", make(chan int))
 	require.Error(t, err)
@@ -45,13 +45,13 @@ func TestNewRequest_MarshalErrorPropagates(t *testing.T) {
 }
 
 func TestNewRequest_InvalidRequestPropagatesError(t *testing.T) {
-	c := New("http://example.com", noopLogger{})
+	c := New("http://example.com", 0, noopLogger{})
 	_, err := c.newRequest(context.Background(), "IN VALID", "http://example.com", nil)
 	require.Error(t, err)
 }
 
 func TestNewRequest_NilBodySetsNoContentType(t *testing.T) {
-	c := New("http://example.com", noopLogger{})
+	c := New("http://example.com", 0, noopLogger{})
 	req, err := c.newRequest(context.Background(), http.MethodGet, "http://example.com", nil)
 	require.NoError(t, err)
 	assert.Empty(t, req.Header.Get("Content-Type"))
@@ -63,7 +63,7 @@ func TestNewRequest_NilBodySetsNoContentType(t *testing.T) {
 // call fail — the one newRequest-error branch RegisterPrincipal/
 // IssueOrRotateCredential/ReadPrincipal each propagate unchanged.
 func TestRegisterPrincipal_InvalidURLPropagatesNewRequestError(t *testing.T) {
-	c := New("http://exa\x7fmple.com", noopLogger{})
+	c := New("http://exa\x7fmple.com", 0, noopLogger{})
 	_, err := c.RegisterPrincipal(context.Background(), uuid.New(), port.RegisterPrincipalRequest{
 		PrincipalSub: uuid.New(), KeycloakClientID: "platform-automation",
 	})
@@ -85,7 +85,7 @@ func TestRegisterPrincipal_RequestShapeAndHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	res, err := c.RegisterPrincipal(context.Background(), tenantID, port.RegisterPrincipalRequest{
 		PrincipalSub: principalSub, KeycloakClientID: "platform-automation",
 	})
@@ -109,7 +109,7 @@ func TestRegisterPrincipal_IdempotentRepeatReportsNotCreated(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	res, err := c.RegisterPrincipal(context.Background(), tenantID, port.RegisterPrincipalRequest{
 		PrincipalSub: uuid.New(), KeycloakClientID: "platform-automation",
 	})
@@ -123,7 +123,7 @@ func TestRegisterPrincipal_ServerErrorMapsToTokenServiceUnavailable(t *testing.T
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	_, err := c.RegisterPrincipal(context.Background(), uuid.New(), port.RegisterPrincipalRequest{
 		PrincipalSub: uuid.New(), KeycloakClientID: "platform-automation",
 	})
@@ -139,7 +139,7 @@ func TestRegisterPrincipal_UnexpectedStatusIsPlainError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	_, err := c.RegisterPrincipal(context.Background(), uuid.New(), port.RegisterPrincipalRequest{
 		PrincipalSub: uuid.New(), KeycloakClientID: "platform-automation",
 	})
@@ -149,7 +149,7 @@ func TestRegisterPrincipal_UnexpectedStatusIsPlainError(t *testing.T) {
 }
 
 func TestRegisterPrincipal_TransportErrorMapsToTokenServiceUnavailable(t *testing.T) {
-	c := New("http://127.0.0.1:0", noopLogger{})
+	c := New("http://127.0.0.1:0", 0, noopLogger{})
 	_, err := c.RegisterPrincipal(context.Background(), uuid.New(), port.RegisterPrincipalRequest{
 		PrincipalSub: uuid.New(), KeycloakClientID: "platform-automation",
 	})
@@ -166,7 +166,7 @@ func TestRegisterPrincipal_DecodeErrorPropagates(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	_, err := c.RegisterPrincipal(context.Background(), uuid.New(), port.RegisterPrincipalRequest{
 		PrincipalSub: uuid.New(), KeycloakClientID: "platform-automation",
 	})
@@ -188,7 +188,7 @@ func TestIssueOrRotateCredential_RequestShapeAndResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	res, err := c.IssueOrRotateCredential(context.Background(), tenantID, principalID, port.IssueCredentialRequest{RotationID: rotationID})
 	require.NoError(t, err)
 
@@ -206,7 +206,7 @@ func TestIssueOrRotateCredential_ReplayReportsReplayedTrue(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	res, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
 	require.NoError(t, err)
 	assert.True(t, res.Replayed)
@@ -219,7 +219,7 @@ func TestIssueOrRotateCredential_ExpiresPriorAtParsed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	res, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
 	require.NoError(t, err)
 	require.NotNil(t, res.ExpiresPriorAt)
@@ -233,7 +233,7 @@ func TestIssueOrRotateCredential_ExpiresPriorAtMalformedErrors(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "expires_prior_at")
@@ -247,7 +247,7 @@ func TestIssueOrRotateCredential_ConflictWithNoBody_DefaultsToRotationInFlight(t
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
 	require.Error(t, err)
 	var derr *domain.Error
@@ -290,7 +290,7 @@ func TestIssueOrRotateCredential_ConflictProblem_MapsErrorCodeToDomainCode(t *te
 			}))
 			defer srv.Close()
 
-			c := New(srv.URL, noopLogger{})
+			c := New(srv.URL, 0, noopLogger{})
 			_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
 			require.Error(t, err)
 			var derr *domain.Error
@@ -311,7 +311,7 @@ func TestIssueOrRotateCredential_ConflictNonProblemBody_DefaultsToRotationInFlig
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
 	require.Error(t, err)
 	var derr *domain.Error
@@ -326,7 +326,7 @@ func TestRegisterPrincipal_BadRequestProblemSurfacesErrorCode(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	_, err := c.RegisterPrincipal(context.Background(), uuid.New(), port.RegisterPrincipalRequest{
 		PrincipalSub: uuid.New(), KeycloakClientID: "platform-automation",
 	})
@@ -342,7 +342,7 @@ func TestIssueOrRotateCredential_ServerErrorMapsToTokenServiceUnavailable(t *tes
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
 	require.Error(t, err)
 	var derr *domain.Error
@@ -351,13 +351,13 @@ func TestIssueOrRotateCredential_ServerErrorMapsToTokenServiceUnavailable(t *tes
 }
 
 func TestIssueOrRotateCredential_InvalidURLPropagatesNewRequestError(t *testing.T) {
-	c := New("http://exa\x7fmple.com", noopLogger{})
+	c := New("http://exa\x7fmple.com", 0, noopLogger{})
 	_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
 	require.Error(t, err)
 }
 
 func TestIssueOrRotateCredential_TransportErrorMapsToTokenServiceUnavailable(t *testing.T) {
-	c := New("http://127.0.0.1:0", noopLogger{})
+	c := New("http://127.0.0.1:0", 0, noopLogger{})
 	_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
 	require.Error(t, err)
 	var derr *domain.Error
@@ -372,7 +372,7 @@ func TestIssueOrRotateCredential_DecodeErrorPropagates(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decode TS-1 response")
@@ -387,7 +387,7 @@ func TestIssueOrRotateCredential_OverlapSecondsOmittedWhenNil(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	_, err := c.IssueOrRotateCredential(context.Background(), uuid.New(), uuid.New(), port.IssueCredentialRequest{RotationID: uuid.New()})
 	require.NoError(t, err)
 	_, present := gotBody["overlap_seconds"]
@@ -409,7 +409,7 @@ func TestReadPrincipal_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	res, err := c.ReadPrincipal(context.Background(), tenantID, principalID)
 	require.NoError(t, err)
 
@@ -436,7 +436,7 @@ func TestReadPrincipal_NextRotationAtMalformedErrors(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	_, err := c.ReadPrincipal(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "next_rotation_at")
@@ -451,20 +451,20 @@ func TestReadPrincipal_IssuedAtMalformedErrors(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	_, err := c.ReadPrincipal(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "issued_at")
 }
 
 func TestReadPrincipal_InvalidURLPropagatesNewRequestError(t *testing.T) {
-	c := New("http://exa\x7fmple.com", noopLogger{})
+	c := New("http://exa\x7fmple.com", 0, noopLogger{})
 	_, err := c.ReadPrincipal(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
 }
 
 func TestReadPrincipal_TransportErrorMapsToTokenServiceUnavailable(t *testing.T) {
-	c := New("http://127.0.0.1:0", noopLogger{})
+	c := New("http://127.0.0.1:0", 0, noopLogger{})
 	_, err := c.ReadPrincipal(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
 	var derr *domain.Error
@@ -481,7 +481,7 @@ func TestReadPrincipal_ExpiresAtMalformedErrors(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	_, err := c.ReadPrincipal(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "expires_at")
@@ -493,7 +493,7 @@ func TestReadPrincipal_ServerErrorMapsToTokenServiceUnavailable(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	_, err := c.ReadPrincipal(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
 	var derr *domain.Error
@@ -534,7 +534,7 @@ func TestReadPrincipal_ResponseShapePinned(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	res, err := c.ReadPrincipal(context.Background(), tenantID, principalID)
 	require.NoError(t, err)
 
@@ -561,7 +561,7 @@ func TestReadPrincipal_DecodeErrorPropagates(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	_, err := c.ReadPrincipal(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decode TS-3 response")
@@ -593,7 +593,7 @@ func TestRevokeCredential_RevokesRotatingCredentialViaVersionedEndpoint(t *testi
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	err := c.RevokeCredential(context.Background(), tenantID, principalID)
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodPost, revokeMethod, "TS-2 must use POST, not DELETE")
@@ -614,7 +614,7 @@ func TestRevokeCredential_NoRotatingCredential_ReturnsNil(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	err := c.RevokeCredential(context.Background(), tenantID, principalID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, calls, "only TS-3 should be called when no rotating credential exists")
@@ -627,7 +627,7 @@ func TestRevokeCredential_TS3FailurePropagates(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	err := c.RevokeCredential(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "TS-3 lookup")
@@ -652,7 +652,7 @@ func TestRevokeCredential_TS2ServerErrorPropagates(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	c := New(srv.URL, noopLogger{})
+	c := New(srv.URL, 0, noopLogger{})
 	err := c.RevokeCredential(context.Background(), tenantID, principalID)
 	require.Error(t, err)
 	var derr *domain.Error
@@ -685,7 +685,7 @@ func TestRevokePrincipal_PostsTS7(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	require.NoError(t, New(srv.URL, noopLogger{}).RevokePrincipal(context.Background(), tenantID))
+	require.NoError(t, New(srv.URL, 0, noopLogger{}).RevokePrincipal(context.Background(), tenantID))
 	assert.Equal(t, 1, calls)
 }
 
@@ -696,7 +696,7 @@ func TestRevokePrincipal_PrincipalNotFoundProblem_IsSuccess(t *testing.T) {
 		writeProblem(w, http.StatusNotFound, "principal-not-found", "Principal Not Found", "PRINCIPAL_NOT_FOUND")
 	}))
 	defer srv.Close()
-	require.NoError(t, New(srv.URL, noopLogger{}).RevokePrincipal(context.Background(), uuid.New()))
+	require.NoError(t, New(srv.URL, 0, noopLogger{}).RevokePrincipal(context.Background(), uuid.New()))
 }
 
 // Any other 404 — gin's plain-text "404 page not found" from a Token Service
@@ -718,7 +718,7 @@ func TestRevokePrincipal_RouteMissing404_IsAnError(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			srv := httptest.NewServer(h)
 			defer srv.Close()
-			err := New(srv.URL, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
+			err := New(srv.URL, 0, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
 			require.ErrorIs(t, err, ErrTS7Unavailable)
 		})
 	}
@@ -742,7 +742,7 @@ func TestRevokePrincipal_Conflict_MapsErrorCode(t *testing.T) {
 				writeProblem(w, http.StatusConflict, "conflict", "Conflict", tc.errorCode)
 			}))
 			defer srv.Close()
-			err := New(srv.URL, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
+			err := New(srv.URL, 0, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
 			var de *domain.Error
 			require.ErrorAs(t, err, &de)
 			assert.Equal(t, tc.want, de.Code)
@@ -754,7 +754,7 @@ func TestRevokePrincipal_Conflict_MapsErrorCode(t *testing.T) {
 		w.WriteHeader(http.StatusConflict)
 	}))
 	defer srv.Close()
-	err := New(srv.URL, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
+	err := New(srv.URL, 0, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
 	var de *domain.Error
 	require.ErrorAs(t, err, &de)
 	assert.Equal(t, domain.ErrServiceAccountRotationInFlight, de.Code, "a non-problem 409 is the retryable default")
@@ -764,7 +764,7 @@ func TestRevokePrincipal_OtherErrors(t *testing.T) {
 	t.Run("5xx (incl. 502 SECRET_STORE_UNAVAILABLE) is token-service-unavailable", func(t *testing.T) {
 		for _, status := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusInternalServerError} {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
-			err := New(srv.URL, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
+			err := New(srv.URL, 0, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
 			srv.Close()
 			var de *domain.Error
 			require.ErrorAs(t, err, &de, "status %d", status)
@@ -776,19 +776,19 @@ func TestRevokePrincipal_OtherErrors(t *testing.T) {
 			writeProblem(w, http.StatusForbidden, "tenant-path-mismatch", "Tenant Path Mismatch", "TENANT_PATH_MISMATCH")
 		}))
 		defer srv.Close()
-		err := New(srv.URL, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
+		err := New(srv.URL, 0, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "TS-7")
 	})
 	t.Run("transport failure", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 		srv.Close()
-		err := New(srv.URL, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
+		err := New(srv.URL, 0, noopLogger{}).RevokePrincipal(context.Background(), uuid.New())
 		var de *domain.Error
 		require.ErrorAs(t, err, &de)
 		assert.Equal(t, domain.ErrTokenServiceUnavailable, de.Code)
 	})
 	t.Run("malformed base URL", func(t *testing.T) {
-		require.Error(t, New("http://bad\x7f", noopLogger{}).RevokePrincipal(context.Background(), uuid.New()))
+		require.Error(t, New("http://bad\x7f", 0, noopLogger{}).RevokePrincipal(context.Background(), uuid.New()))
 	})
 }

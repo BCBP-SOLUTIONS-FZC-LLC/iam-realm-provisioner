@@ -4,6 +4,21 @@ All notable changes to this service are documented here. Format follows [Keep a 
 
 This service has never been deployed to any environment — there is no released version yet, so everything lives under `[Unreleased]`. Because of that, this file tracks only what is currently true and what is still outstanding, not a phase-by-phase build history; the full development diary is available via `git log` if it's ever needed.
 
+## [Unreleased — 2026-11-04]
+
+### Fixed
+
+- **BFF-Signup ↔ RP wire-compatibility: `EMAIL_ALREADY_REGISTERED` error code (LLD v1.42).** `errors.go` emitted `USER_EMAIL_CONFLICT` as the RFC 9457 `errorCode` for `domain.ErrUserEmailConflict`; bff-signup branches on `"EMAIL_ALREADY_REGISTERED"`. The mismatch caused duplicate-email errors to surface as generic failures instead of `domain.ErrEmailUnavailable` in the BFF. Fixed in `errors.go`; test taxonomy updated.
+- **RP-2 `ProvisionDirectResult` gains `email_verification_sent` (LLD v1.43 Phase 1.5 blocker).** The field was present on `ProvisionTrialResult` but absent on `ProvisionDirectResult`. bff-signup depends on it. Set to `true` unconditionally (RP-2 always sends `VERIFY_EMAIL`).
+- **`HashedPasswordSeed` now stored without re-hashing (RP-1/RP-2).** Replaced `Value` (causes Keycloak to re-hash the already-hashed seed) with `SecretData`/`CredentialData` (import verbatim). bff-signup controls the KDF parameters exactly. `realm-template.json` gains `passwordPolicy: hashAlgorithm(pbkdf2-sha512) and hashIterations(210000)`.
+- **Credential seed validation: algorithm allowlist + field guards.** `buildCredential` now rejects seeds with `algorithm != "pbkdf2-sha512"`, `iterations ≤ 0`, or empty `hash`/`salt`. All failures return `400 INVALID_REQUEST`; before this a caller-supplied `argon2` seed would have bypassed the realm's security policy silently.
+- **Client validation errors no longer pollute Keycloak metrics/spans.** `buildUser` moved before `a.begin()`: a bad seed returns before the Keycloak instrumentation section opens, so `KeycloakCallFailuresTotal` and span error status are never incremented for what is a caller fault.
+- **`ErrInvalidRequest` no longer triggers `bestEffortDeleteRealm` in `ProvisionDirect`.** A bad seed caused `CreateInvitedUser` to return `ErrInvalidRequest` after the realm was already created. The teardown guard now skips `bestEffortDeleteRealm` for client-validation errors; only Keycloak transport failures trigger compensating cleanup.
+- **`requiredHashAlgorithm` constant cross-validated against both realm template JSON files.** `TestRealmTemplates_PasswordPolicyMatchesRequiredHashAlgorithm` reads both `internal/adapter/outbound/keycloak/realm-template.json` and `deploy/keycloak/realm-template.json` and asserts each `passwordPolicy` contains the constant — CI now catches template/constant drift.
+- **`golang.org/x/crypto` upgraded to fix GO-2026-5932 (Trivy gate).** `openpgp` package deprecated/unsafe by design; pinned to `v0.58.1-0.20261009181718-2f1f834330b2` until a stable tag is cut.
+
+---
+
 ## [Unreleased — 2026-10-30]
 
 ### Added

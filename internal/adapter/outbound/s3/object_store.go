@@ -5,6 +5,7 @@ package s3
 import (
 	"bytes"
 	"context"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -42,8 +43,12 @@ func New(client putObjectAPI, cfg Config) *ObjectStore {
 // PutRealmExport writes data to key, KMS-encrypted. Returns only on a
 // confirmed durable write (S3 PutObject is synchronously durable once it
 // returns success) — realm delete never precedes this call succeeding
-// (RP-EVT-4).
+// (RP-EVT-4). A 2-minute independent timeout prevents a stall from
+// consuming the caller's full reconciler budget (L4).
 func (o *ObjectStore) PutRealmExport(ctx context.Context, key string, data []byte) error {
+	uploadCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	ctx = uploadCtx
 	input := &s3.PutObjectInput{
 		Bucket: aws.String(o.cfg.Bucket),
 		Key:    aws.String(key),

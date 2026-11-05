@@ -37,9 +37,13 @@ type Client struct {
 var _ port.TokenServiceClient = (*Client)(nil)
 
 // New constructs a Client calling the Token Service's internal API at
-// baseURL.
-func New(baseURL string, log port.Logger) *Client {
-	return &Client{baseURL: baseURL, http: httpx.NewClient(5 * time.Second), log: log}
+// baseURL. timeout controls the per-call HTTP deadline (TOKEN_SERVICE_TIMEOUT,
+// defaults to 5s when zero or negative).
+func New(baseURL string, timeout time.Duration, log port.Logger) *Client {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	return &Client{baseURL: baseURL, http: httpx.NewClient(timeout), log: log}
 }
 
 // JWKSURLFor returns the JWKS URL for tenantID's platform-automation

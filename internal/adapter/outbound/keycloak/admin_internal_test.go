@@ -1,7 +1,9 @@
 package keycloak
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/Nerzal/gocloak/v13"
@@ -77,7 +79,8 @@ func TestBuildUser(t *testing.T) {
 		Email: "owner@example.com", FullName: "Dana Owner", TenantID: tenantID,
 		RequiredActions: []string{"VERIFY_EMAIL"}, EmailVerified: true,
 	}
-	u := buildUser(req)
+	u, err := buildUser(req)
+	require.NoError(t, err)
 	require.Equal(t, "owner@example.com", *u.Username)
 	require.Equal(t, "owner@example.com", *u.Email)
 	require.Equal(t, "Dana", *u.FirstName)
@@ -90,18 +93,86 @@ func TestBuildUser(t *testing.T) {
 }
 
 func TestBuildUser_NoRequiredActions(t *testing.T) {
-	u := buildUser(port.CreateUserRequest{Email: "a@example.com", FullName: "A", TenantID: uuid.New()})
+	u, err := buildUser(port.CreateUserRequest{Email: "a@example.com", FullName: "A", TenantID: uuid.New()})
+	require.NoError(t, err)
 	require.Nil(t, u.RequiredActions)
 }
 
 func TestBuildUser_WithHashedPasswordSeed(t *testing.T) {
-	u := buildUser(port.CreateUserRequest{
-		Email: "a@example.com", FullName: "A", TenantID: uuid.New(), HashedPasswordSeed: "seed-hash",
+	seed := `{"algorithm":"pbkdf2-sha512","iterations":210000,"salt":"c2FsdA==","hash":"aGFzaA=="}`
+	u, err := buildUser(port.CreateUserRequest{
+		Email: "a@example.com", FullName: "A", TenantID: uuid.New(), HashedPasswordSeed: seed,
 	})
+	require.NoError(t, err)
 	require.NotNil(t, u.Credentials)
 	require.Len(t, *u.Credentials, 1)
 	cred := (*u.Credentials)[0]
 	require.Equal(t, "password", *cred.Type)
-	require.Equal(t, "seed-hash", *cred.Value)
 	require.False(t, *cred.Temporary)
+	require.Nil(t, cred.Value, "Value must be nil — Keycloak must not re-hash the credential")
+	require.NotNil(t, cred.SecretData)
+	require.NotNil(t, cred.CredentialData)
+
+	var secret struct {
+		Value string `json:"value"`
+		Salt  string `json:"salt"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(*cred.SecretData), &secret))
+	require.Equal(t, "aGFzaA==", secret.Value)
+	require.Equal(t, "c2FsdA==", secret.Salt)
+
+	var credData struct {
+		HashIterations int    `json:"hashIterations"`
+		Algorithm      string `json:"algorithm"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(*cred.CredentialData), &credData))
+	require.Equal(t, 210000, credData.HashIterations)
+	require.Equal(t, "pbkdf2-sha512", credData.Algorithm)
+}
+
+func TestBuildUser_InvalidHashedPasswordSeed(t *testing.T) {
+	cases := []struct {
+		name    string
+		seed    string
+		wantMsg string
+	}{
+		{"not JSON", "not-json", "hashed_password_seed is not valid JSON"},
+		{"wrong algorithm", `{"algorithm":"argon2","iterations":3,"salt":"c2FsdA==","hash":"aGFzaA=="}`, "unsupported algorithm"},
+		{"zero iterations", `{"algorithm":"pbkdf2-sha512","iterations":0,"salt":"c2FsdA==","hash":"aGFzaA=="}`, "iterations must be > 0"},
+		{"empty hash", `{"algorithm":"pbkdf2-sha512","iterations":210000,"salt":"c2FsdA==","hash":""}`, "hash and salt must not be empty"},
+		{"empty salt", `{"algorithm":"pbkdf2-sha512","iterations":210000,"salt":"","hash":"aGFzaA=="}`, "hash and salt must not be empty"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := buildUser(port.CreateUserRequest{
+				Email: "a@example.com", FullName: "A", TenantID: uuid.New(), HashedPasswordSeed: tc.seed,
+			})
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.wantMsg)
+		})
+	}
+}
+
+// TestRealmTemplates_PasswordPolicyMatchesRequiredHashAlgorithm asserts that
+// both realm template JSON files enforce the same algorithm constant that
+// buildCredential validates against. If a template is updated but the constant
+// is not (or vice versa), new credentials will be rejected or silently bypass
+// the realm's intended security policy.
+func TestRealmTemplates_PasswordPolicyMatchesRequiredHashAlgorithm(t *testing.T) {
+	templates := []string{
+		"realm-template.json",
+		"../../../../deploy/keycloak/realm-template.json",
+	}
+	for _, path := range templates {
+		t.Run(path, func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			require.NoError(t, err, "realm template must be readable")
+			var realm struct {
+				PasswordPolicy string `json:"passwordPolicy"`
+			}
+			require.NoError(t, json.Unmarshal(data, &realm))
+			require.Contains(t, realm.PasswordPolicy, requiredHashAlgorithm,
+				"realm template passwordPolicy must reference the algorithm enforced by buildCredential")
+		})
+	}
 }

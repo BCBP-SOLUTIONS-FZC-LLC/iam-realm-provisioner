@@ -1,6 +1,7 @@
 {
   "enabled": true,
   "sslRequired": "external",
+  "passwordPolicy": "hashAlgorithm(pbkdf2-sha512) and hashIterations(210000)",
   "registrationAllowed": false,
   "loginWithEmailAllowed": true,
   "duplicateEmailsAllowed": false,

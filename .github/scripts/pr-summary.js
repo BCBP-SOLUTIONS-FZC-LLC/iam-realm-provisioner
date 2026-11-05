@@ -17,8 +17,7 @@ const rows = [
   ['Coverage ≥ 80%',         'validate-test'],
   ['Trivy CVE scan',         'trivy'],
   ['Smoke tests',            'smoke'],
-  ['Code quality',           'validate-quality'],
-  ['Helm + CD-19 access matrix', 'validate-helm'],
+  ['Code quality + Helm + CD-19', 'validate-quality'],
 ];
 
 const table = rows

@@ -198,8 +198,11 @@ func (s *ProvisioningService) bestEffortDeleteRealm(ctx context.Context, realmNa
 	ctx, cancel := compensationContext(ctx)
 	defer cancel()
 	if err := s.keycloak.DeleteRealmIfExists(ctx, realmName); err != nil {
+		metrics.CompensationTotal.WithLabelValues("delete_realm", "failure").Inc()
 		s.log.WarnContext(ctx, "compensating teardown: delete realm failed", "realm", realmName, "error", err.Error())
+		return
 	}
+	metrics.CompensationTotal.WithLabelValues("delete_realm", "success").Inc()
 }
 
 // platformAutomationRotationNamespace is a fixed namespace UUID used to
@@ -238,8 +241,11 @@ func (s *ProvisioningService) bestEffortDeleteServiceAccountClient(ctx context.C
 	ctx, cancel := compensationContext(ctx)
 	defer cancel()
 	if err := s.keycloak.DeleteServiceAccountClientIfExists(ctx, realmName, clientID); err != nil {
+		metrics.CompensationTotal.WithLabelValues("delete_service_account_client", "failure").Inc()
 		s.log.WarnContext(ctx, "compensating teardown: delete service-account client failed", "realm", realmName, "client_id", clientID, "error", err.Error())
+		return
 	}
+	metrics.CompensationTotal.WithLabelValues("delete_service_account_client", "success").Inc()
 }
 
 // mintPlatformAutomation mints the tenant's platform-automation
@@ -354,6 +360,15 @@ func isUserEmailConflict(err error) bool {
 	return errors.As(err, &de) && de.Code == domain.ErrUserEmailConflict
 }
 
+// isInvalidRequest reports whether err is domain.ErrInvalidRequest — a
+// caller-supplied validation error (e.g. malformed HashedPasswordSeed) that
+// does not reflect a Keycloak failure and should not trigger compensating
+// teardown that undoes successfully-created Keycloak resources.
+func isInvalidRequest(err error) bool {
+	var de *domain.Error
+	return errors.As(err, &de) && de.Code == domain.ErrInvalidRequest
+}
+
 // marshalIdempotencyResult marshals v for storage in the idempotency
 // ledger. A marshal failure is logged, not propagated — the caller stores
 // whatever bytes result (matching the pre-existing best-effort semantics)
@@ -441,7 +456,7 @@ func (s *ProvisioningService) ProvisionTrial(ctx context.Context, idempotencyKey
 		return nil, err
 	}
 	if found {
-		return replayOrConflict[ProvisionTrialResult](existing)
+		return replayOrConflict[ProvisionTrialResult](existing, "trial")
 	}
 	// Registered past the replay check so an idempotent retry of an
 	// already-succeeded key does not inflate the attempt count.
@@ -587,12 +602,13 @@ type ProvisionDirectRequest struct {
 // same-tenant user, and it is stored in the idempotency ledger so a replay
 // returns it too.
 type ProvisionDirectResult struct {
-	TenantID       uuid.UUID `json:"tenant_id"`
-	Realm          string    `json:"realm"`
-	Strategy       string    `json:"strategy"`
-	KeycloakUserID uuid.UUID `json:"keycloak_user_id"`
-	KeycloakShard  string    `json:"keycloak_shard"`
-	OIDCClients    []string  `json:"oidc_clients"`
+	TenantID              uuid.UUID `json:"tenant_id"`
+	Realm                 string    `json:"realm"`
+	Strategy              string    `json:"strategy"`
+	KeycloakUserID        uuid.UUID `json:"keycloak_user_id"`
+	EmailVerificationSent bool      `json:"email_verification_sent"`
+	KeycloakShard         string    `json:"keycloak_shard"`
+	OIDCClients           []string  `json:"oidc_clients"`
 }
 
 // ProvisionDirect implements RP-2 (§8.2): provision the dedicated realm
@@ -605,7 +621,7 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 		return nil, err
 	}
 	if found {
-		return replayOrConflict[ProvisionDirectResult](existing)
+		return replayOrConflict[ProvisionDirectResult](existing, "direct")
 	}
 	defer func() { metrics.ProvisionTotal.WithLabelValues("direct", outcome(err)).Inc() }()
 
@@ -654,7 +670,13 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 		kcUserID, err = s.resolveUserCreateConflict(ctx, realmName, req.AdminEmail, req.TenantID, err)
 	}
 	if err != nil {
-		s.bestEffortDeleteRealm(ctx, realmName)
+		// A caller-supplied invalid credential (ErrInvalidRequest from
+		// buildCredential) must not trigger realm teardown — the realm itself
+		// is valid; only the caller's input was malformed. Only transient
+		// Keycloak failures warrant compensating cleanup of a good realm.
+		if !isInvalidRequest(err) {
+			s.bestEffortDeleteRealm(ctx, realmName)
+		}
 		s.failIdempotency(ctx, idempotencyKey)
 		return nil, err
 	}
@@ -671,7 +693,7 @@ func (s *ProvisioningService) ProvisionDirect(ctx context.Context, idempotencyKe
 
 	result := &ProvisionDirectResult{
 		TenantID: req.TenantID, Realm: realmName, Strategy: string(domain.RealmStrategyDedicated),
-		KeycloakUserID: kcUserID, KeycloakShard: shard, OIDCClients: clients,
+		KeycloakUserID: kcUserID, EmailVerificationSent: true, KeycloakShard: shard, OIDCClients: clients,
 	}
 
 	automationClientID := dedicatedPlatformAutomationClientID
@@ -784,7 +806,7 @@ func (s *ProvisioningService) Convert(ctx context.Context, idempotencyKey string
 		return nil, err
 	}
 	if found {
-		return replayOrConflict[ConvertResult](existing)
+		return replayOrConflict[ConvertResult](existing, "convert")
 	}
 
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.convertTimeout)
@@ -1113,7 +1135,7 @@ func (s *ProvisioningService) CreateInvitedUser(ctx context.Context, idempotency
 		return nil, err
 	}
 	if found {
-		return replayOrConflict[CreateInvitedUserResult](existing)
+		return replayOrConflict[CreateInvitedUserResult](existing, "invited_user")
 	}
 
 	row, err := s.realms.FindByTenantID(ctx, tenantID)
@@ -1169,7 +1191,7 @@ func (s *ProvisioningService) RevertConversion(ctx context.Context, idempotencyK
 		return nil, err
 	}
 	if found {
-		return replayOrConflict[RevertConversionResult](existing)
+		return replayOrConflict[RevertConversionResult](existing, "revert_conversion")
 	}
 
 	current, err := s.realms.FindByTenantID(ctx, tenantID)
@@ -1276,8 +1298,8 @@ func (s *ProvisioningService) RevertConversion(ctx context.Context, idempotencyK
 // replayOrConflict inspects an already-began idempotency ledger row: a
 // `succeeded` operation replays its stored result; anything else (still
 // `in_progress`, or `failed`) surfaces as 409 operation_in_progress so the
-// caller retries with the same key (§9.2).
-func replayOrConflict[T any](op *domain.ProvisioningOperation) (*T, error) {
+// caller retries with the same key (§9.2). kind is used for metrics only.
+func replayOrConflict[T any](op *domain.ProvisioningOperation, kind string) (*T, error) {
 	if op.Status == domain.OpStatusSucceeded {
 		var out T
 		if len(op.Result) > 0 {
@@ -1285,6 +1307,7 @@ func replayOrConflict[T any](op *domain.ProvisioningOperation) (*T, error) {
 				return nil, fmt.Errorf("idempotency: decode stored result: %w", err)
 			}
 		}
+		metrics.IdempotencyReplayTotal.WithLabelValues(kind).Inc()
 		return &out, nil
 	}
 	return nil, domain.NewError(domain.ErrOperationInProgress, "a call with this Idempotency-Key is already in progress — retry with the same key")

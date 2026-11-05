@@ -85,4 +85,5 @@ func (p *PendingAuditEntry) Key() string {
 		return p.IdempotencyKey
 	}
 	return p.ID.String()
+
 }

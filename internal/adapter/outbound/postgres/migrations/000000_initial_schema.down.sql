@@ -1,6 +1,26 @@
+-- WARNING: This down migration is ONLY safe on an empty database (local dev reset).
+-- NEVER apply it to a production or staging database with existing data.
+-- The outbox_events ALTER TABLE below acquires ACCESS EXCLUSIVE and rewrites all rows.
+-- See C1 in docs/observability/runbooks.md for the production rollback procedure.
+
 -- ── outbox_events customization (reverse first — added last in up.sql) ──
 DROP TRIGGER IF EXISTS trg_outbox_normalize_payload ON outbox_events;
 DROP FUNCTION IF EXISTS outbox_normalize_payload();
+
+-- SAFETY GUARD (C1): The ALTER TABLE below acquires ACCESS EXCLUSIVE and
+-- rewrites every row in outbox_events. Only safe against an empty table.
+-- Abort if rows exist to prevent an accidental production lock.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM outbox_events LIMIT 1) THEN
+        RAISE EXCEPTION
+            'down migration aborted: outbox_events is not empty. '
+            'This ALTER TABLE acquires ACCESS EXCLUSIVE and rewrites all rows. '
+            'Only run this migration against an empty development database. '
+            'Row count: %', (SELECT COUNT(*) FROM outbox_events);
+    END IF;
+END $$;
+
 ALTER TABLE outbox_events ALTER COLUMN payload TYPE jsonb USING payload::jsonb;
 
 REVOKE ALL ON public.processed_events FROM realm_provisioner_app;

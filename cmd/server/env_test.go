@@ -19,6 +19,7 @@ func clearRequiredEnv(t *testing.T) {
 	for _, k := range []string{
 		"KEYCLOAK_BASE_URL", "KEYCLOAK_ADMIN_CLIENT_SECRET", "ORG_MEMBERSHIP_BASE_URL", "TOKEN_SERVICE_BASE_URL",
 		"SNS_TOPIC_TENANT_ARN", "GLUE_REGISTRY_TENANT_NAME",
+		"AUDIT_LOG_BASE_URL", "BAO_ADDR", "BAO_AUTH_ROLE", "WEB_APP_BASE_URL",
 		"DATABASE_URL", "PG_HOST", "PG_USER", "PG_PASSWORD",
 		"MIGRATION_DATABASE_URL", "PG_BOUNCER_MODE",
 		"SYSTEM_DATABASE_URL",
@@ -35,6 +36,10 @@ func setAllRequiredEnv(t *testing.T) {
 	t.Setenv("TOKEN_SERVICE_BASE_URL", "https://token-service.iam.svc.cluster.local")
 	t.Setenv("SNS_TOPIC_TENANT_ARN", "arn:aws:sns:ap-south-1:111111111111:iam-tenant-events")
 	t.Setenv("GLUE_REGISTRY_TENANT_NAME", "iam-tenant-events")
+	t.Setenv("AUDIT_LOG_BASE_URL", "https://audit-log.iam.svc.cluster.local")
+	t.Setenv("BAO_ADDR", "https://openbao.iam.svc.cluster.local:8200")
+	t.Setenv("BAO_AUTH_ROLE", "iam-realm-provisioner")
+	t.Setenv("WEB_APP_BASE_URL", "https://app.bcbpsolutions.com")
 	t.Setenv("DATABASE_URL", "postgres://user:pass@host/db")
 	// SYSTEM_DATABASE_URL is required in production (§10.1 BYPASSRLS role for sysPool).
 	t.Setenv("SYSTEM_DATABASE_URL", "postgres://migrator:pass@host/db")

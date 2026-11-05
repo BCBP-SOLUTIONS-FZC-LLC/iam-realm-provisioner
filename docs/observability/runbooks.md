@@ -245,3 +245,21 @@ These alerts read platform-library metrics that are still `proposed` in the regi
 **Meaning.** `iam:realm_provisioner_reconciler_markers:sum` (pending realm-config rows + the last hour's trial-expiry deferrals) has stayed above 5 for 20 minutes. A reconciler is not converging.
 
 **Triage.** Check which term is high, then follow [`IAMRealmProvisionerRealmConfigPendingSustained`](#iamrealmprovisionerrealmconfigpendingsustained) or [`IAMRealmProvisionerTrialExpiryDeferredSustained`](#iamrealmprovisionertrialexpirydeferredsustained). Confirm the CronJobs ran (`kubectl get jobs -l app.kubernetes.io/component` / `cronjob-*`) and that their metrics reach the Pushgateway.
+
+### IAMRealmProvisionerOpenBaoErrors
+
+**Meaning.** OpenBao KV or Kubernetes-auth operations returned errors (`iam_realm_provisioner_openbao_errors_total{op}`). RP-6/RP-7 (IdP configure/remove) will fail completely when OpenBao is unreachable.
+
+**Triage.** Check (1) pod ServiceAccount token validity (`kubectl exec ... -- cat /var/run/secrets/kubernetes.io/serviceaccount/token | jwt decode`), (2) OpenBao health (`BAO_ADDR` reachability from the pod), (3) OpenBao Kubernetes auth role (`BAO_AUTH_ROLE`) is correctly configured, (4) op label in the metric to identify whether this is an auth failure (`kubernetes_login`) or a KV operation failure.
+
+### IAMRealmProvisionerTrialHardDeleteFailure
+
+**Meaning.** The RP-C2 `trial-hard-delete` CronJob is failing to GDPR hard-delete one or more trial tenants (`iam_realm_provisioner_trial_hard_delete_total{result="failed"}`). PII erasure is not completing on schedule.
+
+**Triage.** Check the `trial-hard-delete` CronJob logs (`kubectl logs -l cronjob=trial-hard-delete`). Common causes: Keycloak unreachable when calling `HardDeleteUsersInRealm`; `SYSTEM_DATABASE_URL` not set (the GDPR scrub requires a BYPASSRLS role); the tenant is already in an unexpected state. The job is idempotent — the failed tenant remains `status=disabled` and will be retried on the next CronJob run.
+
+### IAMRealmProvisionerPruneJobsStale
+
+**Meaning.** A prune job (`outbox`, `processed_events`, or `ledger`) has not deleted any rows in the last 26 hours (`iam_realm_provisioner_prune_rows_total`). One or more tables may be growing unbounded.
+
+**Triage.** Check (1) whether the CronJob ran (`kubectl get jobs -l cronjob=<job>-prune`), (2) the Pushgateway has the metric (`curl <PROMETHEUS_PUSHGATEWAY_URL>/metrics | grep prune_rows`), (3) whether the table actually has old rows past the retention window (`SELECT COUNT(*) FROM outbox_events WHERE ...`). An empty table is not a problem — this alert only fires when the job ran but deleted nothing, suggesting either a retention-window misconfiguration or no prunable rows (benign in low-traffic environments).

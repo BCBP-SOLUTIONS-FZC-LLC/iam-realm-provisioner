@@ -132,7 +132,7 @@ Detailed reference docs in `.claude/`:
 - [`request-flows.md`](request-flows.md) — Keycloak-effect-first discipline, compensating teardown, every RP-*/RP-C* flow, idempotency mechanics
 - [`operations.md`](operations.md) — security, observability, configuration, CI/CD, testing, GDPR, integration points, open items
 
-Full LLD (v1.23 Approved, `docs/lld/iam-lld-realm-provisioner-service.md`), checked into this repo.
+Full LLD (v1.43 Approved, `docs/lld/iam-lld-realm-provisioner-service.md`), checked into this repo.
 
 Supplementary docs in the repo root:
 - **`README.md`** — mental model, API/event overview, onboarding
