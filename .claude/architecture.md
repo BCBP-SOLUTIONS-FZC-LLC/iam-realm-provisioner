@@ -15,6 +15,7 @@ iam-realm-provisioner/
 │   │   ├── wiring.go                   # DI helpers factored out of main.go (Glue codec, SNS publisher, runMigrationsAtStartup)
 │   │   ├── inbound_schema.go           # consumedValidator — eventschema.ConsumedByConsumer → sqspipeline.Validator
 │   │   ├── audit_delivery.go           # AL-5 pending_audit_entries drainer goroutine
+│   │   ├── platform_realm.go           # startPlatformRealmEnsure — background retry loop ensuring the operator KC realm (CD-52 item 2, LLD §12.3); skipped when PLATFORM_REALM_NAME unset
 │   │   └── exporters.go                # runBusinessExporters — goroutines refreshing the §11.2 DB-state gauges + rls_violations_total
 │   ├── migrate/
 │   │   └── main.go                     # migrate hook Job (Helm pre-install/pre-upgrade): postgres.MigrateSchema over MIGRATION_DATABASE_URL
@@ -46,10 +47,11 @@ iam-realm-provisioner/
 │   │   │   ├── errors.go               # ErrorCode taxonomy (§17) + Error{Code,Message,Details}, Status() -> HTTP code
 │   │   │   └── event.go                # Source="iam-realm-provisioner", SystemActorID, the 9 produced + 6 consumed event-type constants, Event{} struct, every payload struct (§25)
 │   │   ├── port/                       # interfaces required by the core
-│   │   │   ├── keycloak_admin.go       # KeycloakAdmin — RP-INV-1's sole seam, 29 methods, incl. service-account
+│   │   │   ├── keycloak_admin.go       # KeycloakAdmin — RP-INV-1's sole seam, 30 methods, incl. service-account
 │   │   │   │                          #   client mint (CreateServiceAccountClient -> sub, created bool, err —
 │   │   │   │                          #   created reports fresh-mint vs resumed, §2.5), ClearServiceAccountKeysCache,
-│   │   │   │                          #   DeleteServiceAccountClientIfExists (idempotent, mirrors DeleteRealmIfExists)
+│   │   │   │                          #   DeleteServiceAccountClientIfExists (idempotent, mirrors DeleteRealmIfExists),
+						#   EnsurePlatformRealm (CD-52 item 2, §12.3 — operator realm bootstrap)
 │   │   │   ├── repositories.go         # TenantRealmRepository, IdpConfigRepository, IdpValidationRepository, ReconciliationRepository, IdempotencyStore, Inbox, InboxPruner, PendingAuditEntryRepository, RetentionPruner
 │   │   │   ├── audit_log_client.go     # AuditLogClient — AL-5 direct-write ingest
 │   │   │   ├── token_service_client.go # TokenServiceClient — TS-1/TS-3/TS-4 (§2.5)
@@ -87,7 +89,7 @@ iam-realm-provisioner/
 │       │   └── sqspipeline/            # builds the consumers from platform-events: EnvForQueue (eventcfg.LoadSQS), NewConsumer (GlueDecodeCodec + WithDLQForwarding), RequireDLQ, Handler (DLQ route → span → schema validation)
 │       └── outbound/
 │           ├── postgres/               # repository impls + migrations/000000_initial_schema.{up,down}.sql + gauge_repository.go (§11.2 exporters) + inbox_repository.go (platform-events inbox.Store) + migrate.go (MigrateSchema) + idempotency_repository.go (lease reclaim, detached Complete/Fail) + retention_repository.go (ledger-prune) + pending_audit_entry_repository.go (AL-5 queue)
-│           ├── keycloak/               # gocloak-backed KeycloakAdmin impl — RP-INV-1's ONLY implementation + instrumentation.go (OTel spans on gocloak's resty transport)
+│           ├── keycloak/               # gocloak-backed KeycloakAdmin impl — RP-INV-1's ONLY implementation + instrumentation.go (OTel spans on gocloak's resty transport) + admin_platform_realm.go (EnsurePlatformRealm, CD-52 item 2, LLD §12.3)
 │           ├── eventbus/               # outbox publisher, Glue/Noop/Validating codecs
 │           ├── openbao/                # OpenBao KV v2 + Kubernetes-auth client
 │           ├── orgmembership/          # HTTP client for O&M's I-8 residual-MFA check + I-16 subscription-lapse poll (RP-C3, port.SubscriptionLapseReader)

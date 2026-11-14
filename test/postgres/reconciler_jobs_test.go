@@ -77,6 +77,9 @@ func (f *fakeJobsKeycloakAdmin) DeleteRealmIfExists(ctx context.Context, realmNa
 func (f *fakeJobsKeycloakAdmin) EnsureSharedRealm(ctx context.Context, realmName string) error {
 	panic("not implemented")
 }
+func (f *fakeJobsKeycloakAdmin) EnsurePlatformRealm(_ context.Context, _ string) error {
+	panic("not implemented")
+}
 func (f *fakeJobsKeycloakAdmin) CreateTrialUser(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) {
 	panic("not implemented")
 }

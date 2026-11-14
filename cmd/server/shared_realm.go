@@ -12,6 +12,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 )
 
@@ -37,6 +38,9 @@ func ensureSharedRealm(ctx context.Context, kc sharedRealmEnsurer, realm string,
 	for {
 		err := kc.EnsureSharedRealm(ctx, realm)
 		if err == nil {
+			if metrics.SharedRealmReady != nil {
+				metrics.SharedRealmReady.Set(1)
+			}
 			log.Info("shared trial realm ensured", map[string]any{"realm": realm})
 			return
 		}

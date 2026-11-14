@@ -4,6 +4,14 @@ All notable changes to this service are documented here. Format follows [Keep a 
 
 This service has never been deployed to any environment — there is no released version yet, so everything lives under `[Unreleased]`. Because of that, this file tracks only what is currently true and what is still outstanding, not a phase-by-phase build history; the full development diary is available via `git log` if it's ever needed.
 
+## [Unreleased — 2026-11-12]
+
+### Added
+
+- **Platform realm bootstrap (CD-52 item 2, LLD v1.50 §12.3).** A dedicated Keycloak realm for internal platform operators (`PLATFORM_REALM_NAME`) is now bootstrapped at server startup. Each pod runs `KeycloakAdmin.EnsurePlatformRealm` in the background (new `cmd/server/platform_realm.go`, mirroring `shared_realm.go`'s retry-until-success pattern): creates a minimal realm when absent (no tenant-realm template, no `tender-web` client, no `tenant_id` attribute) then converges three security invariants — (1) `platform_operator` realm role (AuthZ Enrichment reads it and injects `x-tenant-roles: platform_operator`); (2) the `Browser - Conditional OTP` browser-flow subflow set to `REQUIRED` (realm-wide MFA, stricter than the per-user `requires-mfa` conditional used in tenant realms — a missing execution returns an error rather than silently leaving MFA unenforced); (3) short sessions (`PlatformOperatorRoleName = "platform_operator"`, 5-min access token, 30-min idle, 8-h max, rotating refresh tokens). `PLATFORM_REALM_NAME` unset → WARN and bootstrap skipped (pre-CD-52 environments unaffected). New port method `EnsurePlatformRealm(ctx, realmName string) error` on `KeycloakAdmin` (30 methods total). Adapter in `internal/adapter/outbound/keycloak/admin_platform_realm.go`. `PLATFORM_REALM_NAME` added to `.env-example` and Helm `values.yaml` (commented out pending CD-52 OP-G3). New op name `ensure_platform_realm` added to the frozen §25 set. All mock stubs updated. Integration test `test/integration/keycloak_platform_realm_test.go` validates idempotent creation and convergence against Keycloak 26. No new HTTP endpoint, no new event, no Postgres schema change, no frozen name renamed.
+
+---
+
 ## [Unreleased — 2026-11-04]
 
 ### Fixed

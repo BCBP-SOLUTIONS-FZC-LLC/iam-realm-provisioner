@@ -4,7 +4,7 @@ The Realm Provisioner Service — the **single writer to the Keycloak Admin API*
 
 **Repository:** `github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`
 **Module:** Go 1.26.10 · private module · deployed as three binaries from one image (`cmd/server`, `cmd/reconciler`, `cmd/migrate`)
-**Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.43 Approved** (`docs/lld/iam-lld-realm-provisioner-service.md`)
+**Design:** Refines the IAM HLD (`IAM HLD v1.42`, §5.2); LLD **v1.50 Approved** (`docs/lld/iam-lld-realm-provisioner-service.md`)
 
 ---
 
@@ -167,7 +167,7 @@ iam-realm-provisioner/
 │   ├── asyncapi.yaml                  # AsyncAPI 3.0 — iam-tenant-events (9 published) + 3 inbound SQS channels + 3 downstream Commercial consumer queue references (CD-26)
 │   └── embed.go                       # //go:embed asyncapi.yaml — served from the compiled binary, no source tree in the image
 ├── deploy/                            # Helm chart, AWS IAM policy, OpenBao policy, Prometheus alerts, Keycloak realm template
-├── docs/lld/                          # LLD v1.43
+├── docs/lld/                          # LLD v1.50
 ├── docs/observability/                # Observability Standard implementation, generated metric registry, metric migration history, per-alert runbooks
 ├── docs/runbook.md                    # Operator procedures for the headline incident scenarios (§24)
 ├── docs/runbook-schema-registry.md    # Schema-governance operator runbook (shared iam-tenant-events registry)

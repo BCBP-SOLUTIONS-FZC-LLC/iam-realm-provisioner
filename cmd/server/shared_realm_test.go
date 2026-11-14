@@ -11,14 +11,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// scriptedEnsurer fails its first `failures` calls, then succeeds.
-type scriptedEnsurer struct {
+// scriptedCalls is the shared counter logic for realm-ensurer test fakes.
+// Embed it in a type that implements the specific ensurer interface.
+type scriptedCalls struct {
 	calls    int32
 	failures int32
 	realm    atomic.Value
 }
 
-func (e *scriptedEnsurer) EnsureSharedRealm(_ context.Context, realm string) error {
+func (e *scriptedCalls) attempt(realm string) error {
 	e.realm.Store(realm)
 	if atomic.AddInt32(&e.calls, 1) <= e.failures {
 		return errors.New("keycloak down")
@@ -26,10 +27,18 @@ func (e *scriptedEnsurer) EnsureSharedRealm(_ context.Context, realm string) err
 	return nil
 }
 
+// scriptedEnsurer implements sharedRealmEnsurer, failing its first `failures`
+// calls then succeeding.
+type scriptedEnsurer struct{ scriptedCalls }
+
+func (e *scriptedEnsurer) EnsureSharedRealm(_ context.Context, realm string) error {
+	return e.attempt(realm)
+}
+
 // A Keycloak outage at boot is retried until the realm is ensured, then
 // the loop stops.
 func TestEnsureSharedRealm_RetriesUntilSuccessThenStops(t *testing.T) {
-	kc := &scriptedEnsurer{failures: 2}
+	kc := &scriptedEnsurer{scriptedCalls: scriptedCalls{failures: 2}}
 	done := make(chan struct{})
 	go func() {
 		ensureSharedRealm(context.Background(), kc, "trial", time.Millisecond, &fakeLogger{})
@@ -47,7 +56,7 @@ func TestEnsureSharedRealm_RetriesUntilSuccessThenStops(t *testing.T) {
 
 // Shutdown stops a loop that is still waiting to retry.
 func TestEnsureSharedRealm_StopsOnCancel(t *testing.T) {
-	kc := &scriptedEnsurer{failures: 1 << 30}
+	kc := &scriptedEnsurer{scriptedCalls: scriptedCalls{failures: 1 << 30}}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { ensureSharedRealm(ctx, kc, "trial", time.Hour, &fakeLogger{}); close(done) }()

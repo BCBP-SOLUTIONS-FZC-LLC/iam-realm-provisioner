@@ -194,7 +194,7 @@ func RequireOperatorRole() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rc, ok := requestctx.FromContext(c.Request.Context())
 		if !ok || !rc.IsOperator() {
-			gincommon.AbortWithProblem(c, problem.NewError(realmInsufficientRole, "operator route requires platform_operator role"))
+			gincommon.AbortWithProblem(c, problem.NewError(realmInsufficientRole, "operator route requires "+domain.PlatformOperatorRoleName+" role"))
 			return
 		}
 		c.Next()
