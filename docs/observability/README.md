@@ -109,7 +109,7 @@ Proposed registry entries this service depends on, or overlaps with:
 
 ## Platform-library and audit-delivery alerts
 
-The `iam_realm_provisioner_platform_libraries` group, ported from iam-org-membership: `IAMRealmProvisionerOutboxBacklog` (`platform_outbox_oldest_pending_age`), `DLQBacklog` (`platform_dlq_depth`), `ConsumerDead`, `DBPoolSaturated`, `DBAcquireErrors`, `DBRetriesExhausted` (all `metric_status: proposed`), and `AuditEntriesRejected` / `AuditEntriesUndelivered` (Tier 3 `audit_entry_backlog_gauge`). `ConsumerDead` deliberately differs from O&M's. It fires when the consumers stop *polling* (`receive_message` calls stop), not when a queue goes quiet: this service's queues, Billing's especially, are legitimately silent for long periods.
+The `iam_realm_provisioner_platform_libraries` group, ported from iam-org-membership: `IAMRealmProvisionerOutboxBacklog` (`platform_outbox_oldest_pending_age_seconds`), `DLQBacklog` (`platform_dlq_depth`), `ConsumerDead`, `DBPoolSaturated`, `DBAcquireErrors`, `DBRetriesExhausted` (all `metric_status: proposed`), and `AuditEntriesRejected` / `AuditEntriesUndelivered` (Tier 3 `audit_entry_backlog_gauge`). `ConsumerDead` deliberately differs from O&M's. It fires when the consumers stop *polling* (`receive_message` calls stop), not when a queue goes quiet: this service's queues, Billing's especially, are legitimately silent for long periods.
 
 ## SLOs
 

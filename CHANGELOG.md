@@ -178,6 +178,7 @@ This service has never been deployed to any environment — there is no released
 
 ### Changed
 
+- **platform-events v2.2.1 → v2.3.0, platform-gincommon → v2.6.0** (governance decision PA-D34): the outbox oldest-pending-age gauge is now `platform_outbox_oldest_pending_age_seconds`. v2.3.0 emits it alongside the deprecated `platform_outbox_oldest_pending_age` (same value) until the sunset (not before 2026-12-15); gincommon v2.6.0's registry has the new entry and flags the old name as deprecated. The outbox-stall alert (`deploy/monitoring/app-alerts.yml`, Helm `PrometheusRule` regenerated) and the runbook now use the `_seconds` name, same threshold and `for`. `docs/observability/metric-registry.md` regenerated (`make metrics-inventory`).
 - **RP-C3 `subscription-lapse` logs a WARN and skips the suspend phase when `ORG_MEMBERSHIP_BASE_URL` is unset** — the offboard phase (GDPR retention) runs unconditionally regardless of whether the suspend feed is wired, so GDPR SLAs are met even when `ORG_MEMBERSHIP_BASE_URL` is absent.
 - **The Keycloak admin client secret is read at every token refresh** (`keycloak.Config.SecretProvider`), so a rotated secret takes effect without changing the token cache.
 - **`DirectPaidSignup` requires `plan`** (`starter` | `pro` | `enterprise`) in `api/asyncapi.yaml` and the embedded schema.
