@@ -162,6 +162,10 @@ This service has never been deployed to any environment — there is no released
 
 ## [Unreleased]
 
+### Security
+
+- **Go 1.26.10 → 1.26.11** (CVE-2026-97054, `net/http`: HTTP/1 `MaxBytesReader` limit handling), flagged by the pre-push / CI Trivy scan of the image: `go` directive and the digest-pinned builder image bumped (same as iam-org-membership).
+
 ### Fixed
 
 - **Cross-service compatibility audit against O&M, Token Service and Audit Log** (LLD rev 1.22; additive, no frozen name changed):
