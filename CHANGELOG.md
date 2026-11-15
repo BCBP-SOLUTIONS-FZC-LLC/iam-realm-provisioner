@@ -164,6 +164,14 @@ This service has never been deployed to any environment — there is no released
 
 ### Fixed
 
+- **Test Postgres image pinned to `postgres:16.16-alpine`; cross-tenant idempotency-key collision test updated.** PostgreSQL 16.16 now checks the UPDATE policy's USING expression against the conflicting row of `INSERT ... ON CONFLICT DO UPDATE` even when the `ON CONFLICT ... WHERE` doesn't match. `IdempotencyRepository.Begin` therefore fails with SQLSTATE 42501 when a second tenant reuses another tenant's literal `Idempotency-Key`, where before it silently reported the call "fresh" and stripped idempotency from that operation. The floating `postgres:16-alpine` tag picked up 16.16 and broke `Begin_CrossTenantKeyCollision_DefeatsIdempotency`; the subtest is now `Begin_CrossTenantKeyCollision_FailsClosed`, and every test/CI/compose image reference names the exact minor.
+
+### Security
+
+- **Go 1.26.10 → 1.26.11** (CVE-2026-97054, `net/http`: HTTP/1 `MaxBytesReader` limit handling), flagged by the pre-push / CI Trivy scan of the image: `go` directive and the digest-pinned builder image bumped (same as iam-org-membership).
+
+### Fixed
+
 - **Cross-service compatibility audit against O&M, Token Service and Audit Log** (LLD rev 1.22; additive, no frozen name changed):
   - **Offboarding and trial hard-delete now erase the tenant's rows** from `keycloak_idp_configs`, `keycloak_idp_config_validations`, `realm_config_reconciliations`, `provisioning_operations` and `pending_audit_entries` (§15.2 GDPR). `outbox_events` is still cleared by `outbox-prune`, so the `TenantOffboarded` event is not lost.
   - **RP-3 `Convert` revokes the old shared-realm credential** through Token Service TS-2 (`RevokeCredential`), after TS-4 → TS-1 and before the old client is deleted. A failed revoke is logged and does not fail the conversion.
@@ -178,6 +186,7 @@ This service has never been deployed to any environment — there is no released
 
 ### Changed
 
+- **platform-events v2.2.1 → v2.3.0, platform-gincommon → v2.6.0** (governance decision PA-D34): the outbox oldest-pending-age gauge is now `platform_outbox_oldest_pending_age_seconds`. v2.3.0 emits it alongside the deprecated `platform_outbox_oldest_pending_age` (same value) until the sunset (not before 2026-12-15); gincommon v2.6.0's registry has the new entry and flags the old name as deprecated. The outbox-stall alert (`deploy/monitoring/app-alerts.yml`, Helm `PrometheusRule` regenerated) and the runbook now use the `_seconds` name, same threshold and `for`. `docs/observability/metric-registry.md` regenerated (`make metrics-inventory`).
 - **RP-C3 `subscription-lapse` logs a WARN and skips the suspend phase when `ORG_MEMBERSHIP_BASE_URL` is unset** — the offboard phase (GDPR retention) runs unconditionally regardless of whether the suspend feed is wired, so GDPR SLAs are met even when `ORG_MEMBERSHIP_BASE_URL` is absent.
 - **The Keycloak admin client secret is read at every token refresh** (`keycloak.Config.SecretProvider`), so a rotated secret takes effect without changing the token cache.
 - **`DirectPaidSignup` requires `plan`** (`starter` | `pro` | `enterprise`) in `api/asyncapi.yaml` and the embedded schema.

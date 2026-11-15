@@ -110,7 +110,7 @@ Common starting points:
 **Triage.**
 1. `SELECT id, event_type, tenant_id, attempts, last_error, failed_at FROM outbox_dead_letters ORDER BY failed_at DESC LIMIT 20;`
 2. `last_error` usually names the cause: SNS permission, `SNS_TOPIC_TENANT_ARN`, or a Glue schema version not `AVAILABLE`.
-3. Transient SNS failures don't count an attempt; a backlog without dead letters shows on `platform_outbox_oldest_pending_age` instead.
+3. Transient SNS failures don't count an attempt; a backlog without dead letters shows on `platform_outbox_oldest_pending_age_seconds` instead.
 
 **Mitigate.** Fix the cause, then replay with `outbox.Runner.ReprocessDeadLetters`. See [`../runbook.md` §7](../runbook.md#7-outbox-relay-lag--sqs-consumer-stuck--dlq-buildup).
 
@@ -152,7 +152,7 @@ These alerts read platform-library metrics that are still `proposed` in the regi
 
 ### IAMRealmProvisionerOutboxBacklog
 
-**Meaning.** The oldest unpublished outbox event is more than 5 minutes old (`platform_outbox_oldest_pending_age`). Transient SNS failures (throttling, outage, an expired credential) never count an attempt, so they never dead-letter — they show up here instead of on [`IAMRealmProvisionerOutboxStuck`](#iamrealmprovisioneroutboxstuck).
+**Meaning.** The oldest unpublished outbox event is more than 5 minutes old (`platform_outbox_oldest_pending_age_seconds`). Transient SNS failures (throttling, outage, an expired credential) never count an attempt, so they never dead-letter — they show up here instead of on [`IAMRealmProvisionerOutboxStuck`](#iamrealmprovisioneroutboxstuck).
 
 **Triage.** SNS errors in the outbox runner logs; `platform_outbox_pending_events`; `platform_dependency_request_seconds_count{dependency="sns",outcome="error"}`; whether the runner is running at all (`/readyz` reports it); IRSA permissions on `SNS_TOPIC_TENANT_ARN`.
 

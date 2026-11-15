@@ -441,7 +441,7 @@ groups:
 
       - alert: IAMRealmProvisionerOutboxBacklog
         expr: |
-          max by (domain, service, environment) (platform_outbox_oldest_pending_age{service="iam-realm-provisioner"}) > 300
+          max by (domain, service, environment) (platform_outbox_oldest_pending_age_seconds{service="iam-realm-provisioner"}) > 300
         for: 10m
         labels:
           severity: warning

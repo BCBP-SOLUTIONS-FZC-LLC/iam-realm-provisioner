@@ -39,7 +39,7 @@ docker run -d --name "$PG_NAME" --network host \
   -e POSTGRES_DB=postgres \
   -e POSTGRES_HOST_AUTH_METHOD=trust \
   -v "$(pwd)/scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro" \
-  postgres:16-alpine
+  postgres:16.16-alpine
 
 echo "Waiting for Postgres to be ready..."
 for i in $(seq 1 30); do
