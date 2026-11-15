@@ -20,7 +20,7 @@ import (
 // database, and a second run (every helm upgrade) is a no-op success.
 func TestRun_FreshDatabase_MigratesAndIsRerunnable(t *testing.T) {
 	ctx := context.Background()
-	pg, err := tcpostgres.Run(ctx, "postgres:16-alpine",
+	pg, err := tcpostgres.Run(ctx, "postgres:16.16-alpine",
 		tcpostgres.WithDatabase("provisioner"),
 		tcpostgres.WithUsername("postgres"),
 		tcpostgres.WithPassword("testpassword"),

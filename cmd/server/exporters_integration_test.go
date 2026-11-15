@@ -37,7 +37,7 @@ func TestRunBusinessExporters_RealSchema_PopulatesGaugesAndReturnsOnCancel(t *te
 	ctx := context.Background()
 
 	pgContainer, err := tcpostgres.Run(ctx,
-		"postgres:16-alpine",
+		"postgres:16.16-alpine",
 		tcpostgres.WithDatabase("provisioner"),
 		tcpostgres.WithUsername("postgres"),
 		tcpostgres.WithPassword("testpassword"),
@@ -92,7 +92,7 @@ func TestRunBusinessExporters_RealSchema_PopulatesGaugesAndReturnsOnCancel(t *te
 func TestRunBusinessExporters_RLSViolation_IncrementsCounter(t *testing.T) {
 	ctx := context.Background()
 	pgContainer, err := tcpostgres.Run(ctx,
-		"postgres:16-alpine",
+		"postgres:16.16-alpine",
 		tcpostgres.WithDatabase("provisioner"),
 		tcpostgres.WithUsername("postgres"),
 		tcpostgres.WithPassword("testpassword"),

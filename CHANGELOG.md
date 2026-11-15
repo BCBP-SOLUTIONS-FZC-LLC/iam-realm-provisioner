@@ -162,6 +162,10 @@ This service has never been deployed to any environment — there is no released
 
 ## [Unreleased]
 
+### Fixed
+
+- **Test Postgres image pinned to `postgres:16.16-alpine`; cross-tenant idempotency-key collision test updated.** PostgreSQL 16.16 now checks the UPDATE policy's USING expression against the conflicting row of `INSERT ... ON CONFLICT DO UPDATE` even when the `ON CONFLICT ... WHERE` doesn't match. `IdempotencyRepository.Begin` therefore fails with SQLSTATE 42501 when a second tenant reuses another tenant's literal `Idempotency-Key`, where before it silently reported the call "fresh" and stripped idempotency from that operation. The floating `postgres:16-alpine` tag picked up 16.16 and broke `Begin_CrossTenantKeyCollision_DefeatsIdempotency`; the subtest is now `Begin_CrossTenantKeyCollision_FailsClosed`, and every test/CI/compose image reference names the exact minor.
+
 ### Security
 
 - **Go 1.26.10 → 1.26.11** (CVE-2026-97054, `net/http`: HTTP/1 `MaxBytesReader` limit handling), flagged by the pre-push / CI Trivy scan of the image: `go` directive and the digest-pinned builder image bumped (same as iam-org-membership).

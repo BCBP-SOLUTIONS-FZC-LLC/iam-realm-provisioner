@@ -84,7 +84,7 @@ func TestMain_FullWiring_ServesHealthzThenShutsDownGracefullyOnSIGTERM(t *testin
 	ctx := context.Background()
 
 	pgContainer, err := tcpostgres.Run(ctx,
-		"postgres:16-alpine",
+		"postgres:16.16-alpine",
 		tcpostgres.WithDatabase("provisioner"),
 		tcpostgres.WithUsername("postgres"),
 		tcpostgres.WithPassword("testpassword"),

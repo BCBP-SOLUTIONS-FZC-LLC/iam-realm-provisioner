@@ -213,41 +213,28 @@ func TestIdempotencyRepository(t *testing.T) {
 		assert.Equal(t, int32(1), freshCount, "the unique idempotency_key PK must let exactly one concurrent Begin see found=false")
 	})
 
-	// Begin_CrossTenantKeyCollision_DefeatsIdempotency documents a genuine
-	// architectural edge case discovered while writing this test: if two
-	// different tenants ever race on the SAME literal idempotency_key value
-	// (a caller bug — e.g. a client that doesn't namespace keys by tenant,
-	// or a replayed header reused across tenants), Begin's RLS interaction
-	// silently defeats the idempotency guarantee it exists to provide,
-	// rather than surfacing a conflict:
+	// Begin_CrossTenantKeyCollision_FailsClosed pins what happens when two
+	// different tenants send the SAME literal idempotency_key value (a
+	// caller bug — e.g. a client that doesn't namespace keys by tenant, or
+	// a header replayed across tenants).
 	//
-	//  1. Tenant A's Begin succeeds normally, inserting a row it owns.
-	//  2. Tenant B's Begin then runs the same
-	//     `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING`. Postgres
-	//     enforces the PRIMARY KEY globally regardless of row visibility,
-	//     so the insert conflicts (RowsAffected()==0) — but the very next
-	//     statement, the SELECT that fetches "the existing row" to return
-	//     to the caller, is RLS-scoped and tenant A's row is invisible to
-	//     tenant B's GUC. That SELECT returns zero rows, and Begin's own
-	//     code (`if errors.Is(scanErr, pgx.ErrNoRows) { found = false }`)
-	//     then reports the call as a **fresh** Begin — found=false,
-	//     existing=nil — even though a row for that key already exists.
-	//  3. Because the row was never actually inserted for tenant B (the
-	//     conflict silently swallowed the INSERT), every subsequent Begin
-	//     call from tenant B with the same key repeats step 2 forever: it
-	//     is reported "fresh" every single time, never landing a row of
-	//     its own. A later Complete/Fail(key) call from tenant B's context
-	//     is likewise RLS-filtered to 0 rows affected and returns nil
-	//     error — a silent no-op — so no failure ever surfaces to the
-	//     caller.
+	// Begin is a single `INSERT ... ON CONFLICT (idempotency_key) DO UPDATE
+	// ... WHERE <reclaimable>`. The PRIMARY KEY is enforced globally,
+	// regardless of RLS visibility, so tenant B's insert conflicts with
+	// tenant A's row. Since PostgreSQL 16.16 (and the matching minors of
+	// the other supported branches) the UPDATE policy's USING expression
+	// is checked against that conflicting row even when the ON CONFLICT
+	// WHERE would not match — so tenant B's Begin now fails with SQLSTATE
+	// 42501 instead of falling through to the RLS-scoped SELECT, finding
+	// nothing, and reporting the call "fresh" (the pre-16.16 behavior,
+	// which silently stripped idempotency from tenant B's operation and
+	// let every retry re-run the Keycloak-effect-first flow).
 	//
-	// Net effect: a cross-tenant idempotency-key collision does not
-	// error out or corrupt tenant A's row, but it permanently strips
-	// idempotency from tenant B's operation under that key — every retry
-	// looks "fresh" and would re-execute the Keycloak-effect-first flow
-	// from scratch. This is a real (if narrow) gap between the RLS model
-	// and the idempotency ledger's global PK, not a bug in this test.
-	t.Run("Begin_CrossTenantKeyCollision_DefeatsIdempotency", func(t *testing.T) {
+	// The collision therefore fails closed: tenant B gets an error on every
+	// attempt and tenant A's row is untouched. The test image is pinned to
+	// an exact minor (postgres:16.16-alpine) so this cannot flip silently
+	// when a floating tag moves.
+	t.Run("Begin_CrossTenantKeyCollision_FailsClosed", func(t *testing.T) {
 		t.Parallel()
 		tenantA, tenantB := uuid.New(), uuid.New()
 		key := "shared-key-collision"
@@ -259,13 +246,14 @@ func TestIdempotencyRepository(t *testing.T) {
 
 		for i := 0; i < 2; i++ {
 			existing, found, err = repo.Begin(withTenant(ctx, tenantB), key, tenantB, domain.OpProvisionDirect)
-			require.NoError(t, err)
-			assert.False(t, found, "tenant B's colliding Begin is reported fresh every time, not just once")
+			require.Error(t, err, "tenant B's colliding Begin must fail, never be reported fresh")
+			assert.ErrorContains(t, err, "SQLSTATE 42501")
+			assert.False(t, found)
 			assert.Nil(t, existing)
 		}
 
 		err = repo.Complete(withTenant(ctx, tenantB), key, json.RawMessage(`{"tenant_id":"`+tenantB.String()+`"}`))
-		assert.NoError(t, err, "Complete never checks RowsAffected, so an RLS-blocked update against tenant A's row returns nil, not an error")
+		assert.NoError(t, err, "Complete never checks RowsAffected, so an RLS-filtered update against tenant A's row returns nil, not an error")
 
 		// Read ground truth as the superuser (bypasses RLS) rather than
 		// through either tenant's own RLS-filtered view.

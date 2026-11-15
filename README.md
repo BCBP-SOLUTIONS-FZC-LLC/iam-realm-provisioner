@@ -804,7 +804,7 @@ Unlike a compose file that starts infra-only, this repo's `docker-compose.yml` i
 | Container | Image | Host port(s) | Purpose |
 |---|---|---|---|
 | `app` | built from local `Dockerfile` | `8080`, `9090` | This service itself, when run via `docker compose up` rather than `make run` |
-| `postgres` | `postgres:16-alpine` | `5544 → 5432` | Primary store, seeded by `scripts/init-db.sql` |
+| `postgres` | `postgres:16.16-alpine` | `5544 → 5432` | Primary store, seeded by `scripts/init-db.sql` |
 | `floci` | `floci/floci:2.1.0-compat` | `4572 → 4566` | SNS/SQS/S3/Glue Schema Registry (all free — no Pro tier needed) |
 | `floci-ui` | `floci/floci-ui:0.5.0` | `4504 → 4500` | Web console for `floci` — http://localhost:4504 |
 | `keycloak` | `quay.io/keycloak/keycloak:26.0` | `8091 → 8080` | `start-dev` mode, admin/admin — **not for production use** |

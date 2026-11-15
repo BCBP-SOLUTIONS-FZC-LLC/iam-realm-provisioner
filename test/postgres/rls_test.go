@@ -58,7 +58,7 @@ func setupTestDB(t testing.TB) (appPool *pgcommon.Pool, rawPool *dbseed.Pool) {
 	var err error
 	for attempt := 1; attempt <= maxContainerAttempts; attempt++ {
 		pgContainer, err = tcpostgres.Run(ctx,
-			"postgres:16-alpine",
+			"postgres:16.16-alpine",
 			tcpostgres.WithDatabase("provisioner"),
 			tcpostgres.WithUsername("postgres"),
 			tcpostgres.WithPassword("testpassword"),

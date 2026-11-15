@@ -1,6 +1,6 @@
 # Database Schema
 
-Refines LLD §4, §19. Database `provisioner` on shared RDS PostgreSQL, fronted by PgBouncer in transaction-pooling mode in production (`PG_BOUNCER_MODE=true`). Pool: `pgcommon.NewPool(... GUCProvider: pgcommon.GUCSetFromContext)`. Local dev uses `postgres:16-alpine` (port 5544) in `docker-compose.yml`. Single consolidated migration `000000_initial_schema.{up,down}.sql` (`internal/adapter/outbound/postgres/migrations/`) — this service has never shipped a prior schema version.
+Refines LLD §4, §19. Database `provisioner` on shared RDS PostgreSQL, fronted by PgBouncer in transaction-pooling mode in production (`PG_BOUNCER_MODE=true`). Pool: `pgcommon.NewPool(... GUCProvider: pgcommon.GUCSetFromContext)`. Local dev uses `postgres:16.16-alpine` (port 5544) in `docker-compose.yml`. Single consolidated migration `000000_initial_schema.{up,down}.sql` (`internal/adapter/outbound/postgres/migrations/`) — this service has never shipped a prior schema version.
 
 ## Extensions, Enums, and Helper Functions (§4.1)
 

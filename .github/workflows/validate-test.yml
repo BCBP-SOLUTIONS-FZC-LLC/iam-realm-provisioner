@@ -172,7 +172,7 @@ jobs:
       # against the suite's container-start waits (Keycloak's is 120s).
       - name: Pre-pull container images
         run: |
-          docker pull postgres:16-alpine
+          docker pull postgres:16.16-alpine
           docker pull quay.io/keycloak/keycloak:26.0
 
       # Drives the production route table (internal/adapter/inbound/http.NewRouter,
