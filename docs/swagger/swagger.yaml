@@ -430,6 +430,7 @@ paths:
             $ref: '#/definitions/http.ProblemResponse'
       security:
       - SystemRole: []
+      - OperatorRole: []
       summary: RP-13 — Whole-estate IdP region-portability audit (operator-only)
       tags:
       - IdP
@@ -935,6 +936,7 @@ paths:
       - SystemRole: []
       - TenantID: []
       - IdempotencyKey: []
+      - OperatorRole: []
       summary: RP-14 — Emergency operator suspension
       tags:
       - Lifecycle
@@ -1220,6 +1222,13 @@ securityDefinitions:
       a key for a completed operation replays the stored result.
     in: header
     name: Idempotency-Key
+    type: apiKey
+  OperatorRole:
+    description: Requires the x-tenant-roles header to contain "platform_operator"
+      (injected by AuthZ Enrichment for operator realm tokens, CD-52). Used by RP-13
+      (whole-estate IdP portability audit) and RP-14 (emergency operator suspend).
+    in: header
+    name: x-tenant-roles
     type: apiKey
   SystemRole:
     description: Must contain "iam-system". Injected by the API gateway / mesh; never

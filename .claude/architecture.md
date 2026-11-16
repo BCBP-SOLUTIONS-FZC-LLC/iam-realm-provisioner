@@ -16,6 +16,7 @@ iam-realm-provisioner/
 │   │   ├── inbound_schema.go           # consumedValidator — eventschema.ConsumedByConsumer → sqspipeline.Validator
 │   │   ├── audit_delivery.go           # AL-5 pending_audit_entries drainer goroutine
 │   │   ├── platform_realm.go           # startPlatformRealmEnsure — background retry loop ensuring the operator KC realm (CD-52 item 2, LLD §12.3); skipped when PLATFORM_REALM_NAME unset
+│   │   ├── shared_realm.go             # startSharedRealmEnsure — background retry loop ensuring the shared trial realm (LLD §12.2); started unconditionally from main.go
 │   │   └── exporters.go                # runBusinessExporters — goroutines refreshing the §11.2 DB-state gauges + rls_violations_total
 │   ├── migrate/
 │   │   └── main.go                     # migrate hook Job (Helm pre-install/pre-upgrade): postgres.MigrateSchema over MIGRATION_DATABASE_URL
@@ -118,7 +119,7 @@ iam-realm-provisioner/
 │                                        # metrics-registry-lint.sh, smoke-tests.sh, release/schema-gov helper scripts
 ├── .githooks/pre-commit                # tidy + fmt-check + vet + lint; installed via `make setup`/`make install-hooks`
 ├── test/{unit,postgres,integration,e2e,load,dbseed}/
-├── docs/lld/                           # LLD v1.23 (names frozen at v1.0)
+├── docs/lld/                           # LLD v1.50 (names frozen at v1.0)
 ├── docs/observability/                 # Observability Standard README, generated metric-registry.md, migration.md, runbooks.md (one entry per alert)
 ├── docs/runbook.md                     # operator procedures for the headline incident scenarios (§24)
 ├── docs/runbook-schema-registry.md     # schema-governance operator runbook (shared iam-tenant-events registry)
@@ -139,14 +140,14 @@ iam-realm-provisioner/
 
 ```go
 require (
-    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon  v1.6.0
+    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2  v2.3.0
     github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2     v2.2.1
-    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2   v2.0.1
+    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2   v2.0.2
     github.com/Nerzal/gocloak/v13                         v13.9.0
 )
 ```
 
-Module: `github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.10.
+Module: `github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.11.
 
 **Not a dependency of any other IAM service:** `Nerzal/gocloak` — RP-INV-1 requires this to be the *only* package in the entire platform holding a Keycloak admin credential. `.github/scripts/arch-lint.sh` greps every `*.go` file outside `internal/adapter/outbound/keycloak/` for a `Nerzal/gocloak` import and fails CI if found.
 

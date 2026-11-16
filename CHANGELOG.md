@@ -4,6 +4,30 @@ All notable changes to this service are documented here. Format follows [Keep a 
 
 This service has never been deployed to any environment — there is no released version yet, so everything lives under `[Unreleased]`. Because of that, this file tracks only what is currently true and what is still outstanding, not a phase-by-phase build history; the full development diary is available via `git log` if it's ever needed.
 
+## [Unreleased — 2026-11-16]
+
+### Fixed
+
+- **Three data races in `cmd/server` test suite.** `exporterInterval` was a package-level `var` mutated by one test without synchronization — made `const` and added an `interval time.Duration` parameter to `tick()` so the test passes `5ms` directly instead of mutating global state. `ensureMetricsRegistered` in `wiring_test.go` called `gincommon.ObservabilityMiddlewares` and `metrics.Register()` without synchronization, then guarded only `initLibraryMetrics` via a `sync.Once`; wrapped the entire three-step bootstrap in a single `metricsBootstrapOnce.Do` to prevent interleaving under `-race`. `TestStartSharedRealmEnsure_RunsInBackground` and `TestStartPlatformRealmEnsure_RunsInBackground` passed `context.Background()` — the background goroutines outlived the test and raced with `metrics.Register()` in a later test; fixed by calling `ensureMetricsRegistered(t)` before starting each goroutine and using a cleanup-canceled context.
+
+- **Pre-existing RLS violation in `idempotency_repository.go:Begin` on cross-tenant key collision.** `ON CONFLICT DO UPDATE` evaluated the RLS USING expression on the conflicting row before checking the WHERE clause, so a cross-tenant collision (two tenants reusing the same raw `Idempotency-Key` string) returned `SQLSTATE 42501` instead of the documented `(nil, false, nil)` fresh-start. Refactored `Begin` to a three-step approach: plain `INSERT ON CONFLICT DO NOTHING`, then a tenant-scoped `UPDATE` to reclaim `failed`/lease-expired rows, then a `SELECT` for the replay case. Cross-tenant collisions now correctly surface as `(nil, false, nil)` without an error.
+
+- **`cmd/reconciler/main.go` missing `return 1` after `die()` calls in infrastructure-setup paths.** Five `die(...)` calls in the pool-connection and AWS-config sections lacked a following `return 1`, meaning if `osExit` is ever stubbed (as it is in reconciler unit tests), execution would fall through to code that uses a nil pool. Added `return 1` after each such `die()` call as defence-in-depth.
+
+- **Stale `docs/observability/metric-registry.md`.** The `iam_realm_provisioner_platform_realm_ready` gauge was inserted at the wrong alphabetical position in the registry table; `make metrics-inventory` moved it to its correct position. CI `metrics-lint` now passes cleanly.
+
+- **Dockerfile builder base image bumped from `golang:1.26.10-bookworm` to `golang:1.26.11-bookworm`.** `go.mod` requires `go 1.26.11` but the Dockerfile was pinned to `1.26.10`, causing `make trivy` to fail in the pre-push hook with "GOTOOLCHAIN=local" mismatch. Trivy now passes with 0 findings across all three binaries.
+
+- **CI pipeline only triggered on `main`/`master` pushes.** `ci.yml` had `branches: [main, master]` on both the `push` and `pull_request` triggers, preventing CI from running on feature branches. Removed the `branches` filter to match `iam-org-membership`'s pattern — CI now triggers on every branch push and every PR.
+
+- **Stray `reconciler` binary not ignored by `.gitignore`.** An ad-hoc `go build ./cmd/reconciler` drops the compiled binary at the repo root rather than `bin/`. Added `/reconciler` to `.gitignore` alongside the existing `/server` entry.
+
+### Changed
+
+- **Code coverage: 95.7% → 96.2%.** Added 70+ tests across 25+ files covering tokenservice `classifyStatus`/`revokeVersion`/`RegisterPrincipal` conflict path, Keycloak `EnvSecretFn`/`loadRealmTemplate`/retry-transport context-cancel path, `httpx.ParseRetryAfter` ceiling-clamping branch, `auditlog.problemErrorCode` malformed-JSON path, `sqspipeline.originLink` zero-SpanID branch, `orgmembership.New` zero-timeout default, `idp_validator` banned-key and distinct-`slo_response_url` paths, `cmd/reconciler` unreachable-DB and env-var guard paths, `cmd/migrate` `MIGRATE_TIMEOUT` parse fallback, Postgres schema-corruption tests for `IsTombstoned`/`DedicatedRealmOwner`/`NewGDPRScrubFn`/`IsProcessed` non-UUID event ID, unit tests for `EnqueueOnce` empty key and `InboxRepository` nil-pool store errors, and audit-delivery `MarkFailed`/`MarkRetryAfter` failure-logging paths. Remaining gap (3.8%) is in `cmd/server/main.go` composition-root error paths (58 stmts) and Keycloak adapter error branches (43 stmts).
+
+---
+
 ## [Unreleased — 2026-11-12]
 
 ### Added

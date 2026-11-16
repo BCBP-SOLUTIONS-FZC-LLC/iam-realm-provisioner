@@ -30,6 +30,11 @@
 // @name                       Idempotency-Key
 // @description                Caller-supplied UUID v4. Required on all mutating endpoints. Reusing a key for a completed operation replays the stored result.
 //
+// @securityDefinitions.apikey OperatorRole
+// @in                         header
+// @name                       x-tenant-roles
+// @description                Requires the x-tenant-roles header to contain "platform_operator" (injected by AuthZ Enrichment for operator realm tokens, CD-52). Used by RP-13 (whole-estate IdP portability audit) and RP-14 (emergency operator suspend).
+//
 // @tag.name         Provisioning
 // @tag.description  Realm and user provisioning operations (RP-1..RP-4)
 //
