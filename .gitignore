@@ -38,7 +38,8 @@ bin/
 # .idea/
 # .vscode/
 
-# stray root-level binary from an ad-hoc `go build ./cmd/server` outside
-# make build's bin/ convention — anchored so it doesn't also shadow the
-# real cmd/server source directory the way the old bare `server` pattern did
+# stray root-level binaries from ad-hoc `go build ./cmd/<name>` outside
+# make build's bin/ convention — anchored so they don't shadow the real
+# cmd/* source directories the way bare unanchored patterns would.
 /server
+/reconciler
