@@ -53,7 +53,11 @@ func TestEnsurePlatformRealm_StopsOnCancel(t *testing.T) {
 }
 
 func TestStartPlatformRealmEnsure_RunsInBackground(t *testing.T) {
+	// metrics.PlatformRealmReady must be registered before the goroutine reads it.
+	ensureMetricsRegistered(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	kc := &scriptedPlatformEnsurer{}
-	startPlatformRealmEnsure(context.Background(), kc, "platform", &fakeLogger{})
+	startPlatformRealmEnsure(ctx, kc, "platform", &fakeLogger{})
 	require.Eventually(t, func() bool { return atomic.LoadInt32(&kc.calls) == 1 }, time.Second, time.Millisecond)
 }

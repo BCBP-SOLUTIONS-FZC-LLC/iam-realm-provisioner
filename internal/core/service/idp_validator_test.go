@@ -255,3 +255,53 @@ func TestIsRegionNeutralAuthURL_WrongHost(t *testing.T) {
 func TestIsRegionNeutralAuthURL_CorrectHost(t *testing.T) {
 	assert.True(t, isRegionNeutralAuthURL("https://auth.bcbpsolutions.com/realms/acme/broker/idp/endpoint"))
 }
+
+// Check 0a (CRITICAL): any config key that is known to carry secret
+// material must be rejected — the secret belongs in the separate `secret`
+// field (RP-D10, §10.2), never in the config body which lands in
+// keycloak_idp_configs.config (M12). One banned key is sufficient to fail
+// the check; the first match short-circuits the loop.
+func TestValidateIdpConfig_ConfigNoSecrets_BannedKeyBlocks(t *testing.T) {
+	bannedKeys := []string{
+		"clientSecret", "client_secret",
+		"saml.signing.private.key", "saml.encrypt.private.key",
+		"saml.signing.certificate", "saml.encryption.certificate",
+		"privateKey", "private_key",
+		"secret", "password",
+	}
+	for _, banned := range bannedKeys {
+		t.Run(banned, func(t *testing.T) {
+			cfg := validBaselineSAMLConfig()
+			cfg[banned] = "some-sensitive-value"
+			result := ValidateIdpConfig(domain.IdpProtocolSAML, cfg, nil)
+			assert.Equal(t, domain.ValidationOutcomeFailing, result.Outcome,
+				"a config containing key %q must block with Failing", banned)
+			assert.Contains(t, result.Failed, "config_no_secrets",
+				"check_0a must appear in Failed when a banned key is present")
+			assert.Equal(t, domain.CheckFail, result.Checks["config_no_secrets"])
+		})
+	}
+}
+
+// Check 0a: a config with NO banned keys passes (the common case).
+func TestValidateIdpConfig_ConfigNoSecrets_NoBannedKeys_Passes(t *testing.T) {
+	cfg := validBaselineSAMLConfig()
+	result := ValidateIdpConfig(domain.IdpProtocolSAML, cfg, nil)
+	assert.NotContains(t, result.Failed, "config_no_secrets")
+	assert.Equal(t, domain.CheckPass, result.Checks["config_no_secrets"])
+}
+
+// slo_response_url distinct from slo_url: when the caller supplies a
+// slo_response_url that is itself region-neutral, check 5 passes even
+// though slo_url is also being checked independently under check 2.
+// This exercises the branch where sloResponseURL != "" && sloResponseURL !=
+// sloURL — a path not covered by the existing test suite.
+func TestValidateIdpConfig_DistinctSLOResponseURL_RegionNeutral_PassesCheck5(t *testing.T) {
+	cfg := validBaselineSAMLConfig()
+	cfg["slo_url"] = "https://idp.example.com/slo/saml"              // region-neutral, check 2 passes
+	cfg["slo_response_url"] = "https://idp.example.com/slo/response" // also region-neutral, check 5 passes
+	result := ValidateIdpConfig(domain.IdpProtocolSAML, cfg, nil)
+	assert.Equal(t, domain.ValidationOutcomePass, result.Outcome)
+	assert.NotContains(t, result.Failed, domain.CheckSLOURLRegion)
+	assert.NotContains(t, result.Failed, domain.CheckSLOResponseRegion)
+}

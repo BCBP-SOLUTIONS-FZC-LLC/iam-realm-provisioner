@@ -133,6 +133,34 @@ func TestAuditDelivery_UsesDeterministicKeyWhenSet(t *testing.T) {
 	assert.Equal(t, []uuid.UUID{due[0].ID}, repo.Delivered, "a delivered row is deleted — no IP/user agent lingers here")
 }
 
+// When the client returns ErrAuditEntryTypeUnknown AND MarkRetry itself
+// fails, the MarkRetry error must be LOGGED but NOT propagated — DrainOnce
+// still returns (0, nil). An AL-5 deploy-skew condition that also has a
+// DB hiccup on the retry-mark must not break the drainer loop or surface
+// the mark error to the caller.
+func TestAuditDelivery_UnknownEntryType_MarkRetryFails_ErrorLoggedNotPropagated(t *testing.T) {
+	due := pendingEntries(1)
+	repo := &mockPendingAuditEntryRepository{
+		Due:     due,
+		MarkErr: errors.New("db down"), // MarkRetry will return this error
+	}
+	unknown := fmt.Errorf("%w: AL-5 status 422", port.ErrAuditEntryTypeUnknown)
+	client := &mockAuditLogClient{Errs: []error{unknown}}
+	logger := &mockLogger{}
+	svc := service.NewAuditDeliveryService(repo, client).WithLogger(logger)
+
+	n, err := svc.DrainOnce(context.Background(), 10)
+	require.NoError(t, err, "DrainOnce must not propagate the MarkRetry error")
+	assert.Zero(t, n, "a row in the ErrAuditEntryTypeUnknown path is not counted as delivered")
+	// MarkRetry was attempted (the ID is recorded) but failed.
+	assert.Equal(t, []uuid.UUID{due[0].ID}, repo.Retried,
+		"MarkRetry must still be called even though it will fail")
+	assert.Empty(t, repo.Failed, "a type-unknown row must never be parked as failed")
+	assert.Empty(t, repo.Delivered)
+	// The MarkRetry failure must be logged as a warning, not swallowed silently.
+	assert.GreaterOrEqual(t, logger.warnCalls, 1, "the MarkRetry failure must be logged")
+}
+
 // 422 UNKNOWN_ENTRY_TYPE (Audit Log not yet upgraded to know
 // legal.terms.accepted) keeps the row pending and retries it — never
 // parked, never dropped, even past the transient retry budget.
@@ -152,4 +180,45 @@ func TestAuditDelivery_UnknownEntryType_KeptAndRetried(t *testing.T) {
 	assert.Empty(t, repo.Failed, "an unknown entry type must never be parked as failed")
 	assert.Empty(t, repo.Delivered)
 	assert.Equal(t, before+2, testutil.ToFloat64(metrics.AuditEntryDeliveryTotal.WithLabelValues("unknown_entry_type")))
+}
+
+// When the retry budget is exhausted AND MarkFailed itself fails, the
+// MarkFailed error must be LOGGED but NOT propagated — DrainOnce returns nil.
+func TestAuditDelivery_ExhaustedBudget_MarkFailedFails_ErrorLoggedNotPropagated(t *testing.T) {
+	due := pendingEntries(1)
+	due[0].Attempts = 51 // past max (50)
+	repo := &mockPendingAuditEntryRepository{
+		Due:     due,
+		MarkErr: errors.New("db down"),
+	}
+	client := &mockAuditLogClient{Errs: []error{errors.New("timeout")}}
+	logger := &mockLogger{}
+	svc := service.NewAuditDeliveryService(repo, client).WithLogger(logger)
+
+	n, err := svc.DrainOnce(context.Background(), 10)
+	require.NoError(t, err, "MarkFailed failure must not propagate from DrainOnce")
+	assert.Zero(t, n)
+	assert.Equal(t, []uuid.UUID{due[0].ID}, repo.Failed, "MarkFailed must still be attempted")
+	assert.GreaterOrEqual(t, logger.warnCalls, 1, "the MarkFailed failure must be logged as a warning")
+}
+
+// A *port.RetryAfterError whose MarkRetryAfter call also fails must be
+// LOGGED but NOT propagated — the row will be retried on the next drain
+// tick via ordinary backoff.
+func TestAuditDelivery_RetryAfter_MarkRetryAfterFails_ErrorLoggedNotPropagated(t *testing.T) {
+	due := pendingEntries(1)
+	repo := &mockPendingAuditEntryRepository{
+		Due:     due,
+		MarkErr: errors.New("db down"),
+	}
+	base := errors.New("auditlog: 429 too many requests")
+	client := &mockAuditLogClient{Errs: []error{&port.RetryAfterError{Underlying: base, RetryAfter: 5 * time.Second}}}
+	logger := &mockLogger{}
+	svc := service.NewAuditDeliveryService(repo, client).WithLogger(logger)
+
+	n, err := svc.DrainOnce(context.Background(), 10)
+	require.NoError(t, err, "MarkRetryAfter failure must not propagate from DrainOnce")
+	assert.Zero(t, n)
+	assert.Equal(t, []uuid.UUID{due[0].ID}, repo.RetriedAfter, "MarkRetryAfter must still be attempted")
+	assert.GreaterOrEqual(t, logger.warnCalls, 1, "the MarkRetryAfter failure must be logged as a warning")
 }

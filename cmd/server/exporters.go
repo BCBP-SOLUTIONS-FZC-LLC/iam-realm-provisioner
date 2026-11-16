@@ -18,11 +18,7 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 )
 
-// exporterInterval is a var, not a const, purely so a test can shrink it
-// for the duration of one case (t.Cleanup restores it) to make tick's
-// periodic re-fire branch exercisable in well under 5 minutes — production
-// behavior is unaffected, nothing else in this file ever reassigns it.
-var exporterInterval = 5 * time.Minute
+const exporterInterval = 5 * time.Minute
 
 // runBusinessExporters starts the goroutines that keep the three DB-state
 // gauges in §11.2, plus the rls_violations_total counter (RLS-6, §17.5 Case
@@ -40,7 +36,7 @@ var exporterInterval = 5 * time.Minute
 func runBusinessExporters(ctx context.Context, gauges *pgadapter.GaugeRepository, log port.Logger) {
 	templateVersion := envOr("REALM_TEMPLATE_VERSION", "v1")
 
-	go tick(ctx, "realm_config_pending_gauge", log, func() error {
+	go tick(ctx, exporterInterval, "realm_config_pending_gauge", log, func() error {
 		n, err := gauges.PendingRealmConfigs(ctx)
 		if err != nil {
 			return err
@@ -52,7 +48,7 @@ func runBusinessExporters(ctx context.Context, gauges *pgadapter.GaugeRepository
 	// No Reset: the label set is the fixed realm_strategy enum and the query
 	// returns a row per member, so a strategy with no realms must report 0
 	// rather than disappear.
-	go tick(ctx, "realm_active_gauge", log, func() error {
+	go tick(ctx, exporterInterval, "realm_active_gauge", log, func() error {
 		counts, err := gauges.ActiveRealmsByStrategy(ctx)
 		if err != nil {
 			return err
@@ -64,7 +60,7 @@ func runBusinessExporters(ctx context.Context, gauges *pgadapter.GaugeRepository
 	// Reset: the drifting-version label set shrinks as realms are upgraded,
 	// and a version that no longer drifts must stop being reported instead
 	// of sitting at its last non-zero count forever.
-	go tick(ctx, "template_drift", log, func() error {
+	go tick(ctx, exporterInterval, "template_drift", log, func() error {
 		counts, err := gauges.TemplateDriftByVersion(ctx, templateVersion)
 		if err != nil {
 			return err
@@ -75,7 +71,7 @@ func runBusinessExporters(ctx context.Context, gauges *pgadapter.GaugeRepository
 
 	// No Reset: the label set is the fixed pending|failed status pair and
 	// the query returns a row for each, including zeros.
-	go tick(ctx, "audit_entry_backlog_gauge", log, func() error {
+	go tick(ctx, exporterInterval, "audit_entry_backlog_gauge", log, func() error {
 		counts, err := gauges.AuditEntryBacklog(ctx)
 		if err != nil {
 			return err
@@ -98,7 +94,7 @@ func runBusinessExporters(ctx context.Context, gauges *pgadapter.GaugeRepository
 	// first-ever run. A violation_type absent from this tick's result
 	// contributes 0, not a reset to 0 — an unrelated label must never lose
 	// its history.
-	go tick(ctx, "rls_violations_total", log, func() error {
+	go tick(ctx, exporterInterval, "rls_violations_total", log, func() error {
 		counts, err := gauges.RLSViolationCounts(ctx, exporterInterval)
 		if err != nil {
 			return err
@@ -124,8 +120,8 @@ func setGaugeVec(vec *prometheus.GaugeVec, counts map[string]int64, reset bool) 
 	}
 }
 
-// tick runs emit once, then on exporterInterval until ctx is canceled.
-func tick(ctx context.Context, gauge string, log port.Logger, emit func() error) {
+// tick runs emit once, then on interval until ctx is canceled.
+func tick(ctx context.Context, interval time.Duration, gauge string, log port.Logger, emit func() error) {
 	run := func() {
 		if err := emit(); err != nil {
 			log.Warn("gauge exporter query failed", map[string]any{
@@ -134,7 +130,7 @@ func tick(ctx context.Context, gauge string, log port.Logger, emit func() error)
 		}
 	}
 	run() // populate before the first scrape
-	ticker := time.NewTicker(exporterInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {

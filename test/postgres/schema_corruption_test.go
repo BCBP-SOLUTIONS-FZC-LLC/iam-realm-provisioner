@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	jobs "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/cmd/reconciler/jobs"
 	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/google/uuid"
@@ -278,6 +279,57 @@ func TestIdpValidationRepository_Insert_SchemaCorruption(t *testing.T) {
 	require.Error(t, err, "Insert's own INSERT column list names the now-missing outcome column")
 }
 
+// TestTenantRealmRepository_IsTombstoned_QueryFailure drops
+// tenant_realms.deleted_at — referenced in IsTombstoned's WHERE clause
+// (deleted_at IS NOT NULL) — after seeding a row, so the SELECT itself
+// fails at the Postgres level, exercising the (false, err) return path that
+// is not reachable by the normal-operation tests (which always get a valid
+// boolean back).
+func TestTenantRealmRepository_IsTombstoned_QueryFailure(t *testing.T) {
+	t.Parallel()
+	appPool, rawPool := setupTestDB(t)
+	ctx := context.Background()
+	repo := pgadapter.NewTenantRealmRepository(appPool)
+
+	tenantID := uuid.New()
+	tctx := withTenant(ctx, tenantID)
+	require.NoError(t, repo.Upsert(tctx, newSharedTrial(tenantID)))
+
+	_, err := rawPool.Exec(ctx, `ALTER TABLE tenant_realms DROP COLUMN deleted_at CASCADE`)
+	require.NoError(t, err)
+
+	ok, err := repo.IsTombstoned(tctx, tenantID)
+	require.Error(t, err, "the WHERE clause names the now-missing deleted_at column")
+	assert.False(t, ok, "must return false on a genuine DB error")
+}
+
+// TestTenantRealmRepository_DedicatedRealmOwner_QueryFailure drops
+// tenant_realms.strategy — named in DedicatedRealmOwner's WHERE clause
+// (strategy = 'dedicated') — after seeding a dedicated row on the sysPool,
+// so the SELECT fails with a genuine non-ErrNoRows error, exercising the
+// (uuid.Nil, false, err) return path.
+func TestTenantRealmRepository_DedicatedRealmOwner_QueryFailure(t *testing.T) {
+	t.Parallel()
+	appPool, rawPool := setupTestDB(t)
+	sysPool := setupSysPool(t, rawPool)
+	ctx := context.Background()
+	repo := pgadapter.NewTenantRealmRepository(appPool)
+	sysRepo := pgadapter.NewTenantRealmRepository(sysPool)
+
+	tenantID := uuid.New()
+	tctx := withTenant(ctx, tenantID)
+	realmName := "tenant-corrupt-" + tenantID.String()[:8]
+	require.NoError(t, repo.Upsert(tctx, newDedicated(tenantID, realmName, "shard-x")))
+
+	_, err := rawPool.Exec(ctx, `ALTER TABLE tenant_realms DROP COLUMN strategy CASCADE`)
+	require.NoError(t, err)
+
+	owner, found, err := sysRepo.DedicatedRealmOwner(ctx, realmName)
+	require.Error(t, err, "the WHERE clause names the now-missing strategy column")
+	assert.False(t, found)
+	assert.Equal(t, uuid.Nil, owner)
+}
+
 // TestIdempotencyRepository_Begin_SchemaCorruption drops
 // provisioning_operations.operation — named in Begin's own INSERT column
 // list — forcing a genuine query failure distinct from the pgx.ErrNoRows
@@ -332,4 +384,54 @@ func TestGaugeRepository_ActiveRealmsByStrategy_QueryFailure(t *testing.T) {
 
 	_, err = gauges.ActiveRealmsByStrategy(ctx)
 	require.Error(t, err, "activeRealmsByStrategySQL names the now-missing status column")
+}
+
+// TestNewGDPRScrubFn covers both the happy path of the returned closure
+// (scrubTenantPII succeeds against an empty but valid schema) and the error
+// path (scrubTenantPII fails when a targeted table is dropped).
+func TestNewGDPRScrubFn(t *testing.T) {
+	t.Run("HappyPath_NoError", func(t *testing.T) {
+		t.Parallel()
+		_, rawPool := setupTestDB(t)
+		sysPool := setupSysPool(t, rawPool)
+		ctx := context.Background()
+
+		fn := jobs.NewGDPRScrubFn(sysPool)
+		// Tables exist and DELETE against a non-existent tenant_id is a safe no-op.
+		err := fn(ctx, uuid.New())
+		require.NoError(t, err)
+	})
+
+	t.Run("DBError_PropagatesFromClosure", func(t *testing.T) {
+		t.Parallel()
+		_, rawPool := setupTestDB(t)
+		sysPool := setupSysPool(t, rawPool)
+		ctx := context.Background()
+
+		// Drop a table that scrubTenantPII DELETEs from — the first DELETE
+		// in gdprScrubQueries targets keycloak_idp_configs.
+		_, err := rawPool.Exec(ctx, `DROP TABLE keycloak_idp_configs CASCADE`)
+		require.NoError(t, err)
+
+		fn := jobs.NewGDPRScrubFn(sysPool)
+		err = fn(ctx, uuid.New())
+		require.Error(t, err, "a missing table must surface as an error from the closure")
+	})
+}
+
+// TestInboxRepository_IsProcessed_NonUUIDEventID covers the uuid.Parse
+// error branch in IsProcessed: the inbox store is initialized successfully
+// (the schema is intact), but the caller supplies a non-UUID event ID.
+func TestInboxRepository_IsProcessed_NonUUIDEventID(t *testing.T) {
+	t.Parallel()
+	appPool, _ := setupTestDB(t)
+	ctx := context.Background()
+	inbox := pgadapter.NewInboxRepository(appPool, nil)
+
+	// A valid consumer primes the store; then a non-UUID eventID hits the
+	// uuid.Parse error branch before any DB query is issued.
+	ok, err := inbox.IsProcessed(ctx, domain.ConsumerMembership, "not-a-valid-uuid")
+	require.Error(t, err)
+	assert.False(t, ok)
+	assert.Contains(t, err.Error(), "UUID")
 }

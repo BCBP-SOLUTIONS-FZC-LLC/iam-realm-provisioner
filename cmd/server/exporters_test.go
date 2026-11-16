@@ -57,7 +57,7 @@ func TestTick_EmitsOnceBeforeFirstTickerFire(t *testing.T) {
 	var calls int32
 	done := make(chan struct{})
 	go func() {
-		tick(ctx, "test_gauge", &fakeLogger{}, func() error {
+		tick(ctx, exporterInterval, "test_gauge", &fakeLogger{}, func() error {
 			atomic.AddInt32(&calls, 1)
 			return nil
 		})
@@ -81,7 +81,7 @@ func TestTick_ReturnsPromptlyOnContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		tick(ctx, "test_gauge", &fakeLogger{}, func() error { return nil })
+		tick(ctx, exporterInterval, "test_gauge", &fakeLogger{}, func() error { return nil })
 		close(done)
 	}()
 
@@ -108,7 +108,7 @@ func TestTick_QueryFailureLogsWarnAndKeepsRunning(t *testing.T) {
 	done := make(chan struct{})
 
 	go func() {
-		tick(ctx, "test_gauge", log, func() error { return errors.New("boom") })
+		tick(ctx, exporterInterval, "test_gauge", log, func() error { return errors.New("boom") })
 		close(done)
 	}()
 
@@ -126,19 +126,14 @@ func TestTick_QueryFailureLogsWarnAndKeepsRunning(t *testing.T) {
 }
 
 // TestTick_ReFiresOnTicker pins the periodic re-fire itself, distinct from
-// the "populate before the first scrape" initial emit above — shrinks
-// exporterInterval for this one case so the ticker fires in well under a
-// second instead of the real 5 minutes.
+// the "populate before the first scrape" initial emit above — passes a small
+// interval directly so the ticker fires in well under a second.
 func TestTick_ReFiresOnTicker(t *testing.T) {
-	old := exporterInterval
-	exporterInterval = 5 * time.Millisecond
-	t.Cleanup(func() { exporterInterval = old })
-
 	ctx, cancel := context.WithCancel(context.Background())
 	var calls int32
 	done := make(chan struct{})
 	go func() {
-		tick(ctx, "test_gauge", &fakeLogger{}, func() error {
+		tick(ctx, 5*time.Millisecond, "test_gauge", &fakeLogger{}, func() error {
 			atomic.AddInt32(&calls, 1)
 			return nil
 		})

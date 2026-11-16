@@ -71,7 +71,11 @@ func TestEnsureSharedRealm_StopsOnCancel(t *testing.T) {
 }
 
 func TestStartSharedRealmEnsure_RunsInBackground(t *testing.T) {
+	// metrics.SharedRealmReady must be registered before the goroutine reads it.
+	ensureMetricsRegistered(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	kc := &scriptedEnsurer{}
-	startSharedRealmEnsure(context.Background(), kc, "trial", &fakeLogger{})
+	startSharedRealmEnsure(ctx, kc, "trial", &fakeLogger{})
 	require.Eventually(t, func() bool { return atomic.LoadInt32(&kc.calls) == 1 }, time.Second, time.Millisecond)
 }

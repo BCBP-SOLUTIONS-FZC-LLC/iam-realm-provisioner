@@ -584,6 +584,38 @@ func TestProvisionDirect_IdempotencyCompleteFailure_LoggedNotPropagated(t *testi
 	assert.GreaterOrEqual(t, logger.warnCalls, 1)
 }
 
+// §9.3 / isInvalidRequest guard: when CreateInvitedUser returns
+// ErrInvalidRequest (a caller-supplied invalid credential, not a transient
+// Keycloak failure), the compensating realm teardown must NOT be triggered
+// — the realm itself is valid; only the caller's input was malformed.
+// Contrast with TestProvisionDirect_CreateInvitedUserFails_TeardownCalled,
+// which verifies that a transient Keycloak error (ErrKeycloakUnavailable)
+// DOES trigger teardown.
+func TestProvisionDirect_CreateInvitedUserInvalidRequest_NoTeardown(t *testing.T) {
+	svc, kc, _, idem, _ := newProvisioningTestService(t)
+	tenantID := uuid.New()
+	kc.CreateRealmFromTemplateFn = func(ctx context.Context, realmName, v string) error { return nil }
+	kc.RegisterOIDCClientsFn = func(ctx context.Context, realmName, slug string) ([]string, error) {
+		return []string{"tender-web"}, nil
+	}
+	kc.CreateInvitedUserFn = func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error) {
+		return uuid.Nil, domain.NewError(domain.ErrInvalidRequest, "bad credential")
+	}
+	// DeleteRealmIfExistsFn is intentionally NOT set — a call would panic,
+	// proving that bestEffortDeleteRealm was never invoked.
+
+	_, err := svc.ProvisionDirect(context.Background(), "pd-invalid-cred", service.ProvisionDirectRequest{
+		Terms:    validTerms(),
+		TenantID: tenantID, TenantSlug: "acme", AdminEmail: "a@acme.example", AdminName: "A",
+	})
+	require.Error(t, err)
+	de, ok := err.(*domain.Error)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrInvalidRequest, de.Code,
+		"the original ErrInvalidRequest must propagate unchanged")
+	assert.Equal(t, domain.OpStatusFailed, idem.rows["pd-invalid-cred"].Status)
+}
+
 // ── RP-5: CreateInvitedUser ──────────────────────────────────────────────
 
 func TestCreateInvitedUser_Success(t *testing.T) {

@@ -19,18 +19,22 @@ import (
 )
 
 var (
-	libraryMetricsOnce sync.Once
-	libraryMetricsLog  = &fakeLogger{}
+	metricsBootstrapOnce sync.Once
+	libraryMetricsLog    = &fakeLogger{}
 )
 
 // ensureMetricsRegistered runs the same metrics bootstrap as main():
 // gincommon identity, business metrics, then platform-events/pgcommon on
-// the same registerer and identity.
+// the same registerer and identity. The entire sequence is protected by a
+// single sync.Once so concurrent callers never interleave the steps and
+// cause spurious registration warnings.
 func ensureMetricsRegistered(t *testing.T) {
 	t.Helper()
-	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{Domain: "iam", Environment: "test", ServiceName: "iam-realm-provisioner", BuildVersion: "test"})
-	metrics.Register()
-	libraryMetricsOnce.Do(func() { initLibraryMetrics(libraryMetricsLog) })
+	metricsBootstrapOnce.Do(func() {
+		_ = gincommon.ObservabilityMiddlewares(gincommon.Config{Domain: "iam", Environment: "test", ServiceName: "iam-realm-provisioner", BuildVersion: "test"})
+		metrics.Register()
+		initLibraryMetrics(libraryMetricsLog)
+	})
 }
 
 // TestInitLibraryMetrics_SharesIdentityAndDependencyHistogram covers

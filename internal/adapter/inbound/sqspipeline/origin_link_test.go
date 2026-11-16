@@ -44,6 +44,17 @@ func TestOriginLink_MissingOrMalformedIDs_NoLink(t *testing.T) {
 	}
 }
 
+// TestOriginLink_ZeroSpanID_NoLink confirms that an all-zero SpanID paired
+// with a valid TraceID yields no link. The OTel library rejects the all-zero
+// span-id string in SpanIDFromHex itself (it cannot be all zero), so the
+// function returns (trace.Link{}, false) at the parse-error guard, never
+// reaching sc.IsValid() — but the caller's observable contract is the same:
+// no link must be produced for a zero span context component.
+func TestOriginLink_ZeroSpanID_NoLink(t *testing.T) {
+	_, ok := originLink(envelopeWith(validTraceID, "0000000000000000"))
+	assert.False(t, ok, "an all-zero SpanID must not produce a span link")
+}
+
 // The span wrapper is transparent: the handler runs with the envelope and
 // its error comes back unchanged, with or without a producer link.
 func TestInstrumentedHandler_PassesThroughResult(t *testing.T) {

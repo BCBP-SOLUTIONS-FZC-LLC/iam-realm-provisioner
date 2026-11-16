@@ -164,6 +164,7 @@ func run() int {
 	pool, err := pgcommon.NewPool(ctx, pgCfg)
 	if err != nil {
 		die("connect to postgres: %v", err)
+		return 1
 	}
 
 	// DrainAndClose is pgcommon's graceful path (wait for in-flight
@@ -198,6 +199,7 @@ func run() int {
 		drainPools()
 		die("startup aborted: SYSTEM_DATABASE_URL is not set — reconciler jobs require a BYPASSRLS role; " +
 			"without it all cross-tenant queries are RLS-filtered to zero rows and RP-C3 GDPR hard-delete is silently disabled")
+		return 1
 	}
 	sysCfg := pgadapter.SystemPoolConfig(sysDSNStr, rawLog)
 	sysCfg.Tracer = gincommon.NewSpanTracer(serviceName)
@@ -205,12 +207,14 @@ func run() int {
 	if err != nil {
 		drainPools()
 		die("connect sysPool: %v", err)
+		return 1
 	}
 
 	enqueueCodec, err := eventbusadapter.NewValidatingCodec(eventbusadapter.NoopCodec{})
 	if err != nil {
 		drainPools()
 		die("init validating codec: %v", err)
+		return 1
 	}
 	outboxPublisher := eventbusadapter.New(serviceName, enqueueCodec).WithLogger(rawLog)
 	txRunner := pgadapter.NewTxRunner(sysPool, outboxPublisher)
@@ -228,6 +232,7 @@ func run() int {
 	if err != nil {
 		drainPools()
 		die("load aws config: %v", err)
+		return 1
 	}
 	var s3Opts []func(*s3.Options)
 	if ep := os.Getenv("AWS_ENDPOINT_URL"); ep != "" {
@@ -268,6 +273,7 @@ func run() int {
 		if err != nil {
 			drainPools()
 			die("create outbox runner: %v", err)
+			return 1
 		}
 	}
 
