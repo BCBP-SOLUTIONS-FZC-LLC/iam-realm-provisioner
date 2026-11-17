@@ -282,7 +282,11 @@ jobs:
     name: PR summary
     runs-on: ubuntu-latest
     needs: [validate-test, validate-quality, build-image, trivy, smoke]
-    if: github.event_name == 'pull_request'
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' &&
+       github.ref != 'refs/heads/main' &&
+       github.ref != 'refs/heads/master')
     timeout-minutes: 5
     permissions:
       contents: read
