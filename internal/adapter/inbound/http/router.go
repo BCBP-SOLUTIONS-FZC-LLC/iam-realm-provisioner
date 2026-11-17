@@ -50,6 +50,10 @@ type RouterConfig struct {
 	Outbox      Pinger
 	Keycloak    Pinger
 	OpenBao     Pinger
+	// AuditRunner is platform-audit's Runner.Alive (optional): checked by
+	// /healthz, never /readyz — a stalled runner is restarted, but an Audit
+	// Log outage must never take the pod out of rotation (AUDIT-CALLER-1).
+	AuditRunner Pinger
 }
 
 // Router owns the Gin engine for this service.
@@ -95,10 +99,11 @@ type healthHandlers struct {
 	outbox      Pinger
 	keycloak    Pinger
 	openBao     Pinger
+	auditRunner Pinger
 }
 
 func registerInfraRoutes(r *gin.Engine, cfg RouterConfig) {
-	h := &healthHandlers{postgres: cfg.Postgres, sysPostgres: cfg.SysPostgres, outbox: cfg.Outbox, keycloak: cfg.Keycloak, openBao: cfg.OpenBao}
+	h := &healthHandlers{postgres: cfg.Postgres, sysPostgres: cfg.SysPostgres, outbox: cfg.Outbox, keycloak: cfg.Keycloak, openBao: cfg.OpenBao, auditRunner: cfg.AuditRunner}
 	r.GET("/healthz", h.healthz)
 	r.GET("/readyz", h.readyz)
 	// /metrics is served on its own dedicated port (METRICS_PORT, §3.1) —
@@ -106,8 +111,17 @@ func registerInfraRoutes(r *gin.Engine, cfg RouterConfig) {
 	// mesh-internal provisioning API.
 }
 
-// healthz is a pure liveness check — never inspects dependencies.
+// healthz is the liveness check. It never inspects a dependency; the one
+// in-process check is platform-audit's Runner heartbeat (AuditRunner), which
+// fails only when the delivery loop itself has stalled, not when Audit Log
+// is down.
 func (h *healthHandlers) healthz(c *gin.Context) {
+	if h.auditRunner != nil {
+		if err := h.auditRunner.Health(c.Request.Context()); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unhealthy", "audit_runner": err.Error()})
+			return
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 

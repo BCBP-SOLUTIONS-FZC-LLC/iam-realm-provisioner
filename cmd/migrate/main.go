@@ -1,6 +1,7 @@
 // Command migrate brings the provisioner database to this build's schema and
-// exits: platform-events' outbox schema, then the domain migrations
-// (postgres.MigrateSchema, §19). The Helm chart runs it once per release as
+// exits: platform-events' outbox schema, then the domain migrations, then
+// platform-audit's as-built adoption of pending_audit_entries
+// (postgres.MigrateSchema → AdoptAuditOutbox, §19). The Helm chart runs it once per release as
 // a pre-install/pre-upgrade hook Job, so the server replicas
 // (RUN_MIGRATIONS=false) never race for the migration lock at startup —
 // matching iam-org-membership.

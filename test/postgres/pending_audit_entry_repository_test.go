@@ -1,24 +1,44 @@
 //go:build integration
 
-// Package postgres_test covers PendingAuditEntryRepository (§4.4, §10.6):
-// the durable TenantIdpConfigChanged hand-off to Audit Log's AL-5. Enqueue
-// runs RLS-bound on the app pool; ClaimDue and the Mark* methods are the
-// cross-tenant drainer's and run on the BYPASSRLS sysPool.
+// Package postgres_test covers PendingAuditEntryRepository (§4.4, §10.6) on
+// platform-audit's outbox: the as-built pending_audit_entries table is
+// converted by AdoptAuditOutbox (setupTestDB runs it, as MigrateSchema
+// does), Enqueue runs RLS-bound on the app pool inside the business
+// transaction, and the library Runner delivers from the BYPASSRLS sysPool.
 package postgres_test
 
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
-	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/pkg/auditoutbox"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/pkg/audittest"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
+
+	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 )
+
+// newTestEnqueuer is the Enqueuer cmd/server builds from the AUDIT_* env.
+func newTestEnqueuer(t testing.TB) *auditoutbox.Enqueuer {
+	t.Helper()
+	enq, err := auditoutbox.NewEnqueuer(auditoutbox.EnqueueConfig{SourceService: domain.Source})
+	require.NoError(t, err)
+	return enq
+}
+
+// newAuditRepo is a PendingAuditEntryRepository on pool with the test
+// Enqueuer.
+func newAuditRepo(t testing.TB, pool *pgcommon.Pool) *pgadapter.PendingAuditEntryRepository {
+	t.Helper()
+	return pgadapter.NewPendingAuditEntryRepository(pool, newTestEnqueuer(t))
+}
 
 func newIdpAuditEntry(tenantID uuid.UUID) domain.AuditEntry {
 	return domain.AuditEntry{
@@ -36,155 +56,150 @@ func TestPendingAuditEntryRepository(t *testing.T) {
 	appPool, rawPool := setupTestDB(t)
 	sysPool := setupSysPool(t, rawPool)
 	ctx := context.Background()
-	repo := pgadapter.NewPendingAuditEntryRepository(appPool)
-	sysRepo := pgadapter.NewPendingAuditEntryRepository(sysPool)
+	repo := newAuditRepo(t, appPool)
+	tx := pgadapter.NewTxRunner(appPool, nil)
 
-	// Subtests share one table and ClaimDue is a cross-tenant sweep, so
-	// they run sequentially.
-
-	t.Run("Enqueue_ThenClaimDue_RoundTripsEntryAndLeases", func(t *testing.T) {
-		tenantID := uuid.New()
-		want := newIdpAuditEntry(tenantID)
-		require.NoError(t, repo.Enqueue(withTenant(ctx, tenantID), want))
-
-		claimed, err := sysRepo.ClaimDue(ctx, 10)
-		require.NoError(t, err)
-		require.Len(t, claimed, 1)
-		got := claimed[0]
-		assert.Equal(t, tenantID, got.TenantID)
-		assert.Equal(t, 1, got.Attempts)
-		assert.Equal(t, want.EntryType, got.Entry.EntryType)
-		assert.Equal(t, want.Target, got.Entry.Target)
-		assert.True(t, want.OccurredAt.Equal(got.Entry.OccurredAt))
-		var meta map[string]any
-		require.NoError(t, json.Unmarshal(got.Entry.Metadata, &meta))
-		assert.Equal(t, "pass", meta["validation_outcome"])
-
-		// The claim pushed next_attempt_at out — an immediate re-claim
-		// (e.g. a second replica) must not see the row again.
-		again, err := sysRepo.ClaimDue(ctx, 10)
-		require.NoError(t, err)
-		assert.Empty(t, again)
-
-		require.NoError(t, sysRepo.MarkDelivered(ctx, got.ID))
+	count := func(t *testing.T, tenantID uuid.UUID) int {
+		t.Helper()
 		var n int
-		require.NoError(t, rawPool.QueryRow(ctx, `SELECT count(*) FROM pending_audit_entries WHERE id = $1`, got.ID).Scan(&n))
-		assert.Zero(t, n, "a delivered row is deleted")
+		require.NoError(t, rawPool.QueryRow(ctx, `SELECT count(*) FROM pending_audit_entries WHERE tenant_id = $1`, tenantID).Scan(&n))
+		return n
+	}
+
+	t.Run("Schema_IsLibraryShape_AndAdoptionIsIdempotent", func(t *testing.T) {
+		var trig bool
+		require.NoError(t, rawPool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'platform_audit_compat')`).Scan(&trig))
+		assert.True(t, trig, "release N keeps the compatibility trigger until FinishAdoption")
+		var keyNotNull bool
+		require.NoError(t, rawPool.QueryRow(ctx, `SELECT attnotnull FROM pg_attribute
+			WHERE attrelid = 'pending_audit_entries'::regclass AND attname = 'idempotency_key'`).Scan(&keyNotNull))
+		assert.True(t, keyNotNull)
+		var version int64
+		require.NoError(t, rawPool.QueryRow(ctx, `SELECT version FROM `+auditoutbox.MigrationsTable).Scan(&version))
+		assert.Equal(t, int64(1), version, "ApplySchema holds at version 1 while the compatibility trigger exists")
+
+		superDSN := rawPool.Config().ConnString()
+		require.NoError(t, pgadapter.AdoptAuditOutbox(ctx, superDSN, nil), "a second run is a no-op")
 	})
 
-	t.Run("MarkRetry_KeepsPending_MarkFailed_Parks", func(t *testing.T) {
+	t.Run("Enqueue_InTx_WritesOneRowPerChange", func(t *testing.T) {
 		tenantID := uuid.New()
-		require.NoError(t, repo.Enqueue(withTenant(ctx, tenantID), newIdpAuditEntry(tenantID)))
-		require.NoError(t, repo.Enqueue(withTenant(ctx, tenantID), newIdpAuditEntry(tenantID)))
-		claimed, err := sysRepo.ClaimDue(ctx, 10)
-		require.NoError(t, err)
-		require.Len(t, claimed, 2)
-
-		require.NoError(t, sysRepo.MarkRetry(ctx, claimed[0].ID, "connection refused"))
-		require.NoError(t, sysRepo.MarkFailed(ctx, claimed[1].ID, "422 unknown_entry_type"))
-
-		var status, lastErr string
-		require.NoError(t, rawPool.QueryRow(ctx, `SELECT status, last_error FROM pending_audit_entries WHERE id = $1`, claimed[0].ID).Scan(&status, &lastErr))
-		assert.Equal(t, "pending", status)
-		assert.Equal(t, "connection refused", lastErr)
-		require.NoError(t, rawPool.QueryRow(ctx, `SELECT status, last_error FROM pending_audit_entries WHERE id = $1`, claimed[1].ID).Scan(&status, &lastErr))
-		assert.Equal(t, "failed", status)
-
-		// Once its backoff elapses the retry row is claimable again; the
-		// failed row never is.
-		_, err = rawPool.Exec(ctx, `UPDATE pending_audit_entries SET next_attempt_at = now() - interval '1 second'`)
-		require.NoError(t, err)
-		reclaimed, err := sysRepo.ClaimDue(ctx, 10)
-		require.NoError(t, err)
-		require.Len(t, reclaimed, 1)
-		assert.Equal(t, claimed[0].ID, reclaimed[0].ID)
-		assert.Equal(t, 2, reclaimed[0].Attempts)
-
-		gauges := pgadapter.NewGaugeRepository(sysPool)
-		backlog, err := gauges.AuditEntryBacklog(ctx)
-		require.NoError(t, err)
-		assert.Equal(t, map[string]int64{"pending": 1, "failed": 1}, backlog)
-
-		_, err = rawPool.Exec(ctx, `DELETE FROM pending_audit_entries`)
-		require.NoError(t, err)
-	})
-
-	// Regression: last_error is truncated to 1024 bytes. A cut through a
-	// multi-byte rune, or invalid bytes from an upstream body, used to make
-	// Postgres reject the UPDATE, so the row never left the retry loop.
-	t.Run("MarkFailed_LongMultibyteOrInvalidError_Persists", func(t *testing.T) {
-		tenantID := uuid.New()
-		require.NoError(t, repo.Enqueue(withTenant(ctx, tenantID), newIdpAuditEntry(tenantID)))
-		require.NoError(t, repo.Enqueue(withTenant(ctx, tenantID), newIdpAuditEntry(tenantID)))
-		claimed, err := sysRepo.ClaimDue(ctx, 10)
-		require.NoError(t, err)
-		require.Len(t, claimed, 2)
-
-		require.NoError(t, sysRepo.MarkFailed(ctx, claimed[0].ID, "x"+strings.Repeat("é", 2000)))
-		require.NoError(t, sysRepo.MarkRetry(ctx, claimed[1].ID, "502 \xff\xfe bad gateway"))
-
-		var lastErr string
-		require.NoError(t, rawPool.QueryRow(ctx, `SELECT last_error FROM pending_audit_entries WHERE id = $1`, claimed[0].ID).Scan(&lastErr))
-		assert.LessOrEqual(t, len(lastErr), 1024)
-		assert.True(t, strings.HasPrefix(lastErr, "xé"))
-
-		_, err = rawPool.Exec(ctx, `DELETE FROM pending_audit_entries`)
-		require.NoError(t, err)
-	})
-
-	t.Run("ClaimDue_RespectsLimit", func(t *testing.T) {
-		for i := 0; i < 3; i++ {
-			tenantID := uuid.New()
-			require.NoError(t, repo.Enqueue(withTenant(ctx, tenantID), newIdpAuditEntry(tenantID)))
+		entry := newIdpAuditEntry(tenantID)
+		tctx := withTenant(ctx, tenantID)
+		for range 2 { // a retried transaction carries the same entry, hence the same key
+			require.NoError(t, tx.RunInTx(tctx, func(ctx context.Context) error { return repo.Enqueue(ctx, entry) }))
 		}
-		claimed, err := sysRepo.ClaimDue(ctx, 2)
+		assert.Equal(t, 1, count(t, tenantID))
+
+		var key string
+		require.NoError(t, rawPool.QueryRow(ctx, `SELECT idempotency_key FROM pending_audit_entries WHERE tenant_id = $1`, tenantID).Scan(&key))
+		_, err := uuid.Parse(key)
+		assert.NoError(t, err, "Enqueue keys are NewKeyStrict UUIDs")
+
+		other := entry
+		other.OccurredAt = entry.OccurredAt.Add(time.Second)
+		require.NoError(t, tx.RunInTx(tctx, func(ctx context.Context) error { return repo.Enqueue(ctx, other) }))
+		assert.Equal(t, 2, count(t, tenantID), "a different change is a different key")
+	})
+
+	t.Run("Enqueue_RolledBackTx_LeavesNoRow", func(t *testing.T) {
+		tenantID := uuid.New()
+		err := tx.RunInTx(withTenant(ctx, tenantID), func(ctx context.Context) error {
+			require.NoError(t, repo.Enqueue(ctx, newIdpAuditEntry(tenantID)))
+			return assert.AnError
+		})
+		require.ErrorIs(t, err, assert.AnError)
+		assert.Zero(t, count(t, tenantID), "the entry commits or rolls back with the business write")
+	})
+
+	t.Run("EnqueueOnce_KeepsTheRawKey_AndDedupes", func(t *testing.T) {
+		tenantID := uuid.New()
+		key := domain.TermsAcceptedIdempotencyKey(tenantID, uuid.New(), "2026-09")
+		tctx := withTenant(ctx, tenantID)
+		for range 2 {
+			require.NoError(t, repo.EnqueueOnce(tctx, key, newIdpAuditEntry(tenantID)))
+		}
+		var got string
+		require.NoError(t, rawPool.QueryRow(ctx, `SELECT idempotency_key FROM pending_audit_entries WHERE tenant_id = $1`, tenantID).Scan(&got))
+		assert.Equal(t, key, got)
+		assert.Equal(t, 1, count(t, tenantID))
+	})
+
+	// Fail closed: an entry for another tenant (which the RLS WITH CHECK
+	// would reject, and the library would then skip) or one Audit Log would
+	// reject fails the transaction, so the business write rolls back with it.
+	t.Run("Enqueue_FailsClosed_RollsBackTheBusinessWrite", func(t *testing.T) {
+		tenantID, victim := uuid.New(), uuid.New()
+		err := tx.RunInTx(withTenant(ctx, tenantID), func(ctx context.Context) error {
+			return repo.Enqueue(ctx, newIdpAuditEntry(victim))
+		})
+		require.ErrorContains(t, err, "does not match the transaction tenant")
+		assert.Zero(t, count(t, victim))
+
+		bad := newIdpAuditEntry(tenantID)
+		bad.IPAddress = "not-an-ip"
+		err = tx.RunInTx(withTenant(ctx, tenantID), func(ctx context.Context) error {
+			return repo.Enqueue(ctx, bad)
+		})
+		require.ErrorContains(t, err, "invalid audit entry")
+		assert.Zero(t, count(t, tenantID))
+	})
+
+	// An old pod (pre-adoption code) inserts without a key and parks
+	// without failed_at: the compatibility trigger fills both.
+	t.Run("CompatTrigger_AcceptsOldCodeInserts", func(t *testing.T) {
+		tenantID := uuid.New()
+		var id uuid.UUID
+		var key string
+		require.NoError(t, rawPool.QueryRow(ctx,
+			`INSERT INTO pending_audit_entries (tenant_id, entry) VALUES ($1, '{}') RETURNING id, idempotency_key`, tenantID).Scan(&id, &key))
+		assert.Equal(t, id.String(), key)
+		_, err := rawPool.Exec(ctx, `UPDATE pending_audit_entries SET status = 'failed', last_error = 'audit entry rejected by audit log: 422' WHERE id = $1`, id)
 		require.NoError(t, err)
-		assert.Len(t, claimed, 2)
+		var outcome string
+		require.NoError(t, rawPool.QueryRow(ctx, `SELECT last_outcome FROM pending_audit_entries WHERE id = $1`, id).Scan(&outcome))
+		assert.Equal(t, "rejected", outcome)
+		_, err = rawPool.Exec(ctx, `DELETE FROM pending_audit_entries WHERE id = $1`, id)
+		require.NoError(t, err)
 	})
 
-	t.Run("Enqueue_CrossTenantWriteRejectedByRLS", func(t *testing.T) {
-		err := repo.Enqueue(withTenant(ctx, uuid.New()), newIdpAuditEntry(uuid.New()))
-		require.Error(t, err, "WITH CHECK must reject an entry for a tenant other than the bound GUC")
+	t.Run("AppRole_HasEnqueueAccess", func(t *testing.T) {
+		require.NoError(t, auditoutbox.CheckEnqueueAccess(ctx, appPool))
 	})
 
-	// MarkRetryAfter with a positive delay covers the withPool branch in the
-	// delay > 0 path (lines 141-148 of pending_audit_entry_repository.go).
-	// A non-positive delay falls back to MarkRetry (which has no UPDATE to
-	// next_attempt_at), so this test specifically exercises the branch that
-	// sets next_attempt_at = now() + make_interval(secs => delay).
-	t.Run("MarkRetryAfter_PositiveDelay_SetsNextAttemptAt", func(t *testing.T) {
-		// Clear any rows left by prior subtests so ClaimDue returns exactly
-		// the one row this subtest enqueues.
+	// The Runner on the BYPASSRLS sysPool (the migrator role, with the
+	// migration's grants) passes NewRunner's cross-tenant access check and
+	// delivers every tenant's rows, deleting each on 201.
+	t.Run("Runner_OnSysPool_DeliversAndDeletes", func(t *testing.T) {
 		_, err := rawPool.Exec(ctx, `DELETE FROM pending_audit_entries`)
 		require.NoError(t, err)
+		a, b := uuid.New(), uuid.New()
+		require.NoError(t, tx.RunInTx(withTenant(ctx, a), func(ctx context.Context) error { return repo.Enqueue(ctx, newIdpAuditEntry(a)) }))
+		termsKey := domain.TermsAcceptedIdempotencyKey(b, uuid.New(), "2026-09")
+		terms := domain.TermsAcceptedAuditEntry(b, uuid.New(), domain.TermsAcceptance{Version: "2026-09", AcceptedAt: time.Now().UTC()}, "trial", "free", "")
+		require.NoError(t, repo.EnqueueOnce(withTenant(ctx, b), termsKey, terms))
 
-		tenantID := uuid.New()
-		require.NoError(t, repo.Enqueue(withTenant(ctx, tenantID), newIdpAuditEntry(tenantID)))
-
-		claimed, err := sysRepo.ClaimDue(ctx, 10)
+		srv := audittest.NewServer(t)
+		runner, err := auditoutbox.NewRunner(auditoutbox.Config{
+			Pool: sysPool, Client: srv.Client(domain.Source), Enqueuer: newTestEnqueuer(t),
+			PurgeInterval: 0,
+		})
 		require.NoError(t, err)
-		require.Len(t, claimed, 1)
+		t.Cleanup(func() { _ = runner.Stop(ctx) })
 
-		// MarkRetryAfter with a positive delay must succeed without error and
-		// must push next_attempt_at into the future (the row is therefore not
-		// immediately re-claimable).
-		require.NoError(t, sysRepo.MarkRetryAfter(ctx, claimed[0].ID, "429 too many requests", 5*time.Second))
-
-		// Row must still be pending (not failed or deleted).
-		var status, lastErr string
-		require.NoError(t, rawPool.QueryRow(ctx,
-			`SELECT status, last_error FROM pending_audit_entries WHERE id = $1`, claimed[0].ID).
-			Scan(&status, &lastErr))
-		assert.Equal(t, "pending", status)
-		assert.Equal(t, "429 too many requests", lastErr)
-
-		// next_attempt_at must be in the future — the row is not yet due.
-		notDue, err := sysRepo.ClaimDue(ctx, 10)
+		res, err := runner.DrainOnce(ctx)
 		require.NoError(t, err)
-		assert.Empty(t, notDue, "row scheduled for the future must not be claimable immediately")
-
-		_, err = rawPool.Exec(ctx, `DELETE FROM pending_audit_entries`)
-		require.NoError(t, err)
+		assert.Equal(t, 2, res.Delivered)
+		srv.AssertRecorded(t, audittest.Match{EntryType: domain.AuditEntryTypeIdpChanged, TenantID: a})
+		srv.AssertRecorded(t, audittest.Match{EntryType: domain.AuditEntryTypeTermsAccepted, TenantID: b, IdempotencyKey: termsKey})
+		assert.Zero(t, count(t, a))
+		assert.Zero(t, count(t, b))
 	})
+}
 
+// Every entry type this service emits is in Audit Log's taxonomy
+// (platform-audit iam-adopters §3).
+func TestAuditEntryTypes_AreKnownToAuditLog(t *testing.T) {
+	audittest.RequireKnownTypes(t, domain.AuditEntryTypeIdpChanged, domain.AuditEntryTypeTermsAccepted)
 }

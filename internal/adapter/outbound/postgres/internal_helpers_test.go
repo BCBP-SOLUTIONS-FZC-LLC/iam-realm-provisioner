@@ -1,30 +1,16 @@
 package postgres
 
 import (
+	"context"
 	"errors"
-	"strings"
 	"testing"
-	"unicode/utf8"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	pgmigrate "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/migrate"
 )
-
-func TestTruncate_KeepsValidUTF8(t *testing.T) {
-	assert.Equal(t, "short", truncate("short", 10))
-	assert.Equal(t, "abcde", truncate("abcdefgh", 5))
-
-	// "é" is 2 bytes; a 5-byte cap would split the third one.
-	got := truncate("ééééé", 5)
-	assert.True(t, utf8.ValidString(got))
-	assert.Equal(t, "éé", got)
-
-	// Invalid bytes from an upstream body are replaced, never stored raw.
-	got = truncate("bad \xff\xfe body", 1024)
-	assert.True(t, utf8.ValidString(got))
-	assert.True(t, strings.HasPrefix(got, "bad "))
-}
 
 func TestExplainMigrationError_ActionableMessagesKeepTheSentinel(t *testing.T) {
 	dirty := explainMigrationError("domain migrations", pgmigrate.ErrMigrationDirty)
@@ -39,4 +25,13 @@ func TestExplainMigrationError_ActionableMessagesKeepTheSentinel(t *testing.T) {
 	other := explainMigrationError("domain migrations", boom)
 	assert.ErrorIs(t, other, boom)
 	assert.Equal(t, "domain migrations: connection refused", other.Error())
+}
+
+// An unreachable migration database fails AdoptAuditOutbox (and so
+// MigrateSchema) instead of skipping the platform-audit conversion.
+func TestAdoptAuditOutbox_UnreachableDatabase(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := AdoptAuditOutbox(ctx, "postgres://u:p@127.0.0.1:1/db?sslmode=disable&connect_timeout=1", nil)
+	require.Error(t, err)
 }

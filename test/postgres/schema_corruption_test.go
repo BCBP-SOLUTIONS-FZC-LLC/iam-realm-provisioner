@@ -435,3 +435,19 @@ func TestInboxRepository_IsProcessed_NonUUIDEventID(t *testing.T) {
 	assert.False(t, ok)
 	assert.Contains(t, err.Error(), "UUID")
 }
+
+// TestOrphanedSignupReap_CandidateQueryFailure drops exported_at (named only
+// in orphanedSignupPredicate's WHERE clause), so the candidate sweep fails
+// and the job returns the error rather than reporting an empty run.
+func TestOrphanedSignupReap_CandidateQueryFailure(t *testing.T) {
+	t.Parallel()
+	_, rawPool := setupTestDB(t)
+	sysPool := setupSysPool(t, rawPool)
+	ctx := context.Background()
+
+	_, err := rawPool.Exec(ctx, `ALTER TABLE tenant_realms DROP COLUMN exported_at CASCADE`)
+	require.NoError(t, err)
+
+	_, err = jobs.OrphanedSignupReap(ctx, reapJobContext(sysPool, nil))
+	require.Error(t, err)
+}

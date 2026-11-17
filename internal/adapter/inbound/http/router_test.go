@@ -29,6 +29,27 @@ func downPinger() *fakePinger {
 	return &fakePinger{HealthFn: func(ctx context.Context) error { return errors.New("down") }}
 }
 
+// /healthz fails only on a stalled platform-audit Runner, and passes when
+// the runner is alive, whatever the dependencies' state.
+func TestHealthz_AuditRunner(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		runner *fakePinger
+		want   int
+	}{
+		{"alive", healthyPinger(), http.StatusOK},
+		{"stalled", downPinger(), http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRouter(RouterConfig{GinConfig: testGinConfig, Docs: DocsConfig{Environment: "test"}, Handlers: newServiceDeps().handler(), AuditRunner: tc.runner}).Handler()
+			rec := doRequest(r, http.MethodGet, "/healthz", nil, "")
+			if rec.Code != tc.want {
+				t.Fatalf("expected %d, got %d: %s", tc.want, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	// healthz is a pure liveness probe — never inspects dependencies, so
 	// even all-nil pingers must return 200.

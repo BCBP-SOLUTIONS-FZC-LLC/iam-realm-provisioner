@@ -495,17 +495,3 @@ func (f *fakePendingAuditEntryRepository) EnqueueOnce(_ context.Context, _ strin
 	f.enqueued = append(f.enqueued, e)
 	return nil
 }
-
-func (f *fakePendingAuditEntryRepository) ClaimDue(context.Context, int) ([]*domain.PendingAuditEntry, error) {
-	return nil, nil
-}
-func (f *fakePendingAuditEntryRepository) MarkDelivered(context.Context, uuid.UUID) error { return nil }
-func (f *fakePendingAuditEntryRepository) MarkRetry(context.Context, uuid.UUID, string) error {
-	return nil
-}
-func (f *fakePendingAuditEntryRepository) MarkRetryAfter(context.Context, uuid.UUID, string, time.Duration) error {
-	return nil
-}
-func (f *fakePendingAuditEntryRepository) MarkFailed(context.Context, uuid.UUID, string) error {
-	return nil
-}

@@ -8,9 +8,11 @@ import (
 	"io/fs"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/pkg/auditoutbox"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/outbox"
 	pgdomain "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/domain"
 	pgmigrate "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/migrate"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 )
 
 // migrationsFS embeds every .sql file under migrations/. Files are numbered
@@ -50,7 +52,35 @@ func MigrateSchema(ctx context.Context, dsn string, log port.Logger) error {
 	if err := RunMigrations(ctx, dsn, log); err != nil {
 		return explainMigrationError("domain migrations", err)
 	}
+	if err := AdoptAuditOutbox(ctx, dsn, logger); err != nil {
+		return explainMigrationError("platform-audit outbox", err)
+	}
 	return nil
+}
+
+// AdoptAuditOutbox converts the as-built pending_audit_entries table (created
+// by 000000_initial_schema) to platform-audit's outbox shape and applies the
+// library's own migrations (platform-audit iam-adopters §5.1, release N, the
+// expand). Order matters: AdoptAsBuilt first, since ApplySchema refuses an
+// as-built table it has not expanded (auditoutbox.ErrAsBuiltNotAdopted).
+// Both are idempotent, so every startup and every migrate Job run calls them.
+//
+// AdoptAsBuilt runs on its own single-connection pool over dsn, which must
+// be the migrator role: it owns the table and holds BYPASSRLS (without it the
+// backfill under FORCE RLS would update 0 rows, auditoutbox.ErrNotBypassRLS).
+// The compatibility trigger it installs keeps an older pod's inserts and
+// parking valid during a rollout or rollback; ApplySchema holds at version 1
+// while it exists. Release N+1 runs auditoutbox.FinishAdoption to drop it.
+func AdoptAuditOutbox(ctx context.Context, dsn string, logger pgdomain.Logger) error {
+	pool, err := pgcommon.NewPool(ctx, pgcommon.Config{DSN: dsn, MaxConns: 1, PoolName: "platform_audit_adopt"})
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer pool.Close()
+	if err := auditoutbox.AdoptAsBuilt(ctx, pool, auditoutbox.AsBuiltRealmProvisioner, auditoutbox.AdoptOptions{}); err != nil {
+		return fmt.Errorf("adopt as-built pending_audit_entries: %w", err)
+	}
+	return auditoutbox.ApplySchema(ctx, &pgmigrate.Runner{DSN: dsn, Logger: logger})
 }
 
 // explainMigrationError turns platform-pgcommon's migration sentinels into

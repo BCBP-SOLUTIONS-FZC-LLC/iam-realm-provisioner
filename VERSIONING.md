@@ -113,7 +113,7 @@ helm upgrade iam-realm-provisioner ./deploy/helm \
 
 `image.tag` (`deploy/helm/values.yaml`) defaults to the chart's own `appVersion` (`Chart.yaml`) when unset. Chart `version`/`appVersion` are bumped manually alongside the Git tag (see the maintainer process below); they are **not** derived automatically from the tag by any workflow today.
 
-The chart deploys **one** `Deployment` (`/iam-realm-provisioner-server` — HTTP API + three SQS consumers + outbox runner + AL-5 audit drainer), a pre-install/pre-upgrade migrate hook `Job` (`/migrate`), and **seven** `CronJob`s (`/iam-realm-provisioner-reconciler --job=<name>`), all from the same image.
+The chart deploys **one** `Deployment` (`/iam-realm-provisioner-server` — HTTP API + three SQS consumers + outbox runner + platform-audit outbox Runner), a pre-install/pre-upgrade migrate hook `Job` (`/migrate`), and **seven** `CronJob`s (`/iam-realm-provisioner-reconciler --job=<name>`), all from the same image.
 
 ## Maintainer release process
 

@@ -3,6 +3,7 @@ module github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner
 go 1.26.11
 
 require (
+	github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit v0.1.0
 	github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2 v2.3.0
 	github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2 v2.6.0
 	github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2 v2.0.2

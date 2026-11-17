@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"path"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Nerzal/gocloak/v13"
@@ -539,4 +542,128 @@ func TestEnsureOptionalOnlyScopes_Errors(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.want)
 		})
 	}
+}
+
+// --- EnsureSharedRealm failure injection ---
+
+// driftedSharedRealm is ConvergesExisting's realm: tender-web with an old
+// wildcard client and a drifted tenant_id mapper, tender-mobile with a
+// correct one. Converging it exercises every Keycloak call.
+func driftedSharedRealm() *fakeRealm {
+	webID, mobileID := "id-tender-web", "id-tender-mobile"
+	return newFakeRealm(true,
+		gocloak.Client{ID: &webID, ClientID: gocloak.StringP("tender-web"), PublicClient: gocloak.BoolP(true),
+			ProtocolMappers: &[]gocloak.ProtocolMapperRepresentation{{
+				ID: gocloak.StringP("m1"), Name: gocloak.StringP("tenant_id"),
+				ProtocolMapper: gocloak.StringP("oidc-usermodel-attribute-mapper"),
+				Config:         &map[string]string{"user.attribute": "tenant_id", "claim.name": "tenant_id"},
+			}}},
+		gocloak.Client{ID: &mobileID, ClientID: gocloak.StringP("tender-mobile"), PublicClient: gocloak.BoolP(true)},
+	)
+}
+
+// faultInjector answers the nth request matching method and the path
+// pattern (path.Match, '*' = one segment) with status, and forwards every
+// other request to next.
+type faultInjector struct {
+	method, pattern string
+	nth, status     int
+	seen            int32
+	next            http.Handler
+}
+
+func (fi *faultInjector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if ok, _ := path.Match(fi.pattern, r.URL.Path); ok && r.Method == fi.method {
+		if int(atomic.AddInt32(&fi.seen, 1)) == fi.nth {
+			writeJSON(w, fi.status, `{"errorMessage":"injected"}`)
+			return
+		}
+	}
+	fi.next.ServeHTTP(w, r)
+}
+
+// newFaultySharedRealmAdmin is newSharedRealmAdmin with fi in front of the
+// fake realm.
+func newFaultySharedRealmAdmin(t *testing.T, f *fakeRealm, fi *faultInjector, tokens ...tokenResponse) *Admin {
+	t.Helper()
+	if len(tokens) == 0 {
+		tokens = []tokenResponse{okTokenResponse()}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/master/protocol/openid-connect/token", sequencedTokenHandler(tokens))
+	f.register(t, mux, "trial")
+	fi.next = mux
+	srv := httptest.NewServer(fi)
+	t.Cleanup(srv.Close)
+	a := New(Config{BaseURL: srv.URL, AdminRealm: "master", ClientID: "cid", ClientSecret: "secret"}, nopLogger{})
+	a.cfg.Web = webCfg()
+	return a
+}
+
+// Every Keycloak call of the converge path fails the whole ensure (the
+// retry loop in cmd/server retries it), naming the step that failed.
+func TestEnsureSharedRealm_EveryStepFailureSurfaces(t *testing.T) {
+	const clients = "/admin/realms/trial/clients"
+	for _, tc := range []struct {
+		name, method, pattern string
+		nth                   int
+		want                  string
+	}{
+		{"web client: get clients", http.MethodGet, clients, 1, "web_client"},
+		{"web client: get client", http.MethodGet, clients + "/*", 1, "web_client"},
+		{"tenant_id mapper: get clients", http.MethodGet, clients, 2, "tenant_id_mapper"},
+		{"tenant_id mapper: get client", http.MethodGet, clients + "/*", 2, "tenant_id_mapper"},
+		{"tenant_id mapper: update", http.MethodPut, clients + "/*/protocol-mappers/models/*", 1, "tenant_id_mapper"},
+		{"audience mapper: create", http.MethodPost, clients + "/*/protocol-mappers/models", 1, "_mapper"},
+		{"client scopes: get clients", http.MethodGet, clients, 6, "client_scopes"},
+		{"client scopes: list defaults", http.MethodGet, clients + "/*/default-client-scopes", 1, "client_scopes"},
+		{"client scopes: remove default", http.MethodDelete, clients + "/*/default-client-scopes/*", 1, "client_scopes"},
+		{"client scopes: add optional", http.MethodPut, clients + "/*/optional-client-scopes/*", 1, "client_scopes"},
+		{"user profile: get", http.MethodGet, "/admin/realms/trial/users/profile", 1, ""},
+		{"user profile: put", http.MethodPut, "/admin/realms/trial/users/profile", 1, ""},
+		{"requires-mfa role", http.MethodPost, "/admin/realms/trial/roles", 1, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fi := &faultInjector{method: tc.method, pattern: tc.pattern, nth: tc.nth, status: http.StatusBadRequest}
+			a := newFaultySharedRealmAdmin(t, driftedSharedRealm(), fi)
+			err := a.EnsureSharedRealm(context.Background(), "trial")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+// The web client is absent: ensureClient creates it, and a failed create
+// fails the ensure.
+func TestEnsureSharedRealm_CreateWebClientFailure(t *testing.T) {
+	fi := &faultInjector{method: http.MethodPost, pattern: "/admin/realms/trial/clients", nth: 1, status: http.StatusBadRequest}
+	a := newFaultySharedRealmAdmin(t, newFakeRealm(true), fi)
+	err := a.EnsureSharedRealm(context.Background(), "trial")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "web_client")
+}
+
+// A create that fails for a reason other than a lost race is returned as is;
+// a lost race whose fresh token cannot be minted fails on the token.
+func TestEnsureSharedRealm_CreateFailures(t *testing.T) {
+	t.Run("create rejected", func(t *testing.T) {
+		f := newFakeRealm(false)
+		f.createStatus = http.StatusBadRequest
+		a := newSharedRealmAdmin(t, "trial", f)
+		require.Error(t, a.EnsureSharedRealm(context.Background(), "trial"))
+	})
+	t.Run("token after lost race", func(t *testing.T) {
+		f := newFakeRealm(false)
+		f.createStatus = http.StatusConflict
+		a := newFaultySharedRealmAdmin(t, f, &faultInjector{}, okTokenResponse(), failTokenResponse())
+		err := a.EnsureSharedRealm(context.Background(), "trial")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ensure_shared_realm: token")
+	})
+	t.Run("token at start", func(t *testing.T) {
+		a := newFaultySharedRealmAdmin(t, driftedSharedRealm(), &faultInjector{}, failTokenResponse())
+		err := a.EnsureSharedRealm(context.Background(), "trial")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ensure_shared_realm: token")
+	})
 }

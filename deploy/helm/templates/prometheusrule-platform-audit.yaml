@@ -1,0 +1,24 @@
+{{- /*
+platform-audit's reference rules (recording, SLO and alerts for the
+pending_audit_entries outbox Runner, platform-audit LLD §11.4), loaded
+alongside this service's own PrometheusRule. The rule bodies are vendored
+verbatim in files/platform-audit.rules.yml; only the template parameters are
+filled here: <service> = this release's fullname, <environment> =
+env.APP_ENV, <mode> = outbox_deliver (this service runs the outbox Runner
+only). deploy/monitoring/platform-audit-rules.yml is the raw twin.
+*/ -}}
+{{- if .Values.serviceMonitor.enabled }}
+{{- $job := include "iam-realm-provisioner.fullname" . }}
+{{- $rules := .Files.Get "files/platform-audit.rules.yml" | replace "<service>" $job | replace "<environment>" (.Values.env.APP_ENV | default "prod") | replace "<mode>" "outbox_deliver" }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $job }}-platform-audit
+  labels:
+    {{- include "iam-realm-provisioner.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- $rules | nindent 2 }}
+{{- end }}

@@ -558,24 +558,14 @@ func wirePlatformAutomationHappyPath(kc *mockKeycloakAdmin) *mockTokenServiceCli
 }
 
 // ── mockPendingAuditEntryRepository — records enqueued AL-5 entries;
-// EnqueueErr forces an enqueue failure. The drainer-side methods record
-// their calls for AuditDeliveryService tests. ───────────────────────────
+// EnqueueErr forces an enqueue failure. ──────────────────────────────────
 
 type mockPendingAuditEntryRepository struct {
 	Enqueued   []domain.AuditEntry
 	EnqueueErr error
 	// EnqueuedKeys records EnqueueOnce keys; a repeated key is a no-op,
-	// exactly like the ON CONFLICT (idempotency_key) DO NOTHING insert.
+	// exactly like the library's ON CONFLICT DO NOTHING insert.
 	EnqueuedKeys []string
-
-	Due            []*domain.PendingAuditEntry
-	ClaimErr       error
-	Delivered      []uuid.UUID
-	Retried        []uuid.UUID
-	RetriedAfter   []uuid.UUID
-	RetryAfterHint []time.Duration
-	Failed         []uuid.UUID
-	MarkErr        error
 }
 
 var _ port.PendingAuditEntryRepository = (*mockPendingAuditEntryRepository)(nil)
@@ -600,55 +590,4 @@ func (m *mockPendingAuditEntryRepository) EnqueueOnce(ctx context.Context, key s
 	m.EnqueuedKeys = append(m.EnqueuedKeys, key)
 	m.Enqueued = append(m.Enqueued, entry)
 	return nil
-}
-
-func (m *mockPendingAuditEntryRepository) ClaimDue(ctx context.Context, limit int) ([]*domain.PendingAuditEntry, error) {
-	if m.ClaimErr != nil {
-		return nil, m.ClaimErr
-	}
-	due := m.Due
-	if len(due) > limit {
-		due = due[:limit]
-	}
-	return due, nil
-}
-
-func (m *mockPendingAuditEntryRepository) MarkDelivered(ctx context.Context, id uuid.UUID) error {
-	m.Delivered = append(m.Delivered, id)
-	return m.MarkErr
-}
-
-func (m *mockPendingAuditEntryRepository) MarkRetry(ctx context.Context, id uuid.UUID, lastErr string) error {
-	m.Retried = append(m.Retried, id)
-	return m.MarkErr
-}
-
-func (m *mockPendingAuditEntryRepository) MarkRetryAfter(ctx context.Context, id uuid.UUID, lastErr string, delay time.Duration) error {
-	m.RetriedAfter = append(m.RetriedAfter, id)
-	m.RetryAfterHint = append(m.RetryAfterHint, delay)
-	return m.MarkErr
-}
-
-func (m *mockPendingAuditEntryRepository) MarkFailed(ctx context.Context, id uuid.UUID, lastErr string) error {
-	m.Failed = append(m.Failed, id)
-	return m.MarkErr
-}
-
-// mockAuditLogClient returns the next queued error per WriteEntry call
-// (nil = success) and records every idempotency key it was called with.
-type mockAuditLogClient struct {
-	Errs []error
-	Keys []string
-}
-
-var _ port.AuditLogClient = (*mockAuditLogClient)(nil)
-
-func (m *mockAuditLogClient) WriteEntry(ctx context.Context, idempotencyKey string, entry domain.AuditEntry) error {
-	m.Keys = append(m.Keys, idempotencyKey)
-	if len(m.Errs) == 0 {
-		return nil
-	}
-	err := m.Errs[0]
-	m.Errs = m.Errs[1:]
-	return err
 }

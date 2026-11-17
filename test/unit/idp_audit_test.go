@@ -91,6 +91,25 @@ func TestConfigureIdp_NonSystemCaller_RecordedAsUserActor(t *testing.T) {
 	assert.Equal(t, "om/1.0", e.UserAgent)
 }
 
+// A malformed client IP or a NUL in the user agent must not fail the IdP
+// change (the audit adapter fails closed on an entry Audit Log would
+// reject): the IP is dropped and NUL characters are removed.
+func TestConfigureIdp_MalformedRequestHeaders_Cleaned(t *testing.T) {
+	svc, kc, realms, idpConfigs, _, openbao, _, _, audit := newIdpTestServiceWithAudit()
+	tenantID := uuid.New()
+	seedDedicatedRealm(realms, tenantID, nil)
+	stubConfigureIdpHappyPath(kc, idpConfigs, openbao)
+	ctx := requestctx.WithContext(context.Background(), &requestctx.RequestContext{
+		UserID: uuid.New(), TenantID: tenantID, ClientIP: "unknown", UserAgent: "om/\x001.0",
+	})
+
+	_, err := svc.ConfigureIdp(ctx, "idem-audit-headers", tenantID, validSAMLIdpRequest())
+	require.NoError(t, err)
+	require.Len(t, audit.Enqueued, 1)
+	assert.Empty(t, audit.Enqueued[0].IPAddress)
+	assert.Equal(t, "om/1.0", audit.Enqueued[0].UserAgent)
+}
+
 func TestConfigureIdp_CriticalFailure_EnqueuesNoAuditEntry(t *testing.T) {
 	svc, _, realms, _, _, _, _, _, audit := newIdpTestServiceWithAudit()
 	tenantID := uuid.New()

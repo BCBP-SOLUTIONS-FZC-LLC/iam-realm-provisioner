@@ -68,7 +68,7 @@ Registered for the `iam` domain but not emitted by this service: `iam_auth_event
 |---|---|---|---|
 | `iam_realm_provisioner_admin_token_refresh_total` | counter | `trigger` | Keycloak admin token refreshes by trigger (proactive\|401). |
 | `iam_realm_provisioner_audit_entry_backlog_gauge` | gauge | `status` | Current pending_audit_entries rows by status (pending\|failed). |
-| `iam_realm_provisioner_audit_entry_delivery_total` | counter | `result` | AL-5 direct-write audit-entry delivery attempts by result (delivered\|retry\|unknown_entry_type\|rejected). |
+| `iam_realm_provisioner_audit_entry_delivery_total` | counter | `result` | AL-5 direct-write audit-entry delivery attempts by result (delivered\|retry\|unknown_entry_type\|not_admitted\|rejected). |
 | `iam_realm_provisioner_compensation_total` | counter | `op`, `result` | Compensating teardown outcomes by op (delete_realm\|delete_service_account_client) and result (success\|failure). |
 | `iam_realm_provisioner_consumed_schema_violations_total` | counter | `consumer`, `event_type` | Inbound deliveries rejected before the handler because the payload failed its consumed-message schema (forwarded straight to -dlq on first delivery), by consumer and event type — any nonzero rate means a producer contract break. |
 | `iam_realm_provisioner_idempotency_replay_total` | counter | `kind` | Provisioning requests served from idempotency ledger replay (not fresh execution), by kind. |

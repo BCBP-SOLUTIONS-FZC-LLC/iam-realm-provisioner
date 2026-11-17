@@ -290,16 +290,19 @@ CREATE POLICY tenant_isolation ON public.provisioning_operations
 -- TenantIdpConfigChanged (enqueued in the same RunInTx as the
 -- keycloak_idp_configs write it records) and TermsAccepted (the tenant
 -- owner's terms acceptance, enqueued in RP-1/RP-2's tenant_realms
--- transaction). cmd/server's drainer POSTs each row — the AL-5
--- Idempotency-Key is idempotency_key when set (TermsAccepted's
--- deterministic TermsAccepted:<tenant>:<user>:<version>, UNIQUE so a
--- replayed signup cannot queue a second one), else id — and deletes it on
--- success. The GDPR scrub never deletes these rows: they are audit
--- records on their way to the system of record (LLD v1.41).
--- A row Audit permanently rejects (4xx) moves to 'failed' and stays for
--- operator inspection. RLS-scoped because `entry` embeds tenant data (same
--- reasoning as provisioning_operations); the cross-tenant drainer reads
--- it through the BYPASSRLS sysPool.
+-- transaction, under its deterministic key
+-- TermsAccepted:<tenant>:<user>:<version>, UNIQUE so a replayed signup cannot
+-- queue a second one). The GDPR scrub never deletes these rows: they are
+-- audit records on their way to the system of record (LLD v1.41).
+--
+-- This is the as-built shape. platform-audit owns the table from here on:
+-- MigrateSchema runs auditoutbox.AdoptAsBuilt right after this migration,
+-- which converts it in place to the library's outbox shape (NOT NULL key,
+-- failed/disposed states, claim lease, compatibility trigger), then
+-- auditoutbox.ApplySchema. Delivery is the library Runner's, on the
+-- BYPASSRLS sysPool. RLS-scoped because `entry` embeds tenant data (same
+-- reasoning as provisioning_operations); the policy below is kept as is by
+-- the conversion.
 -- ═════════════════════════════════════════════════════════════════════════
 CREATE TABLE public.pending_audit_entries (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -409,14 +412,18 @@ BEGIN
             RAISE NOTICE 'realm_provisioner_migrator exists but current user cannot ALTER ROLE.';
         END;
         -- Table grants for the migrator/reconciler role. These cover:
-        --   pending_audit_entries  — AL-5 drainer + GDPR scrub (RP-C2/RP-C3)
+        --   pending_audit_entries  — platform-audit's outbox Runner on the
+        --                            sysPool: SELECT/UPDATE/DELETE to claim,
+        --                            mark and delete, INSERT for the purge's
+        --                            and operator helpers' own audit entries
+        --                            (platform-audit §4.3)
         --   rls_violation_log      — rls_violations_total exporter (§11, RLS-6 alerts)
         --   exporter_watermarks    — exporter high-water-mark persistence (§11)
         --   provisioning_operations — ledger-prune CronJob (§13.1)
-        -- Without these the AL-5 audit drainer, RLS-6 alerts, and ledger-prune
+        -- Without these the platform-audit Runner, RLS-6 alerts, and ledger-prune
         -- all fail with permission-denied on every tick (ops checklist item 1).
         BEGIN
-            GRANT SELECT, UPDATE, DELETE ON public.pending_audit_entries  TO realm_provisioner_migrator;
+            GRANT SELECT, INSERT, UPDATE, DELETE ON public.pending_audit_entries TO realm_provisioner_migrator;
             GRANT SELECT, DELETE         ON public.rls_violation_log      TO realm_provisioner_migrator;
             GRANT SELECT, INSERT, UPDATE ON public.exporter_watermarks    TO realm_provisioner_migrator;
             GRANT DELETE                 ON public.provisioning_operations TO realm_provisioner_migrator;

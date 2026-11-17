@@ -35,6 +35,12 @@ DROP TABLE IF EXISTS public.processed_events;
 DROP TABLE IF EXISTS public.exporter_watermarks;
 
 DROP TABLE IF EXISTS public.pending_audit_entries;
+-- platform-audit's as-built conversion objects (AdoptAsBuilt / ApplySchema,
+-- run by MigrateSchema after this migration): the compatibility trigger
+-- function (the trigger went with the table) and the library's own
+-- migration-tracking table, so a later up re-adopts from scratch.
+DROP FUNCTION IF EXISTS public.platform_audit_compat_fill();
+DROP TABLE IF EXISTS public.platform_audit_schema_migrations;
 DROP TABLE IF EXISTS public.provisioning_operations;
 DROP TABLE IF EXISTS public.realm_config_reconciliations;
 

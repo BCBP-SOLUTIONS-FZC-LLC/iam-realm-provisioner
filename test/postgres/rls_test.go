@@ -96,6 +96,9 @@ func setupTestDB(t testing.TB) (appPool *pgcommon.Pool, rawPool *dbseed.Pool) {
 	// column) — the domain migration ALTERs that column to TEXT (§19).
 	require.NoError(t, outbox.ApplySchema(ctx, &pgmigrate.Runner{DSN: superDSN}))
 	require.NoError(t, pgadapter.RunMigrations(ctx, superDSN))
+	// platform-audit's as-built conversion + library schema, exactly as
+	// MigrateSchema runs them after the domain migrations.
+	require.NoError(t, pgadapter.AdoptAuditOutbox(ctx, superDSN, nil))
 
 	appDSN := strings.Replace(superDSN, "postgres:testpassword@", "realm_provisioner_app:"+appRolePassword+"@", 1)
 	appPool, err = pgcommon.NewPool(ctx, pgcommon.Config{

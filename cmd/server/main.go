@@ -58,6 +58,10 @@ const requestTimeout = 30 * time.Second
 const (
 	httpDrainTimeout = 30 * time.Second
 	poolDrainTimeout = 10 * time.Second
+	// auditStopTimeout bounds the platform-audit Runner's in-flight batch
+	// (one AL-5 call, AUDIT_LOG_TIMEOUT 5s by default, plus bookkeeping);
+	// it runs alongside outboxRunner.Stop.
+	auditStopTimeout = 10 * time.Second
 )
 
 func main() {
@@ -305,7 +309,13 @@ func main() {
 	idpValidationRepo := pgadapter.NewIdpValidationRepository(pool)
 	reconRepo := pgadapter.NewReconciliationRepository(pool)
 	idempotencyRepo := pgadapter.NewIdempotencyRepository(pool).WithInProgressLease(envDuration("IDEMPOTENCY_IN_PROGRESS_LEASE", pgadapter.DefaultInProgressLease))
-	pendingAuditRepo := pgadapter.NewPendingAuditEntryRepository(pool)
+	// platform-audit outbox (§10.6): the Enqueuer writes in the business
+	// transaction on the app pool; the Runner delivers from the sysPool.
+	auditOB, err := newAuditOutbox(ctx, pool, sysPool, log)
+	if err != nil {
+		panic(fmt.Sprintf("platform-audit outbox: %v", err))
+	}
+	pendingAuditRepo := pgadapter.NewPendingAuditEntryRepository(pool, auditOB.enq).WithMaxMetadataBytes(auditOB.maxMetadata)
 
 	// ── 8b. Core services ─────────────────────────────────────────────────
 	sharedRealm := envOr("SHARED_TRIAL_REALM", "trial")
@@ -399,9 +409,10 @@ func main() {
 	runBusinessExporters(ctx, pgadapter.NewGaugeRepository(sysPool), log)
 
 	// ── 9c. AL-5 audit-entry delivery (§10.6) ─────────────────────────────
-	// Drains pending_audit_entries (TenantIdpConfigChanged) to Audit Log's
-	// direct-write ingest, cross-tenant on the BYPASSRLS sysPool.
-	startAuditDelivery(ctx, sysPool, log)
+	// platform-audit's Runner drains pending_audit_entries (TenantIdpConfig-
+	// Changed, TermsAccepted) to Audit Log's direct-write ingest,
+	// cross-tenant on the BYPASSRLS sysPool.
+	auditOB.start(ctx, log)
 
 	// ── 9d. Shared trial realm bootstrap (§12.2, RP-INV-2) ────────────────
 	startSharedRealmEnsure(ctx, keycloakAdmin, sharedRealm, log)
@@ -459,6 +470,7 @@ func main() {
 			defer cancel()
 			return openbaoClient.Ping(pingCtx)
 		}),
+		AuditRunner: pingerFunc(func(context.Context) error { return auditOB.runner.Alive() }),
 	})
 
 	// ── 11. Graceful shutdown ─────────────────────────────────────────────
@@ -504,8 +516,10 @@ func main() {
 	//      consumer's Stop (each ≤ SQS_DRAIN_TIMEOUT, 15s) and detached RP-3
 	//      conversions (≤ the same 30s) — stop new work, drain in-flight;
 	//   2. outbox.Stop (≤ OUTBOX_DRAIN_TIMEOUT, 30s) — publishes committed
-	//      events, after the producers above so none can enqueue past it;
-	//   3. cancelBackground — exporters and the AL-5 audit drainer stop;
+	//      events, after the producers above so none can enqueue past it —
+	//      in parallel with the platform-audit Runner's Stop
+	//      (auditStopTimeout, 10s), which finishes its in-flight AL-5 batch;
+	//   3. cancelBackground — the metric exporters stop;
 	//   4. pool drains on their own budget (poolDrainTimeout, 10s).
 	// max(30, 15, 30) + 30 + 10 = 70s, leaving a 5s buffer. A conversion cut
 	// off here keeps its key in_progress until the ledger lease expires, then
@@ -544,9 +558,18 @@ func main() {
 		}()
 	}
 	drain.Wait()
+	// The outbox runner and the audit runner drain in parallel: HTTP and
+	// the consumers have stopped, so neither table gains new rows.
+	var runners sync.WaitGroup
+	runners.Add(1)
+	go func() {
+		defer runners.Done()
+		auditOB.stop(auditStopTimeout, log)
+	}()
 	if err := outboxRunner.Stop(); err != nil {
 		log.Error("outbox runner drain error", map[string]interface{}{"error": err.Error()})
 	}
+	runners.Wait()
 	cancelBackground()
 	// DrainAndClose waits for in-flight WithConn/RunInTx callbacks then
 	// force-closes — pgcommon's documented graceful path. It gets a fresh
