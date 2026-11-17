@@ -74,6 +74,11 @@ func TestIdpConfigRepository(t *testing.T) {
 		assert.False(t, got.Enabled)
 		assert.Equal(t, domain.IdpConfigStatusDisabled, got.Status)
 		assert.Equal(t, int64(2), got.RecordVersion)
+		// Upsert reports the written row back: the audit entry is keyed on
+		// its id and record_version and timed by its updated_at.
+		assert.Equal(t, got.ID, update.ID)
+		assert.Equal(t, int64(2), update.RecordVersion)
+		assert.True(t, got.UpdatedAt.Equal(update.UpdatedAt))
 	})
 
 	t.Run("FindByAlias_NotFound", func(t *testing.T) {

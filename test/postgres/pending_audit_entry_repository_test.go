@@ -10,6 +10,7 @@ package postgres_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,10 +26,12 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 )
 
-// newTestEnqueuer is the Enqueuer cmd/server builds from the AUDIT_* env.
+// newTestEnqueuer is the Enqueuer cmd/server builds from the AUDIT_* env,
+// with Strict set: a validation or insert rejection the library would
+// otherwise count and skip fails the test (platform-audit iam-adopters §6).
 func newTestEnqueuer(t testing.TB) *auditoutbox.Enqueuer {
 	t.Helper()
-	enq, err := auditoutbox.NewEnqueuer(auditoutbox.EnqueueConfig{SourceService: domain.Source})
+	enq, err := auditoutbox.NewEnqueuer(auditoutbox.EnqueueConfig{SourceService: domain.Source, Strict: true})
 	require.NoError(t, err)
 	return enq
 }
@@ -101,6 +104,28 @@ func TestPendingAuditEntryRepository(t *testing.T) {
 		other.OccurredAt = entry.OccurredAt.Add(time.Second)
 		require.NoError(t, tx.RunInTx(tctx, func(ctx context.Context) error { return repo.Enqueue(ctx, other) }))
 		assert.Equal(t, 2, count(t, tenantID), "a different change is a different key")
+	})
+
+	// With a ChangeID (an IdP config's row id and record_version) the key
+	// follows the change, not OccurredAt.
+	t.Run("Enqueue_ChangeID_KeysTheChange", func(t *testing.T) {
+		tenantID := uuid.New()
+		tctx := withTenant(ctx, tenantID)
+		entry := newIdpAuditEntry(tenantID)
+		entry.ChangeID = uuid.NewString() + ":1"
+		require.NoError(t, tx.RunInTx(tctx, func(ctx context.Context) error { return repo.Enqueue(ctx, entry) }))
+		var first string
+		require.NoError(t, rawPool.QueryRow(ctx, `SELECT idempotency_key FROM pending_audit_entries WHERE tenant_id = $1`, tenantID).Scan(&first))
+
+		next := entry
+		next.ChangeID = strings.TrimSuffix(entry.ChangeID, ":1") + ":2"
+		require.NoError(t, tx.RunInTx(tctx, func(ctx context.Context) error { return repo.Enqueue(ctx, next) }))
+		assert.Equal(t, 2, count(t, tenantID), "the next record_version is a different change")
+
+		var stored map[string]any
+		require.NoError(t, rawPool.QueryRow(ctx, `SELECT entry FROM pending_audit_entries WHERE idempotency_key = $1`, first).Scan(&stored))
+		assert.NotContains(t, stored, "change_id", "ChangeID is never sent")
+		assert.NotContains(t, stored, "ChangeID", "ChangeID is never sent")
 	})
 
 	t.Run("Enqueue_RolledBackTx_LeavesNoRow", func(t *testing.T) {
@@ -193,6 +218,8 @@ func TestPendingAuditEntryRepository(t *testing.T) {
 		assert.Equal(t, 2, res.Delivered)
 		srv.AssertRecorded(t, audittest.Match{EntryType: domain.AuditEntryTypeIdpChanged, TenantID: a})
 		srv.AssertRecorded(t, audittest.Match{EntryType: domain.AuditEntryTypeTermsAccepted, TenantID: b, IdempotencyKey: termsKey})
+		srv.AssertNoDuplicates(t)
+		srv.AssertStableKeys(t)
 		assert.Zero(t, count(t, a))
 		assert.Zero(t, count(t, b))
 	})

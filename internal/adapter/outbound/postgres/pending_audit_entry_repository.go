@@ -47,9 +47,9 @@ func (r *PendingAuditEntryRepository) WithMaxMetadataBytes(n int) *PendingAuditE
 }
 
 // Enqueue records entry under NewKeyStrict over the natural key of the
-// change: entry type, tenant, target, action and OccurredAt. OccurredAt is
-// fixed when the entry is built, before the transaction, so a retried
-// transaction carries the same key and the same body (platform-audit §5.3).
+// change: entry type, tenant, target, action and the change's identity —
+// entry.ChangeID (e.g. an IdP config's row id and record_version), or
+// OccurredAt when the caller has none (platform-audit LLD §5.3).
 func (r *PendingAuditEntryRepository) Enqueue(ctx context.Context, entry domain.AuditEntry) error {
 	if r.enq == nil {
 		return errNoEnqueuer
@@ -58,8 +58,11 @@ func (r *PendingAuditEntryRepository) Enqueue(ctx context.Context, entry domain.
 	if entry.Target != nil {
 		targetType, targetID = entry.Target.Type, entry.Target.ID
 	}
-	key := r.enq.NewKeyStrict(entry.EntryType, entry.TenantID.String(), targetType, targetID, entry.Action,
-		entry.OccurredAt.UTC().Format(time.RFC3339Nano))
+	change := entry.ChangeID
+	if change == "" {
+		change = entry.OccurredAt.UTC().Format(time.RFC3339Nano)
+	}
+	key := r.enq.NewKeyStrict(entry.EntryType, entry.TenantID.String(), targetType, targetID, entry.Action, change)
 	return r.enqueue(ctx, key, entry)
 }
 

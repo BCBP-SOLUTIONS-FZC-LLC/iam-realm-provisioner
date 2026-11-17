@@ -70,7 +70,10 @@ func MigrateSchema(ctx context.Context, dsn string, log port.Logger) error {
 // backfill under FORCE RLS would update 0 rows, auditoutbox.ErrNotBypassRLS).
 // The compatibility trigger it installs keeps an older pod's inserts and
 // parking valid during a rollout or rollback; ApplySchema holds at version 1
-// while it exists. Release N+1 runs auditoutbox.FinishAdoption to drop it.
+// while it exists. Release N+1 runs auditoutbox.FinishAdoption to drop it,
+// and drops the AdoptAsBuilt call too: once adopted it changes nothing, but
+// still takes a brief ACCESS EXCLUSIVE lock on pending_audit_entries
+// (bounded by lock_timeout) on every run.
 func AdoptAuditOutbox(ctx context.Context, dsn string, logger pgdomain.Logger) error {
 	pool, err := pgcommon.NewPool(ctx, pgcommon.Config{DSN: dsn, MaxConns: 1, PoolName: "platform_audit_adopt"})
 	if err != nil {

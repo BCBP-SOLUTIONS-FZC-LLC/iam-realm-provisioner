@@ -19,8 +19,9 @@ import (
 // skips such an entry and lets the write commit (its PA-INV-1).
 type PendingAuditEntryRepository interface {
 	// Enqueue records entry under a key derived from the natural key of the
-	// change (entry type, tenant, target, action and OccurredAt), so a
-	// retried transaction enqueues the same entry once.
+	// change (entry type, tenant, target, action and entry.ChangeID, or
+	// OccurredAt when ChangeID is empty), so the same change enqueues the
+	// same entry once.
 	Enqueue(ctx context.Context, entry domain.AuditEntry) error
 	// EnqueueOnce records entry under the caller's established key verbatim
 	// (TermsAccepted's TermsAccepted:<tenant>:<user>:<version>). A row

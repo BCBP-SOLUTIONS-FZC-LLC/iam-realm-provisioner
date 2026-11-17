@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -228,14 +229,24 @@ func (s *IdpService) ConfigureIdp(ctx context.Context, idempotencyKey string, te
 		"secret_rotated":         req.Secret != "",
 	})
 	if err := s.tx.RunInTx(ctx, func(ctx context.Context) error {
-		if err := s.idpConfigs.Upsert(ctx, &domain.IdpConfig{
+		written := &domain.IdpConfig{
 			TenantID: tenantID, IdpAlias: req.IdpAlias, Protocol: req.Protocol,
 			DisplayName: req.DisplayName, Enabled: true, Config: req.Config,
 			Status: domain.IdpConfigStatusActive,
-		}); err != nil {
+		}
+		if err := s.idpConfigs.Upsert(ctx, written); err != nil {
 			return err
 		}
-		return s.auditEntries.Enqueue(ctx, entry)
+		// Key and time the entry from the row this transaction wrote, not
+		// from the call (platform-audit LLD §5.3): a replay of the request
+		// is a new write with a new record_version, a re-created alias a new
+		// row id, and the same write always maps to the same key.
+		e := entry
+		e.ChangeID = idpChangeID(written)
+		if !written.UpdatedAt.IsZero() {
+			e.OccurredAt = written.UpdatedAt.UTC()
+		}
+		return s.auditEntries.Enqueue(ctx, e)
 	}); err != nil {
 		s.failIdempotency(ctx, idempotencyKey)
 		return nil, err
@@ -272,12 +283,26 @@ func (s *IdpService) RemoveIdp(ctx context.Context, tenantID uuid.UUID, idpAlias
 		s.log.WarnContext(ctx, "remove_idp: openbao secret delete failed (best-effort)", "tenant_id", tenantID, "idp_alias", idpAlias, "error", err.Error())
 	}
 	entry := idpAuditEntry(ctx, tenantID, idpAlias, domain.AuditActionDelete, map[string]any{"protocol": string(cfg.Protocol)})
+	// The deleted row's identity keys the entry: a row is deleted once, and
+	// a repeat RemoveIdp finds no row (platform-audit LLD §5.3).
+	entry.ChangeID = idpChangeID(cfg)
 	return s.tx.RunInTx(ctx, func(ctx context.Context) error {
 		if err := s.idpConfigs.Delete(ctx, tenantID, idpAlias); err != nil {
 			return err
 		}
 		return s.auditEntries.Enqueue(ctx, entry)
 	})
+}
+
+// idpChangeID identifies one IdP config write for its audit entry's key:
+// the row id (distinct for a re-created alias) and its record_version
+// (bumped by every update). Empty, so the key falls back to OccurredAt, when
+// the row's id is unknown.
+func idpChangeID(c *domain.IdpConfig) string {
+	if c == nil || c.ID == uuid.Nil {
+		return ""
+	}
+	return c.ID.String() + ":" + strconv.FormatInt(c.RecordVersion, 10)
 }
 
 // auditMetadataMaxBytes mirrors AL-5's MAX_METADATA_BYTES (NormalizeMetadata).

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -199,4 +200,43 @@ func TestRemoveIdp_LocalDeleteFailure_EnqueuesNoAuditEntry(t *testing.T) {
 
 	require.ErrorIs(t, svc.RemoveIdp(context.Background(), tenantID, "acme-sso"), delErr)
 	assert.Empty(t, audit.Enqueued)
+}
+
+// The entry is keyed and timed from the row the transaction wrote, not from
+// the call (platform-audit LLD §5.3): ChangeID is the row id and its
+// record_version, OccurredAt its updated_at.
+func TestConfigureIdp_AuditEntryKeyedOnWrittenRow(t *testing.T) {
+	svc, kc, realms, idpConfigs, _, openbao, _, _, audit := newIdpTestServiceWithAudit()
+	tenantID := uuid.New()
+	seedDedicatedRealm(realms, tenantID, nil)
+	stubConfigureIdpHappyPath(kc, idpConfigs, openbao)
+	rowID := uuid.New()
+	updatedAt := time.Date(2026, 11, 17, 9, 30, 0, 123456000, time.UTC)
+	idpConfigs.UpsertFn = func(_ context.Context, c *domain.IdpConfig) error {
+		c.ID, c.RecordVersion, c.UpdatedAt = rowID, 3, updatedAt
+		return nil
+	}
+
+	_, err := svc.ConfigureIdp(context.Background(), "idem-audit-key", tenantID, validSAMLIdpRequest())
+	require.NoError(t, err)
+	require.Len(t, audit.Enqueued, 1)
+	assert.Equal(t, rowID.String()+":3", audit.Enqueued[0].ChangeID)
+	assert.Equal(t, updatedAt, audit.Enqueued[0].OccurredAt)
+}
+
+func TestRemoveIdp_AuditEntryKeyedOnDeletedRow(t *testing.T) {
+	svc, kc, realms, idpConfigs, _, openbao, _, _, audit := newIdpTestServiceWithAudit()
+	tenantID := uuid.New()
+	seedDedicatedRealm(realms, tenantID, nil)
+	rowID := uuid.New()
+	idpConfigs.FindByAliasFn = func(_ context.Context, tid uuid.UUID, alias string) (*domain.IdpConfig, error) {
+		return &domain.IdpConfig{ID: rowID, RecordVersion: 7, TenantID: tid, IdpAlias: alias, Protocol: domain.IdpProtocolOIDC}, nil
+	}
+	kc.DeleteIdpFn = func(context.Context, string, string) error { return nil }
+	openbao.DeleteIdpSecretFn = func(context.Context, uuid.UUID, string) error { return nil }
+	idpConfigs.DeleteFn = func(context.Context, uuid.UUID, string) error { return nil }
+
+	require.NoError(t, svc.RemoveIdp(context.Background(), tenantID, "acme-sso"))
+	require.Len(t, audit.Enqueued, 1)
+	assert.Equal(t, rowID.String()+":7", audit.Enqueued[0].ChangeID)
 }

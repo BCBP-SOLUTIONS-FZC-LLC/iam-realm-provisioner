@@ -49,8 +49,9 @@ func auditEnvLookup(name string) (string, bool) {
 // the caller: a malformed AUDIT_* value, an app role that cannot INSERT into
 // pending_audit_entries (Enqueue would otherwise swallow SQLSTATE 42501 and
 // lose every entry), or a runner pool that cannot see every tenant's rows.
-// An unset AUDIT_LOG_BASE_URL is not fatal: delivery is disabled, entries
-// queue durably and the backlog gauges report them.
+// An unset AUDIT_LOG_BASE_URL is not fatal here: delivery is disabled,
+// entries queue durably and the backlog gauges report them. Outside
+// APP_ENV=dev, validateRequiredEnv refuses to start without it first.
 func newAuditOutbox(ctx context.Context, appPool, sysPool *pgcommon.Pool, log port.Logger) (*auditOutbox, error) {
 	cfg, err := auditconfig.FromLookup("", auditEnvLookup)
 	if err != nil {
