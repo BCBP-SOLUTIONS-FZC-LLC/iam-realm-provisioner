@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -279,9 +281,9 @@ func (s *IdpService) RemoveIdp(ctx context.Context, tenantID uuid.UUID, idpAlias
 }
 
 // auditMetadataMaxBytes mirrors AL-5's MAX_METADATA_BYTES (NormalizeMetadata).
-// Metadata exceeding the cap causes AL to return 422, which the delivery
-// drainer treats as permanent (ErrAuditEntryRejected → MarkFailed). A
-// fallback marker is substituted so the audit entry is never silently lost.
+// Metadata exceeding the cap is an entry the audit adapter refuses (it
+// fails closed, rolling the IdP write back) and Audit Log would answer 422.
+// A fallback marker is substituted so the change is still recorded.
 const auditMetadataMaxBytes = 8192
 
 // idpAuditEntry builds the TenantIdpConfigChanged AL-5 entry (HLD §9.4,
@@ -305,7 +307,14 @@ func idpAuditEntry(ctx context.Context, tenantID uuid.UUID, alias, action string
 		if rc.UserID != uuid.Nil && rc.UserID.String() != domain.SystemActorID {
 			entry.Actor = domain.AuditActor{Type: domain.AuditActorUser, ID: rc.UserID.String()}
 		}
-		entry.IPAddress, entry.UserAgent = rc.ClientIP, rc.UserAgent
+		// Request-derived, so cleaned rather than trusted: a malformed
+		// client IP is dropped and NUL characters are removed, since the
+		// audit adapter fails the transaction on an entry Audit Log would
+		// reject, and a bad header must not fail the IdP change.
+		if net.ParseIP(rc.ClientIP) != nil {
+			entry.IPAddress = rc.ClientIP
+		}
+		entry.UserAgent = strings.ReplaceAll(strings.ToValidUTF8(rc.UserAgent, ""), "\x00", "")
 	}
 	if tid := gincommon.SpanTraceID(ctx); tid != "" {
 		entry.TraceID = tid

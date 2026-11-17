@@ -38,7 +38,7 @@ WORKDIR /src
 # of application source changes.
 COPY go.mod go.sum ./
 
-# platform-gincommon, platform-pgcommon, and platform-events are private
+# platform-gincommon, platform-pgcommon, platform-events and platform-audit are private
 # github.com/BCBP-SOLUTIONS-FZC-LLC modules (not vendored locally), fetched
 # via git using a short-lived token — same secret-handling pattern as every
 # sibling IAM service's Dockerfile.

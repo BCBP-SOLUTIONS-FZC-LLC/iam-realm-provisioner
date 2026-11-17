@@ -27,7 +27,12 @@ fullnameOverride: ""
 
 serviceAccount:
   create: true
-  name: ""
+  # Set explicitly, never derived from the release name: it is the mesh
+  # principal Audit Log admits (internalCallerPrincipals, platform-audit
+  # iam-adopters §3) and the name OpenBao's Kubernetes-auth role and the IRSA
+  # trust policy bind. A release-derived name would get 403 on every AL-5
+  # call.
+  name: "iam-realm-provisioner"
   # Annotations added to the ServiceAccount:
   #   - IRSA on EKS, for the SNS/SQS/Glue/S3 permissions in deploy/iam/policy.json:
   #       eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/iam-realm-provisioner
@@ -199,10 +204,16 @@ env:
   TOKEN_SERVICE_BASE_URL: "http://iam-token-service.iam.svc.cluster.local"
 
   # Audit Log — AL-5 direct-write ingest for TenantIdpConfigChanged and
-  # the owner's TermsAccepted (LLD §10.6/§18.7). Empty = drainer disabled (startup WARN); entries queue
-  # durably in pending_audit_entries and deliver once this is set, e.g.
+  # the owner's TermsAccepted (LLD §10.6/§18.7), delivered by
+  # platform-audit's outbox Runner; every AUDIT_* key is read by its
+  # config.FromEnv (malformed → startup fails). Empty AUDIT_LOG_BASE_URL =
+  # delivery disabled (startup WARN); entries queue durably in
+  # pending_audit_entries and deliver once this is set, e.g.
   # "http://iam-audit-log.iam.svc.cluster.local" when iam-audit-log ships.
   AUDIT_LOG_BASE_URL: ""
+  # legal.terms.accepted is producer-restricted to this name.
+  AUDIT_SOURCE_SERVICE: "iam-realm-provisioner"
+  AUDIT_LOG_TIMEOUT: "5s"
   AUDIT_DELIVERY_INTERVAL: "5s"
   AUDIT_DELIVERY_BATCH_SIZE: "50"
 

@@ -285,7 +285,7 @@ func TestProvisioning_RejectsTombstonedTenant(t *testing.T) {
 	realms := pgadapter.NewTenantRealmRepository(appPool)
 	idem := pgadapter.NewIdempotencyRepository(appPool)
 	svc := service.NewProvisioningService(realms, idem, &fakeJobsKeycloakAdmin{}, &fakeJobsTokenService{},
-		pgadapter.NewTxRunner(appPool, nil), pgadapter.NewPendingAuditEntryRepository(appPool), "trial", nil)
+		pgadapter.NewTxRunner(appPool, nil), newAuditRepo(t, appPool), "trial", nil)
 
 	tombstone := func(t *testing.T) uuid.UUID {
 		t.Helper()

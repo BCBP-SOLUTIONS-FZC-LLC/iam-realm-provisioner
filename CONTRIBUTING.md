@@ -38,7 +38,7 @@ Host ports are deliberately non-default so this stack can run alongside sibling 
 
 ```
 cmd/
-  server/            ← Composition root — wiring, pool setup, middleware, SQS consumers, outbox runner, AL-5 audit drainer,
+  server/            ← Composition root — wiring, pool setup, middleware, SQS consumers, outbox runner, platform-audit outbox Runner (AL-5),
                        DB-state exporters, graceful shutdown (parallel drain → outbox → pools)
   reconciler/        ← Single binary dispatched via --job=<name>; drives 7 K8s CronJobs (RP-C1..RP-C4 + 3 retention jobs),
                        pushing each run's metrics to the Pushgateway
@@ -48,9 +48,9 @@ internal/
   core/port/         ← Interfaces required by the core: KeycloakAdmin (the RP-INV-1 seam), repositories,
                        IdpValidationRepository, ReconciliationRepository, IdempotencyStore, Inbox, InboxPruner,
                        PendingAuditEntryRepository, RetentionPruner, SubscriptionLapseReader (RP-C3, O&M's I-16),
-                       TokenServiceClient, AuditLogClient, OpenBaoClient, ObjectStore
-  core/service/      ← Use cases: ProvisioningService, LifecycleService, IdpService, MfaService, RealmConfigService,
-                       AuditDeliveryService; compensation.go (detached context for compensating teardown)
+                       TokenServiceClient, OpenBaoClient, ObjectStore
+  core/service/      ← Use cases: ProvisioningService, LifecycleService, IdpService, MfaService, RealmConfigService;
+                       compensation.go (detached context for compensating teardown)
   adapter/inbound/
     http/            ← Gin handlers for RP-1..RP-17, DTOs, middleware (incl. RequireTenantMatch)
     consumer/        ← 3 SQS consumers (membership-realm-q, tenant-realm-q, billing-realm-q)
@@ -64,7 +64,6 @@ internal/
     openbao/         ← KV v2 client for IdP secrets (Kubernetes auth), §12 / RP-D10
     orgmembership/   ← HTTP client for O&M (I-8 residual-MFA-requirement check, I-16 subscription lapses)
     tokenservice/    ← HTTP client for the Token Service (TS-1/TS-3/TS-4, §2.5)
-    auditlog/        ← HTTP client for Audit Log's AL-5 direct-write ingest
     s3/              ← Realm export target on offboarding (§15.5)
     httpx/           ← The shared traceparent-injecting HTTP transport
     metrics/         ← iam_realm_provisioner_* Prometheus counters/histograms/gauges

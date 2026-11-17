@@ -188,7 +188,7 @@ These alerts read platform-library metrics that are still `proposed` in the regi
 
 ### IAMRealmProvisionerDBPoolSaturated
 
-**Meaning.** More than 90% of a pool's connections have been checked out for 10 minutes on the busiest replica. `pool="default"` is the API pool; `pool="system"` the BYPASSRLS pool (reconciler sweeps, gauge exporters, the AL-5 audit drainer, RP-13).
+**Meaning.** More than 90% of a pool's connections have been checked out for 10 minutes on the busiest replica. `pool="default"` is the API pool; `pool="system"` the BYPASSRLS pool (reconciler sweeps, gauge exporters, the platform-audit outbox Runner, RP-13).
 
 **Triage.** `platform_db_pool_acquire_duration_seconds` (are callers waiting?), slow queries (`platform_db_slow_queries_total`), long transactions; whether traffic or HPA scale-out (replicas × `PG_MAX_CONNS` against PgBouncer) changed.
 
@@ -206,17 +206,17 @@ These alerts read platform-library metrics that are still `proposed` in the regi
 
 ### IAMRealmProvisionerAuditEntriesRejected
 
-**Meaning.** `pending_audit_entries` holds rows Audit Log permanently rejected (a 4xx other than 429 from AL-5) — those `TenantIdpConfigChanged` changes or `TermsAccepted` signup records have no audit record yet. (A `422 UNKNOWN_ENTRY_TYPE` is never parked: it stays `pending` — see the next alert.)
+**Meaning.** `pending_audit_entries` holds rows parked as `failed` — Audit Log rejected them (a verdict other than 429/5xx/401/403/422 `UNKNOWN_ENTRY_TYPE`) or they spent their retry budget (`AUDIT_DELIVERY_MAX_ATTEMPTS`, 50). Those `TenantIdpConfigChanged` changes or `TermsAccepted` signup records have no audit record yet. Delivery is platform-audit's outbox Runner; this legacy alert reads `iam_realm_provisioner_audit_entry_backlog_gauge`, which the Runner keeps fed during the library's compatibility period — the library's own `PlatformAuditEntriesParked` covers the same condition.
 
-**Triage.** `SELECT id, tenant_id, entry->>'entry_type' AS entry_type, entry->>'action' AS action, last_error, created_at FROM pending_audit_entries WHERE status='failed' ORDER BY created_at DESC LIMIT 20;` (sysPool). `last_error` carries Audit's response: `metadata_too_large`, `invalid_request`, or `forbidden_peer` (mesh identity).
+**Triage.** `SELECT id, tenant_id, entry->>'entry_type' AS entry_type, last_outcome, last_error, failed_at FROM pending_audit_entries WHERE status='failed' ORDER BY failed_at DESC LIMIT 20;` (sysPool), or platform-audit's `auditoutbox.ListFailed`. `last_outcome` is `rejected`/`invalid` (a producer or entry problem — `last_error` carries Audit's verdict) or `retry` (budget spent: Audit Log was down for hours). Rows parked by the pre-adoption code on a 401/403 are labelled `rejected`.
 
-**Mitigate.** Fix the cause, then re-queue: `UPDATE pending_audit_entries SET status='pending', next_attempt_at=now() WHERE status='failed';` — the Idempotency-Key (`idempotency_key`, else the row id) is unchanged, so a re-delivery never double-records.
+**Mitigate.** Never `UPDATE` these rows by hand: the library's constraints tie `status` to `failed_at`, and every disposition must be audited. Use platform-audit's operator helpers (its runbook, `PlatformAuditEntriesParked`): `Requeue` once the cause is fixed (budget spent, admission fixed); `Resolve` after re-emitting a corrected entry; `Discard` with a reason when it must not be sent. The Idempotency-Key is unchanged on a requeue, so a re-delivery never double-records.
 
 ### IAMRealmProvisionerAuditEntriesUndelivered
 
-**Meaning.** `pending_audit_entries` has held undelivered rows for 30 minutes. Either Audit Log is unreachable (`iam_realm_provisioner_audit_entry_delivery_total{result="retry"}` rising), Audit Log does not know the entry type yet (`{result="unknown_entry_type"}` rising — deploy Audit Log rev 0.31+ for `legal.terms.accepted`; WARN `audit log does not know this entry type yet`), or `AUDIT_LOG_BASE_URL` is unset and the drainer is off (startup WARN `audit-entry delivery disabled`). Nothing is lost.
+**Meaning.** `pending_audit_entries` has held undelivered rows for 30 minutes. Either Audit Log is unreachable (`iam_realm_provisioner_audit_entry_delivery_total{result="retry"}` rising), Audit Log does not know the entry type yet (`{result="unknown_entry_type"}` rising — deploy Audit Log rev 0.31+ for `legal.terms.accepted`), this service is not admitted by Audit Log's mesh policy (`{result="not_admitted"}` — check `internalCallerPrincipals` and the explicit `serviceAccount.name`), or `AUDIT_LOG_BASE_URL` is unset and delivery is disabled (startup WARN `audit-entry delivery disabled`). Nothing is lost. The library's `PlatformAuditDeliveryStalled` / `PlatformAuditUnknownEntryType` / `PlatformAuditNotAdmitted` / `PlatformAuditDeliveryDisabled` split the same condition by cause.
 
-**Mitigate.** Restore Audit Log or set `AUDIT_LOG_BASE_URL`; the backlog drains on its own (a full batch re-drains immediately).
+**Mitigate.** Restore Audit Log, fix admission, or set `AUDIT_LOG_BASE_URL`; the backlog drains on its own.
 
 ## Tenant isolation
 

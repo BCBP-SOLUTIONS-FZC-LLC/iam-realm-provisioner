@@ -14,7 +14,7 @@ iam-realm-provisioner/
 │   │   ├── identity.go                 # resolveAppEnv / isDevEnv / loggerEnv — one environment for metrics, traces and logs
 │   │   ├── wiring.go                   # DI helpers factored out of main.go (Glue codec, SNS publisher, runMigrationsAtStartup)
 │   │   ├── inbound_schema.go           # consumedValidator — eventschema.ConsumedByConsumer → sqspipeline.Validator
-│   │   ├── audit_delivery.go           # AL-5 pending_audit_entries drainer goroutine
+│   │   ├── audit_delivery.go           # platform-audit wiring: AUDIT_* config, Enqueuer, outbox Runner (sysPool), legacy-metric Observer
 │   │   ├── platform_realm.go           # startPlatformRealmEnsure — background retry loop ensuring the operator KC realm (CD-52 item 2, LLD §12.3); skipped when PLATFORM_REALM_NAME unset
 │   │   ├── shared_realm.go             # startSharedRealmEnsure — background retry loop ensuring the shared trial realm (LLD §12.2); started unconditionally from main.go
 │   │   └── exporters.go                # runBusinessExporters — goroutines refreshing the §11.2 DB-state gauges + rls_violations_total
@@ -43,7 +43,7 @@ iam-realm-provisioner/
 │   │   │   ├── idp_config.go           # IdpConfig, IdpConfigValidation
 │   │   │   ├── idp_validation.go       # §11.6 CheckOutcome/check-ID constants
 │   │   │   ├── provisioning_op.go      # ProvisioningOperation (idempotency ledger row), RealmConfigReconciliation
-│   │   │   ├── audit_entry.go          # AuditEntry / PendingAuditEntry — the AL-5 TenantIdpConfigChanged / TermsAccepted direct-write entry
+│   │   │   ├── audit_entry.go          # AuditEntry — the AL-5 TenantIdpConfigChanged / TermsAccepted direct-write entry
 │   │   │   ├── terms.go                # TermsAcceptance (RP-1/RP-2 terms_acceptance) + legal.terms.accepted AL-5 entry + deterministic key (LLD v1.41)
 │   │   │   ├── errors.go               # ErrorCode taxonomy (§17) + Error{Code,Message,Details}, Status() -> HTTP code
 │   │   │   └── event.go                # Source="iam-realm-provisioner", SystemActorID, the 9 produced + 6 consumed event-type constants, Event{} struct, every payload struct (§25)
@@ -53,8 +53,8 @@ iam-realm-provisioner/
 │   │   │   │                          #   created reports fresh-mint vs resumed, §2.5), ClearServiceAccountKeysCache,
 │   │   │   │                          #   DeleteServiceAccountClientIfExists (idempotent, mirrors DeleteRealmIfExists),
 						#   EnsurePlatformRealm (CD-52 item 2, §12.3 — operator realm bootstrap)
-│   │   │   ├── repositories.go         # TenantRealmRepository, IdpConfigRepository, IdpValidationRepository, ReconciliationRepository, IdempotencyStore, Inbox, InboxPruner, PendingAuditEntryRepository, RetentionPruner
-│   │   │   ├── audit_log_client.go     # AuditLogClient — AL-5 direct-write ingest
+│   │   │   ├── repositories.go         # TenantRealmRepository, IdpConfigRepository, IdpValidationRepository, ReconciliationRepository, IdempotencyStore, Inbox, InboxPruner, RetentionPruner
+│   │   │   ├── pending_audit_entry_repository.go # PendingAuditEntryRepository — enqueue-only AL-5 hand-off (Enqueue, EnqueueOnce)
 │   │   │   ├── token_service_client.go # TokenServiceClient — TS-1/TS-3/TS-4 (§2.5)
 │   │   │   ├── subscription_status_reader.go # SubscriptionLapseReader — RP-C3 suspend-phase trigger, backed by O&M's I-16
 │   │   │   ├── openbao_client.go       # OpenBaoClient — IdP secret KV read/write/delete
@@ -75,7 +75,6 @@ iam-realm-provisioner/
 │   │       ├── idp_validator.go        # §11.6 Region-Agnostic IdP Configuration Checklist (ValidateIdpConfig)
 │   │       ├── realm_config_service.go # RP-8 (ApplyRealmConfig, RP-INV-6 local-intent-first)
 │   │       ├── mfa_service.go          # RP-9 (ResetMFA) + membership-realm-q's SyncRequiresMfa
-│   │       ├── audit_delivery_service.go # AL-5 drain: claim due pending_audit_entries, deliver, delete / back off / park failed
 │   │       └── compensation.go         # compensationContext — detached 30s context for compensating teardown
 │   └── adapter/
 │       ├── inbound/
@@ -89,12 +88,11 @@ iam-realm-provisioner/
 │       │   ├── consumer/               # 3 SQS handlers: membership-realm-q, tenant-realm-q, billing-realm-q (dedup via port.Inbox)
 │       │   └── sqspipeline/            # builds the consumers from platform-events: EnvForQueue (eventcfg.LoadSQS), NewConsumer (GlueDecodeCodec + WithDLQForwarding), RequireDLQ, Handler (DLQ route → span → schema validation)
 │       └── outbound/
-│           ├── postgres/               # repository impls + migrations/000000_initial_schema.{up,down}.sql + gauge_repository.go (§11.2 exporters) + inbox_repository.go (platform-events inbox.Store) + migrate.go (MigrateSchema) + idempotency_repository.go (lease reclaim, detached Complete/Fail) + retention_repository.go (ledger-prune) + pending_audit_entry_repository.go (AL-5 queue)
+│           ├── postgres/               # repository impls + migrations/000000_initial_schema.{up,down}.sql + gauge_repository.go (§11.2 exporters) + inbox_repository.go (platform-events inbox.Store) + migrate.go (MigrateSchema, AdoptAuditOutbox — platform-audit AdoptAsBuilt + ApplySchema) + idempotency_repository.go (lease reclaim, detached Complete/Fail) + retention_repository.go (ledger-prune) + pending_audit_entry_repository.go (AL-5 enqueue over platform-audit's auditoutbox.Enqueuer)
 │           ├── keycloak/               # gocloak-backed KeycloakAdmin impl — RP-INV-1's ONLY implementation + instrumentation.go (OTel spans on gocloak's resty transport) + admin_platform_realm.go (EnsurePlatformRealm, CD-52 item 2, LLD §12.3)
 │           ├── eventbus/               # outbox publisher, Glue/Noop/Validating codecs
 │           ├── openbao/                # OpenBao KV v2 + Kubernetes-auth client
 │           ├── orgmembership/          # HTTP client for O&M's I-8 residual-MFA check + I-16 subscription-lapse poll (RP-C3, port.SubscriptionLapseReader)
-│           ├── auditlog/               # HTTP client for Audit Log's AL-5 direct-write ingest (port.AuditLogClient)
 │           ├── tokenservice/           # HTTP client for Token Service's TS-1/TS-3/TS-4 credential-lifecycle API (§2.5, port.TokenServiceClient)
 │           ├── s3/                     # realm-export object store
 │           ├── httpx/                  # cross-cutting leaf: the one HTTP transport every outbound adapter builds on, injecting W3C traceparent (§11.3)
@@ -111,7 +109,7 @@ iam-realm-provisioner/
 │   ├── keycloak/realm-template.json    # versioned dedicated-realm template (RP-3/RP-2 CreateRealmFromTemplate)
 │   ├── iam/                            # AWS IAM policy (SNS/SQS/Glue/S3 — NOT secrets)
 │   ├── openbao/                        # OpenBao ACL policy + Kubernetes-auth role, scoped to the IdP secret path
-│   └── monitoring/                     # PrometheusRule alerts (app-alerts.yml, schema-registry-alerts.yml), SLO burn-rate rules, prometheus-adapter rule
+│   └── monitoring/                     # PrometheusRule alerts (app-alerts.yml, schema-registry-alerts.yml, platform-audit-rules.yml — platform-audit's vendored rules), SLO burn-rate rules, prometheus-adapter rule
 ├── .github/
 │   ├── workflows/                      # ci.yml, validate-test.yml, validate-quality.yml, changelog-check.yml,
 │   │                                    # release.yml, freeze-watchdog.yml, schema-registry.yml, schema-prune.yml, schema-health-quarterly.yml (9 total)
@@ -143,6 +141,7 @@ require (
     github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2  v2.6.0
     github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2     v2.3.0
     github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2   v2.0.2
+    github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit         v0.1.0
     github.com/Nerzal/gocloak/v13                         v13.9.0
 )
 ```
@@ -153,7 +152,13 @@ Module: `github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner`, Go 1.26.11.
 
 ### `platform-gincommon` integration
 
-`gincommon.ProtectedMiddlewares` + `ObservabilityMiddlewares` with `Config.RequestTimeout = 30s` (gincommon appends `TimeoutMiddleware` innermost, so metrics/logs/spans record the client's 503). `/metrics` is `gincommon.MetricsHandler()`. `ServiceName = "iam-realm-provisioner"`. No gRPC — Gin HTTP only, mesh-internal (`/api/v1/internal/*`, no public route). `gincommon.HealthHandler`-style `/healthz` (pure liveness) + hand-rolled `/readyz` (checks Postgres, sys-Postgres, outbox, Keycloak `Ready()`). `/metrics` served on its own dedicated port (`METRICS_PORT=9090`) — never shares a listener with the mesh-internal provisioning API.
+`gincommon.ProtectedMiddlewares` + `ObservabilityMiddlewares` with `Config.RequestTimeout = 30s` (gincommon appends `TimeoutMiddleware` innermost, so metrics/logs/spans record the client's 503). `/metrics` is `gincommon.MetricsHandler()`. `ServiceName = "iam-realm-provisioner"`. No gRPC — Gin HTTP only, mesh-internal (`/api/v1/internal/*`, no public route). `/healthz` (liveness: no dependency check; its only check is the platform-audit Runner's `Alive()` heartbeat) + hand-rolled `/readyz` (checks Postgres, sys-Postgres, outbox, Keycloak `Ready()`). `/metrics` served on its own dedicated port (`METRICS_PORT=9090`) — never shares a listener with the mesh-internal provisioning API.
+
+### `platform-audit` integration
+
+Outbox mode (`pkg/auditoutbox`), the IAM pilot adopter of platform-audit v0.1.0 (its `docs/guides/iam-adopters.md` §5.1). `pending_audit_entries` is created in its as-built shape by `000000_initial_schema`; `pgadapter.MigrateSchema` then runs `AdoptAuditOutbox` — `auditoutbox.AdoptAsBuilt(…, AsBuiltRealmProvisioner, …)` on a one-connection pool over the migration DSN (the migrator role: table owner, BYPASSRLS), then `auditoutbox.ApplySchema` (library version tracked in `platform_audit_schema_migrations`). This is release N, the expand: the compatibility trigger `platform_audit_compat` stays, and `ApplySchema` holds at version 1, until a later release runs `auditoutbox.FinishAdoption` (the contract). Rolling back after `FinishAdoption` needs `auditoutbox.ReinstallCompat` first.
+
+`cmd/server/audit_delivery.go` builds everything once in `main`: `config.FromLookup` over the `AUDIT_*` env (`AUDIT_SOURCE_SERVICE` defaulted to and checked against `iam-realm-provisioner`), `audit.InitMetrics` on gincommon's registerer and identity, `auditoutbox.CheckEnqueueAccess` on the app pool (fatal: `Enqueue` swallows SQLSTATE 42501, so a missing grant would otherwise drop every entry), one `Enqueuer` (handed to `pgadapter.NewPendingAuditEntryRepository`) and one `Runner` on the BYPASSRLS `sysPool` (its catalog check of cross-tenant access is fatal too). The Runner's `Observer` keeps the legacy `audit_entry_delivery_total` / `audit_entry_backlog_gauge` fed through the compatibility period. `Runner.Alive()` backs `/healthz`, never `/readyz`; `Runner.Stop` runs alongside `outboxRunner.Stop` at shutdown. The library's own alert, recording and SLO rules render from `deploy/helm/files/platform-audit.rules.yml` (`templates/prometheusrule-platform-audit.yaml`; raw twin `deploy/monitoring/platform-audit-rules.yml`).
 
 ### `platform-pgcommon` integration
 

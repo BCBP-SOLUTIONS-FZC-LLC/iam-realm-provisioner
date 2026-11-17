@@ -25,8 +25,8 @@ func TestIdpAuditEntry_MetadataWithinCap_PassedThrough(t *testing.T) {
 }
 
 // TestIdpAuditEntry_MetadataExceedsAL5Cap_SubstitutesTruncatedMarker guards
-// against AL-5 returning 422 metadata_too_large (→ ErrAuditEntryRejected →
-// MarkFailed) when IdP validation checks produce an unusually large payload.
+// against AL-5 returning 422 metadata_too_large (platform-audit's Runner
+// parks it `rejected`) when IdP validation checks produce an unusually large payload.
 func TestIdpAuditEntry_MetadataExceedsAL5Cap_SubstitutesTruncatedMarker(t *testing.T) {
 	big := strings.Repeat("x", 9000)
 	e := idpAuditEntry(context.Background(), uuid.New(), "alias", domain.AuditActionUpdate,

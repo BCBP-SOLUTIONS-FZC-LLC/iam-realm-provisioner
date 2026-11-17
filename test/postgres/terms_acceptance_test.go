@@ -73,7 +73,7 @@ func TestTermsAccepted_EnqueuedWithRP1(t *testing.T) {
 	ctx := context.Background()
 	realms := pgadapter.NewTenantRealmRepository(appPool)
 	idem := pgadapter.NewIdempotencyRepository(appPool)
-	audit := pgadapter.NewPendingAuditEntryRepository(appPool)
+	audit := newAuditRepo(t, appPool)
 
 	rows := func(t *testing.T, tenantID uuid.UUID) []pendingRow {
 		t.Helper()
@@ -154,10 +154,8 @@ func TestTermsAccepted_EnqueuedWithRP1(t *testing.T) {
 func TestPendingAuditEntryRepository_EnqueueOnce(t *testing.T) {
 	t.Parallel()
 	appPool, rawPool := setupTestDB(t)
-	sysPool := setupSysPool(t, rawPool)
 	ctx := context.Background()
-	repo := pgadapter.NewPendingAuditEntryRepository(appPool)
-	sysRepo := pgadapter.NewPendingAuditEntryRepository(sysPool)
+	repo := newAuditRepo(t, appPool)
 
 	tenantID := uuid.New()
 	terms := validTerms()
@@ -167,16 +165,14 @@ func TestPendingAuditEntryRepository_EnqueueOnce(t *testing.T) {
 	require.NoError(t, repo.EnqueueOnce(withTenant(ctx, tenantID), key, entry), "a repeated key is a no-op")
 	require.Error(t, repo.EnqueueOnce(withTenant(ctx, tenantID), "", entry))
 
-	claimed, err := sysRepo.ClaimDue(ctx, 10)
-	require.NoError(t, err)
-	require.Len(t, claimed, 1)
-	assert.Equal(t, key, claimed[0].IdempotencyKey)
-	assert.Equal(t, key, claimed[0].Key(), "the drainer sends the deterministic key as Idempotency-Key")
-	assert.Equal(t, "203.0.113.7", claimed[0].Entry.IPAddress)
-
-	// Delivered → the row (and its IP/user agent) is gone from this service.
-	require.NoError(t, sysRepo.MarkDelivered(ctx, claimed[0].ID))
-	var n int
-	require.NoError(t, rawPool.QueryRow(ctx, `SELECT count(*) FROM pending_audit_entries WHERE tenant_id = $1`, tenantID).Scan(&n))
-	assert.Zero(t, n)
+	// The deterministic key is stored verbatim: it is the AL-5
+	// Idempotency-Key the Runner sends. The IP address travels only here.
+	var gotKey string
+	var body []byte
+	require.NoError(t, rawPool.QueryRow(ctx,
+		`SELECT idempotency_key, entry FROM pending_audit_entries WHERE tenant_id = $1`, tenantID).Scan(&gotKey, &body))
+	assert.Equal(t, key, gotKey)
+	var got domain.AuditEntry
+	require.NoError(t, json.Unmarshal(body, &got))
+	assert.Equal(t, "203.0.113.7", got.IPAddress)
 }

@@ -4,6 +4,34 @@ All notable changes to this service are documented here. Format follows [Keep a 
 
 This service has never been deployed to any environment — there is no released version yet, so everything lives under `[Unreleased]`. Because of that, this file tracks only what is currently true and what is still outstanding, not a phase-by-phase build history; the full development diary is available via `git log` if it's ever needed.
 
+## [Unreleased — 2026-11-17]
+
+### Changed
+
+- **Audit Log delivery moved to `platform-audit` v0.1.0 (outbox mode) — this service is the IAM pilot adopter** (platform-audit `docs/guides/iam-adopters.md` §5.1). `pending_audit_entries` is still created in its as-built shape by `000000_initial_schema`; `pgadapter.MigrateSchema` (server startup and the migrate Job) now runs `AdoptAuditOutbox` right after it — `auditoutbox.AdoptAsBuilt(…, AsBuiltRealmProvisioner, …)` on the migrator role (owner, BYPASSRLS), then `auditoutbox.ApplySchema`. This is release N, the expand: the library's compatibility trigger stays, so a pre-adoption pod keeps working through a rollout or rollback; a later release runs `auditoutbox.FinishAdoption` (the contract). Delivery is the library's `auditoutbox.Runner` on the BYPASSRLS `sysPool`, built in `cmd/server/audit_delivery.go` from the `AUDIT_*` env via its `config.FromLookup` (a malformed value fails startup), with `CheckEnqueueAccess` on the app pool and the Runner's cross-tenant access check both fatal at startup. `PendingAuditEntryRepository` is now enqueue-only and wraps `auditoutbox.Enqueuer`: `Enqueue` keys an entry with `NewKeyStrict` over entry type, tenant, target, action and `OccurredAt` (was the row's random id), `EnqueueOnce` keeps `TermsAccepted:<tenant>:<user>:<version>` verbatim (`audit.RawKey`).
+- **Behaviour differences from the hand-rolled drainer** (the library's semantics, which were modelled on this service's): a `401`/`403` from Audit Log is now `not_admitted` and retried, not parked; a row that spends its 50-attempt budget is parked with `last_outcome = retry`; the library would skip an invalid entry or an RLS-rejected row and let the business write commit (its PA-INV-1), so `PendingAuditEntryRepository` fails closed: before calling the library it rejects an entry for a tenant other than the transaction's (the RLS `WITH CHECK` case) and an entry the library's `audit.Validate` rejects, so the business `RunInTx` rolls back with it — the library's default would skip such an entry and commit the write (its PA-INV-1) — unchanged from before, a committed IdP or tenant row always has its audit entry; RP-6 now drops a malformed client IP and strips NUL characters from the user agent rather than fail on a bad header; parked rows are requeued, resolved or discarded with the library's audited operator helpers, never by hand-written `UPDATE` (its constraints tie `status` to `failed_at`).
+- **Legacy metrics kept for the compatibility period.** `iam_realm_provisioner_audit_entry_delivery_total` and `iam_realm_provisioner_audit_entry_backlog_gauge` are fed from the Runner's `Observer` (new `result` value `not_admitted`), so the `IAMRealmProvisionerAuditEntriesRejected` / `…Undelivered` alerts keep working; the SQL backlog exporter is gone. New monitoring uses `platform_audit_*`.
+- **`/healthz` checks the audit Runner's heartbeat** (`Runner.Alive()`), and only that; `/readyz` never does, so an Audit Log outage never takes a pod out of rotation.
+- **`realm_provisioner_migrator` gets `INSERT` on `pending_audit_entries`** (the Runner's purge and operator helpers write their own audit entries). Prod grant is Terraform-owned (`.claude/operations.md` checklist item 1).
+- **Helm `serviceAccount.name` is set explicitly to `iam-realm-provisioner`** — the principal Audit Log admits; a release-derived name would get `403` on every AL-5 call. OpenBao and IRSA bindings already use this name.
+- **New `AUDIT_SOURCE_SERVICE` and `AUDIT_LOG_TIMEOUT`** in Helm values and `.env-example`. `AUDIT_SOURCE_SERVICE` defaults to, and must equal, `iam-realm-provisioner` (`legal.terms.accepted` is producer-restricted to it). Every other platform-audit `AUDIT_*` variable applies with its library default.
+
+- **Code coverage: 96.2% → 96.8%** (merged `make test-ci`, gate 95%). New tests: `EnsurePlatformRealm` end to end against a scripted fake Keycloak (create, lost create race, existing role, OTP already required, every failing step including the missing Conditional OTP subflow — `admin_platform_realm.go` now 100%); `EnsureSharedRealm` failure injection on every Keycloak call of the converge path; `newAuditOutbox` against a real migrated database (start / `Alive` / stop, and the runner's cross-tenant access check refusing a NOBYPASSRLS role) plus its app-pool access check; the platform-audit adapter's fail-closed checks; `orphaned-signup-reap`'s candidate-query failure; `AdoptAuditOutbox` on an unreachable database. Remaining gap is mostly `cmd/server` / `cmd/reconciler` `main()` error paths.
+
+### Added
+
+- **platform-audit's alert, recording and SLO rules**: `deploy/helm/templates/prometheusrule-platform-audit.yaml` renders the vendored `deploy/helm/files/platform-audit.rules.yml` with `<service>`, `<environment>` (from `APP_ENV`) and `<mode>` = `outbox_deliver` filled; raw twin `deploy/monitoring/platform-audit-rules.yml`.
+
+### Removed
+
+- `AuditDeliveryService`, `internal/adapter/outbound/auditlog`, `port.AuditLogClient` (with `ErrAuditEntryRejected`, `ErrAuditEntryTypeUnknown`, `RetryAfterError`), `domain.PendingAuditEntry`, the `ClaimDue`/`Mark*` repository methods and `GaugeRepository.AuditEntryBacklog` — all replaced by the library.
+
+### Outstanding
+
+- **Go-live checks owned outside this repo** (platform-audit iam-adopters §3, §6): Audit Log's `internalCallerPrincipals` and `networkPolicy.internalCallers` must admit this service in every environment, and `Client.Probe` must return `ProbeAdmitted` from a pod; import platform-audit's Grafana dashboard; name an owner for parked rows.
+- **Release N+1 (contract)**: once this release has run in production without rollback, add `auditoutbox.FinishAdoption` before `ApplySchema` in `AdoptAuditOutbox`, then retire the legacy metrics and the two `IAMRealmProvisionerAuditEntries*` alerts after the compatibility period.
+- **LLD not yet revised**: §10.6 and the §12 env table still describe the hand-rolled drainer; the code and `.claude/` docs are authoritative until an LLD revision records the adoption.
+
 ## [Unreleased — 2026-11-16]
 
 ### Fixed

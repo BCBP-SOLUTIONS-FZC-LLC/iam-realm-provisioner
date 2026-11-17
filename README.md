@@ -137,14 +137,14 @@ Clean Architecture — dependencies point inward; outer layers never import inne
 ```
 iam-realm-provisioner/
 ├── cmd/
-│   ├── server/                        # HTTP composition root: pool+GUC wiring, migrations (unless RUN_MIGRATIONS=false), outbox runner, 3 SQS consumers, AL-5 audit drainer
+│   ├── server/                        # HTTP composition root: pool+GUC wiring, migrations (unless RUN_MIGRATIONS=false), outbox runner, 3 SQS consumers, platform-audit outbox Runner (AL-5)
 │   ├── reconciler/                    # Single binary, --job=<name>; jobs/ holds the 7 CronJob entry points; metrics pushed to the Pushgateway
 │   └── migrate/                       # Helm pre-install/pre-upgrade migrate Job (postgres.MigrateSchema)
 ├── internal/
 │   ├── core/
 │   │   ├── domain/                    # Entities, value objects, ErrorCode taxonomy (§17), event payload structs — no deps beyond google/uuid
 │   │   ├── port/                      # KeycloakAdmin (RP-INV-1's sole seam, incl. §2.5 service-account methods), repositories, IdempotencyStore, Inbox/InboxPruner (platform-events inbox), OpenBaoClient, OrgMembershipClient, ObjectStore, SubscriptionLapseReader, TokenServiceClient
-│   │   └── service/                   # ProvisioningService, LifecycleService, IdpService, RealmConfigService, MfaService, AuditDeliveryService
+│   │   └── service/                   # ProvisioningService, LifecycleService, IdpService, RealmConfigService, MfaService
 │   ├── eventschema/                   # Embedded JSON Schema draft-07: 9 produced + 6 consumed, + asyncapi_drift_test.go
 │   └── adapter/
 │       ├── inbound/
@@ -153,8 +153,7 @@ iam-realm-provisioner/
 │       │   └── sqspipeline/           # Builds the consumers from platform-events: per-queue config, DLQ forwarding, RequireDLQ, consumed-schema validation
 │       └── outbound/
 │           ├── keycloak/              # gocloak-backed KeycloakAdmin — RP-INV-1's ONLY implementation
-│           ├── postgres/              # Repository impls (incl. inbox, retention, pending audit entries) + single consolidated 000000_initial_schema migration
-│           ├── auditlog/              # HTTP client for Audit Log's AL-5 direct-write ingest (TenantIdpConfigChanged)
+│           ├── postgres/              # Repository impls (incl. inbox, retention, pending audit entries via platform-audit's Enqueuer) + single consolidated 000000_initial_schema migration + platform-audit's as-built adoption (migrate.go)
 │           ├── eventbus/              # Outbox publisher (single topic iam-tenant-events) + Glue (version by definition)/GlueDecode/Noop/Validating codecs
 │           ├── openbao/               # KV v2 client, Kubernetes-auth (pod ServiceAccount → OpenBao role → policy)
 │           ├── orgmembership/         # HTTP client for O&M's I-8 residual-MFA check + I-16 subscription-lapse poll (RP-C3)
@@ -736,7 +735,7 @@ Follows the Enterprise Platform Observability Standard's three-tier hierarchy (`
 
 The pre-standard library metrics (unprefixed HTTP, events/outbox/SQS and pgcommon names) were removed from the libraries and are no longer emitted. `TestNamingConvention_ConformsToPlatformObservabilityStandard` validates every gathered collector against the registry (`obsregistry.Validate`) on every build; `.github/scripts/metrics-registry-lint.sh` fails the build if a rule/HPA/adapter file names a removed metric, or if an alert reading a `proposed` metric lacks `metric_status: proposed`.
 
-Three DB-state gauges (`realm_active_gauge`, `realm_config_pending_gauge`, `template_drift`) are refreshed every 5 minutes by 5 goroutines (`runBusinessExporters`) against the BYPASSRLS sys pool — a flat gauge plus a `gauge exporter query failed` log line means the exporter is broken, not that the count is stable. `trial_expiry_*`, `lapse_processed_total`, and `realm_export_total` are incremented correctly but only inside the one-shot reconciler CronJob process, which exits before a scrape lands — treat silence on those series as "no signal", not "no problem".
+Three DB-state gauges (`realm_active_gauge`, `realm_config_pending_gauge`, `template_drift`) are refreshed every 5 minutes by 4 goroutines (`runBusinessExporters`, three gauges plus the `rls_violations_total` counter) against the BYPASSRLS sys pool — a flat gauge plus a `gauge exporter query failed` log line means the exporter is broken, not that the count is stable. `trial_expiry_*`, `lapse_processed_total`, and `realm_export_total` are incremented correctly but only inside the one-shot reconciler CronJob process, which exits before a scrape lands — treat silence on those series as "no signal", not "no problem".
 
 ### Tracing and logs
 
@@ -819,13 +818,13 @@ Unlike a compose file that starts infra-only, this repo's `docker-compose.yml` i
 docker build -t iam-realm-provisioner:local --secret id=go_private_token,src=<(echo "$GO_PRIVATE_TOKEN") .
 ```
 
-The `Dockerfile` requires the `go_private_token` build secret to fetch the three private `BCBP-SOLUTIONS-FZC-LLC` Go modules during the build; it errors out explicitly if the secret is missing or empty.
+The `Dockerfile` requires the `go_private_token` build secret to fetch the four private `BCBP-SOLUTIONS-FZC-LLC` Go modules (platform-gincommon, platform-events, platform-pgcommon, platform-audit) during the build; it errors out explicitly if the secret is missing or empty.
 
 ### Health and readiness
 
 | Endpoint | Returns | Checks |
 |---|---|---|
-| `GET /healthz` | `200 {"status":"ok"}` | Pure liveness — never inspects a dependency |
+| `GET /healthz` | `200 {"status":"ok"}` or `503 {"status":"unhealthy","audit_runner":"…"}` | Liveness — never inspects a dependency; fails only when the platform-audit Runner's heartbeat (`Runner.Alive()`) is stale or the Runner has stopped |
 | `GET /readyz` | `200 {"status":"ready","checks":{...}}` or `503 {"status":"not ready",...}` | Postgres, sys-Postgres, the outbox runner, and Keycloak's admin-token bootstrap (`Ready()`), each via its own `Health(ctx)` |
 
 ### Networking reference
@@ -928,7 +927,7 @@ This service sits on **no synchronous request-path dependency for any other serv
 | MFA reset (O&M → RP-9) | Keycloak Admin API | fail-closed | `502` → O&M `503`; no `MFAReset` — no reconciler |
 | Realm-config (O&M → RP-8) | Keycloak Admin API | fail-open + durable reconcile | `pending` row, RP-C4 converges (RP-INV-6) |
 | RP-6 / RP-7 IdP | OpenBao KV + Keycloak | fail-closed | No partial `keycloak_idp_configs` row |
-| RP-6 / RP-7 IdP audit entry; RP-1 / RP-2 `TermsAccepted` | Audit Log AL-5 direct-write (`POST /api/v1/internal/audit-entries`) | async, retried from `pending_audit_entries` | Rows accumulate if `AUDIT_LOG_BASE_URL` unset (WARN, drainer off); 429/5xx → backoff retry; 422 `UNKNOWN_ENTRY_TYPE` (Audit Log older than rev 0.31) → kept pending, retried with no budget; other 4xx (`metadata_too_large` is guarded at 8192 bytes before send) → `failed` (permanent park) |
+| RP-6 / RP-7 IdP audit entry; RP-1 / RP-2 `TermsAccepted` | Audit Log AL-5 direct-write (`POST /api/v1/internal/audit-entries`) | async, retried from `pending_audit_entries` by `platform-audit`'s outbox Runner | Rows accumulate if `AUDIT_LOG_BASE_URL` unset (WARN, no client); 429/5xx/timeout → backoff retry (50 attempts, then parked); 422 `UNKNOWN_ENTRY_TYPE` (Audit Log older than rev 0.31) → `skew`, kept pending with no budget; 401/403 → `not_admitted`, kept pending; any other Audit Log verdict → `rejected`, parked `failed` for an operator (`metadata_too_large` is guarded at 8192 bytes before send) |
 | Offboarding export | S3 | fail-closed | Tenant stays `suspended`; `realm_export_total{result="fail"}` is critical |
 | Outbox publish | SNS | retried, then DLQ | Local commit already happened — delay, not loss |
 | RP-C3 suspend phase | O&M's I-16 (`SubscriptionLapseReader`) | fail-open, degrade to WARN | Skips the suspend phase only if `ORG_MEMBERSHIP_BASE_URL` is unset; offboard phase still runs unconditionally |

@@ -1,71 +1,138 @@
-// AL-5 audit-entry drainer started from main.go (§10.6). IdpService
-// enqueues each TenantIdpConfigChanged entry into pending_audit_entries in
-// the same transaction as the IdP-config write it records; this goroutine
-// delivers them to Audit Log's direct-write ingest. It runs in the server
-// pod (like the metric exporters), polling the BYPASSRLS sysPool since the
-// backlog is cross-tenant; concurrent replicas are safe because ClaimDue
-// leases rows with FOR UPDATE SKIP LOCKED.
+// Audit Log AL-5 delivery through platform-audit's outbox (§10.6,
+// platform-audit iam-adopters §5.1). IdpService (TenantIdpConfigChanged)
+// and ProvisioningService (TermsAccepted) enqueue into pending_audit_entries
+// in the same transaction as the write each entry records; the library's
+// Runner delivers them from the server pod, on the BYPASSRLS sysPool since
+// the backlog is cross-tenant. Concurrent replicas are safe: the Runner
+// claims rows with a lease.
 package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"time"
 
-	auditlogclient "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/auditlog"
-	pgadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/postgres"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/pkg/audit"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/pkg/auditoutbox"
+	auditconfig "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/pkg/config"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/gincommon"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
+
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 )
 
-// auditDrainer is the one AuditDeliveryService method the loop needs.
-type auditDrainer interface {
-	DrainOnce(ctx context.Context, limit int) (int, error)
+// auditOutbox is the platform-audit wiring main owns: one Enqueuer for the
+// repositories and one Runner for delivery.
+type auditOutbox struct {
+	enq         *auditoutbox.Enqueuer
+	runner      *auditoutbox.Runner
+	maxMetadata int // AUDIT_MAX_METADATA_BYTES, for the repository's pre-enqueue validation
 }
 
-// startAuditDelivery starts the drainer unless AUDIT_LOG_BASE_URL is
-// unset. Unset is not fatal — the Audit Log Service may not be deployed
-// yet in every environment — and loses nothing: entries stay durably in
-// pending_audit_entries (visible on audit_entry_backlog_gauge) and are
-// delivered once the URL is configured.
-func startAuditDelivery(ctx context.Context, sysPool *pgcommon.Pool, log port.Logger) {
-	baseURL := os.Getenv("AUDIT_LOG_BASE_URL")
-	if baseURL == "" {
-		log.Warn("audit-entry delivery disabled — AUDIT_LOG_BASE_URL unset; TenantIdpConfigChanged entries accumulate in pending_audit_entries until it is set", nil)
-		return
+// auditEnvLookup reads the AUDIT_* environment, defaulting
+// AUDIT_SOURCE_SERVICE to this service's name. legal.terms.accepted is
+// producer-restricted to iam-realm-provisioner, so the value must not differ
+// from domain.Source; the default keeps an unset variable from failing
+// startup.
+func auditEnvLookup(name string) (string, bool) {
+	v, ok := os.LookupEnv(name)
+	if name == auditconfig.EnvSourceService && v == "" {
+		return domain.Source, true
 	}
-	svc := service.NewAuditDeliveryService(
-		pgadapter.NewPendingAuditEntryRepository(sysPool),
-		auditlogclient.New(baseURL, log),
-	).WithLogger(log)
-	go runAuditDelivery(ctx, svc,
-		envDuration("AUDIT_DELIVERY_INTERVAL", 5*time.Second),
-		envInt("AUDIT_DELIVERY_BATCH_SIZE", 50), log)
-	log.Info("audit-entry delivery wired", map[string]any{"audit_log_base_url": baseURL})
+	return v, ok
 }
 
-// runAuditDelivery drains on every interval tick until ctx is canceled. A
-// full batch is followed immediately by another drain, so a backlog built
-// up during an Audit Log outage clears without waiting a tick per batch.
-func runAuditDelivery(ctx context.Context, d auditDrainer, interval time.Duration, batch int, log port.Logger) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		for ctx.Err() == nil {
-			n, err := d.DrainOnce(ctx, batch)
-			if err != nil {
-				log.Warn("audit-entry drain failed", map[string]any{"error": err.Error()})
-				break
-			}
-			if n < batch {
-				break
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
+// newAuditOutbox builds the Enqueuer and Runner. Every failure is fatal for
+// the caller: a malformed AUDIT_* value, an app role that cannot INSERT into
+// pending_audit_entries (Enqueue would otherwise swallow SQLSTATE 42501 and
+// lose every entry), or a runner pool that cannot see every tenant's rows.
+// An unset AUDIT_LOG_BASE_URL is not fatal: delivery is disabled, entries
+// queue durably and the backlog gauges report them.
+func newAuditOutbox(ctx context.Context, appPool, sysPool *pgcommon.Pool, log port.Logger) (*auditOutbox, error) {
+	cfg, err := auditconfig.FromLookup("", auditEnvLookup)
+	if err != nil {
+		return nil, err
 	}
+	if cfg.SourceService != domain.Source {
+		return nil, fmt.Errorf("%w: AUDIT_SOURCE_SERVICE must be %q (legal.terms.accepted is producer-restricted to it), got %q",
+			audit.ErrConfig, domain.Source, cfg.SourceService)
+	}
+	labels := gincommon.MetricsConstLabels()
+	warnings, err := audit.InitMetrics(audit.MetricsIdentity{
+		Domain: labels["domain"], Service: labels["service"], Environment: labels["environment"],
+	}, gincommon.MetricsRegisterer())
+	if err != nil {
+		return nil, fmt.Errorf("init platform-audit metrics: %w", err)
+	}
+	for _, w := range warnings {
+		log.Warn("platform-audit metric registration warning", map[string]any{"metric": w.Metric, "error": w.Error()})
+	}
+	if err := auditoutbox.CheckEnqueueAccess(ctx, appPool); err != nil {
+		return nil, err
+	}
+	enq, err := auditoutbox.NewEnqueuer(cfg.EnqueueConfig(log))
+	if err != nil {
+		return nil, err
+	}
+	client, err := cfg.NewClient(log)
+	if err != nil {
+		return nil, err
+	}
+	if client == nil {
+		log.Warn("audit-entry delivery disabled — AUDIT_LOG_BASE_URL unset; TenantIdpConfigChanged and TermsAccepted entries accumulate in pending_audit_entries until it is set", nil)
+	}
+	rc := cfg.RunnerConfig(sysPool, client, enq, log)
+	rc.Observer = legacyAuditMetrics{}
+	runner, err := auditoutbox.NewRunner(rc)
+	if err != nil {
+		return nil, err
+	}
+	return &auditOutbox{enq: enq, runner: runner, maxMetadata: cfg.MaxMetadataBytes}, nil
+}
+
+// start runs the Runner until ctx is canceled or stop is called.
+func (a *auditOutbox) start(ctx context.Context, log port.Logger) {
+	go func() {
+		if err := a.runner.Start(ctx); err != nil {
+			log.Error("platform-audit runner stopped with error", map[string]any{"error": err.Error()})
+		}
+	}()
+}
+
+// stop waits for the in-flight batch, bounded by timeout.
+func (a *auditOutbox) stop(timeout time.Duration, log port.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := a.runner.Stop(ctx); err != nil {
+		log.Error("platform-audit runner stop error", map[string]any{"error": err.Error()})
+	}
+}
+
+// legacyAuditMetrics feeds this service's pre-library audit metrics from the
+// Runner during platform-audit's compatibility period (LLD §19.5), so the
+// IAMRealmProvisionerAuditEntries* alerts and dashboards keep working. New
+// monitoring uses platform_audit_*.
+type legacyAuditMetrics struct{}
+
+// Delivered maps the library outcome onto audit_entry_delivery_total's
+// result label: skew keeps its old name unknown_entry_type, an invalid
+// stored row is a rejection, and not_admitted (401/403, retried) is new.
+func (legacyAuditMetrics) Delivered(_ string, reason audit.Outcome) {
+	result := string(reason)
+	switch reason {
+	case audit.OutcomeSkew:
+		result = "unknown_entry_type"
+	case audit.OutcomeInvalid:
+		result = "rejected"
+	}
+	metrics.AuditEntryDeliveryTotal.WithLabelValues(result).Inc()
+}
+
+// Backlog sets audit_entry_backlog_gauge{status} from the Runner's sample.
+func (legacyAuditMetrics) Backlog(pending, failed int, _ time.Duration) {
+	metrics.AuditEntryBacklogGauge.WithLabelValues("pending").Set(float64(pending))
+	metrics.AuditEntryBacklogGauge.WithLabelValues("failed").Set(float64(failed))
 }

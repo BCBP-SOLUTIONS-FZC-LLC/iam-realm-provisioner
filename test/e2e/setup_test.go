@@ -52,6 +52,7 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/service"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/test/dbseed"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/pkg/auditoutbox"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2/pkg/outbox"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/gincommon"
 	pgmigrate "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/migrate"
@@ -222,6 +223,9 @@ func runE2ESuite(m *testing.M) (int, error) {
 	if err := pgadapter.RunMigrations(ctx, superDSN); err != nil {
 		return 0, fmt.Errorf("run domain migrations: %w", err)
 	}
+	if err := pgadapter.AdoptAuditOutbox(ctx, superDSN, nil); err != nil {
+		return 0, fmt.Errorf("adopt platform-audit outbox: %w", err)
+	}
 
 	appDSN := appRoleDSN(rawPG, appRolePassword)
 	appPool, err := pgcommon.NewPool(ctx, pgcommon.Config{
@@ -293,16 +297,22 @@ func runE2ESuite(m *testing.M) (int, error) {
 	reconRepo := pgadapter.NewReconciliationRepository(appPool)
 	idempotencyRepo := pgadapter.NewIdempotencyRepository(appPool)
 
+	auditEnq, err := auditoutbox.NewEnqueuer(auditoutbox.EnqueueConfig{SourceService: domain.Source})
+	if err != nil {
+		return 0, fmt.Errorf("platform-audit enqueuer: %w", err)
+	}
+	auditRepo := pgadapter.NewPendingAuditEntryRepository(appPool, auditEnq)
+
 	sysRealmRepo := pgadapter.NewTenantRealmRepository(sysPool)
 	provisioningSvc := service.NewProvisioningService(
-		tenantRealmRepo, idempotencyRepo, kcAdmin, fakeTokenService{}, txRunner, pgadapter.NewPendingAuditEntryRepository(appPool), sharedRealm, nil,
+		tenantRealmRepo, idempotencyRepo, kcAdmin, fakeTokenService{}, txRunner, auditRepo, sharedRealm, nil,
 	).WithLogger(noopLogger{}).
 		WithRealmOwners(sysRealmRepo).WithShardLoads(sysRealmRepo)
 	lifecycleSvc := service.NewLifecycleService(
 		tenantRealmRepo, idempotencyRepo, kcAdmin, txRunner, sharedRealm,
 	).WithLogger(noopLogger{})
 	mfaSvc := service.NewMfaService(tenantRealmRepo, kcAdmin, fakeOrgMembership{}).WithLogger(noopLogger{})
-	idpSvc := service.NewIdpService(tenantRealmRepo, idpConfigRepo, idpValidationRepo, idempotencyRepo, newFakeOpenBao(), kcAdmin, txRunner, pgadapter.NewPendingAuditEntryRepository(appPool)).WithLogger(noopLogger{})
+	idpSvc := service.NewIdpService(tenantRealmRepo, idpConfigRepo, idpValidationRepo, idempotencyRepo, newFakeOpenBao(), kcAdmin, txRunner, auditRepo).WithLogger(noopLogger{})
 	realmConfigSvc := service.NewRealmConfigService(tenantRealmRepo, reconRepo, kcAdmin).WithLogger(noopLogger{})
 
 	internalH := httpadapter.NewInternalHandler(provisioningSvc, lifecycleSvc, mfaSvc, idpSvc, realmConfigSvc)

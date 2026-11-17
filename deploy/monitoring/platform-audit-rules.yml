@@ -1,0 +1,240 @@
+# platform-audit reference rules (v0.1.0 monitoring/prometheus/platform-audit.rules.yml),
+# with the template parameters filled for this service: <service> =
+# iam-realm-provisioner, <mode> = outbox_deliver, <environment> = prod (adjust
+# per environment when loading this file outside Helm). The Helm twin is
+# deploy/helm/templates/prometheusrule-platform-audit.yaml, which fills
+# <environment> from env.APP_ENV. Re-copy from the library on upgrade; the
+# rule bodies are governed by observability review (PA-D32), not edited here.
+# platform-audit — reference Prometheus rules for services using the library
+# (LLD §11.4). Load alongside the service's own rules.
+#
+# Every platform_audit_* metric is approved (observability governance,
+# 2026-11-15, PA-D32), so every rule lives in the canonical groups
+# platform_audit.recording, platform_audit.slo and platform_audit.alerts, and
+# no alert carries metric_status: proposed. Names, labels, label values,
+# bucket boundaries, the SLO rules, the 20-delivery floor and the
+# declared-incident suppression are governed (PA-D32, PA-D36): change them
+# only through observability governance review.
+#
+# No rule depends on a shared metric (platform_retry_total,
+# platform_dlq_messages_total, platform_dependency_request_seconds): a
+# service that registers one of them with another label set disables
+# platform-audit's collector (RegistrationWarning), and an alert on it would
+# never fire there (§11.2).
+#
+# Aggregation: every replica runs the same table query, so the table gauges
+# are aggregated with max by (domain, service, environment), never sum.
+# Counters and histograms are per pod and summed. Runner gauges are per pod.
+#
+# Template parameters: PlatformAuditRunnerAbsent carries iam-realm-provisioner,
+# prod and outbox_deliver (outbox_deliver or buffer_deliver). Fill them from
+# the service's identity and load the alert once per mode the service runs;
+# sync-only users load neither.
+#
+# SLO (§11.1): 99.9 % of outbox deliveries within 300 s over 30 days. The le
+# matcher le=~"300(\\.0)?" matches Prometheus 2 ("300") and Prometheus 3
+# ("300.0"). The burn-rate alerts are evaluated only once at least 20
+# successful deliveries happened in their long window (PA-D36). During a
+# declared operational incident the incident process may silence the two
+# burn-rate alerts (alertname=~"PlatformAuditDeliveryErrorBudget.*", comment
+# "declared-incident <incident id>", expiry no later than the incident's
+# declared end); the silence affects notification only, never the records
+# or the error budget. The 30-day record needs 30 days of retention for the
+# platform_audit:* series.
+
+groups:
+  - name: platform_audit.recording
+    interval: 30s
+    rules:
+      - record: platform_audit:deliveries:rate5m
+        expr: sum by (domain, service, environment, operation, reason) (rate(platform_audit_deliveries_total[5m]))
+
+      - record: platform_audit:delivery_success_ratio:rate5m
+        expr: sum by (domain, service, environment) (rate(platform_audit_deliveries_total{outcome="success"}[5m])) / sum by (domain, service, environment) (rate(platform_audit_deliveries_total[5m]))
+
+      - record: platform_audit:pending_entries:max
+        expr: max by (domain, service, environment) (platform_audit_pending_entries)
+
+      - record: platform_audit:failed_entries:max
+        expr: max by (domain, service, environment) (platform_audit_failed_entries)
+
+      - record: platform_audit:disposed_entries:max
+        expr: max by (domain, service, environment) (platform_audit_disposed_entries)
+
+      - record: platform_audit:waiting_entries:max
+        expr: max by (domain, service, environment) (platform_audit_waiting_entries)
+
+      - record: platform_audit:oldest_pending_age_seconds:max
+        expr: max by (domain, service, environment) (platform_audit_oldest_pending_age_seconds)
+
+      - record: platform_audit:oldest_failed_age_seconds:max
+        expr: max by (domain, service, environment) (platform_audit_oldest_failed_age_seconds)
+
+      - record: platform_audit:delivery_enabled:max
+        expr: max by (domain, service, environment) (platform_audit_delivery_enabled)
+
+      - record: platform_audit:delivery_lag_seconds:p99_5m
+        expr: histogram_quantile(0.99, sum by (le, domain, service, environment) (rate(platform_audit_delivery_lag_seconds_bucket{operation="outbox_deliver"}[5m])))
+
+      - record: platform_audit:errors:increase10m
+        expr: sum by (domain, service, environment, operation) (increase(platform_audit_errors_total[10m]))
+
+      # ── SLO error ratios (§11.1, enforced PA-D32) ──────────────────────
+      - record: platform_audit:delivery_lag_slo_error_ratio:rate5m
+        expr: 1 - sum by (domain, service, environment) (rate(platform_audit_delivery_lag_seconds_bucket{operation="outbox_deliver",le=~"300(\\.0)?"}[5m])) / sum by (domain, service, environment) (rate(platform_audit_delivery_lag_seconds_count{operation="outbox_deliver"}[5m]))
+
+      - record: platform_audit:delivery_lag_slo_error_ratio:rate30m
+        expr: 1 - sum by (domain, service, environment) (rate(platform_audit_delivery_lag_seconds_bucket{operation="outbox_deliver",le=~"300(\\.0)?"}[30m])) / sum by (domain, service, environment) (rate(platform_audit_delivery_lag_seconds_count{operation="outbox_deliver"}[30m]))
+
+      - record: platform_audit:delivery_lag_slo_error_ratio:rate1h
+        expr: 1 - sum by (domain, service, environment) (rate(platform_audit_delivery_lag_seconds_bucket{operation="outbox_deliver",le=~"300(\\.0)?"}[1h])) / sum by (domain, service, environment) (rate(platform_audit_delivery_lag_seconds_count{operation="outbox_deliver"}[1h]))
+
+      - record: platform_audit:delivery_lag_slo_error_ratio:rate6h
+        expr: 1 - sum by (domain, service, environment) (rate(platform_audit_delivery_lag_seconds_bucket{operation="outbox_deliver",le=~"300(\\.0)?"}[6h])) / sum by (domain, service, environment) (rate(platform_audit_delivery_lag_seconds_count{operation="outbox_deliver"}[6h]))
+
+  # The 30-day SLO record from hourly increases, in a 5-minute group: never
+  # 30 days of raw buckets every 30 s (§11.4).
+  - name: platform_audit.slo
+    interval: 5m
+    rules:
+      - record: platform_audit:delivery_lag_good:increase1h
+        expr: sum by (domain, service, environment) (increase(platform_audit_delivery_lag_seconds_bucket{operation="outbox_deliver",le=~"300(\\.0)?"}[1h]))
+
+      - record: platform_audit:delivery_lag_total:increase1h
+        expr: sum by (domain, service, environment) (increase(platform_audit_delivery_lag_seconds_count{operation="outbox_deliver"}[1h]))
+
+      - record: platform_audit:delivery_lag_slo_error_ratio:rate30d
+        expr: 1 - sum_over_time(platform_audit:delivery_lag_good:increase1h[30d:1h]) / sum_over_time(platform_audit:delivery_lag_total:increase1h[30d:1h])
+
+  - name: platform_audit.alerts
+    rules:
+      - alert: PlatformAuditDeliveryStalled
+        expr: platform_audit:oldest_pending_age_seconds:max > 900
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }}: an audit entry has waited more than 15 minutes for delivery to Audit Log"
+          description: "The oldest pending audit entry (excluding entries waiting on skew or not_admitted) has not been delivered. Entries are safe in pending_audit_entries."
+          runbook_url: "https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/blob/main/docs/observability/runbook.md#platformauditdeliverystalled"
+
+      - alert: PlatformAuditDeliveryStalled
+        expr: platform_audit:oldest_pending_age_seconds:max > 3600
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }}: an audit entry has waited more than an hour for delivery to Audit Log"
+          description: "The oldest pending audit entry (excluding entries waiting on skew or not_admitted) has not been delivered. Entries are safe in pending_audit_entries."
+          runbook_url: "https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/blob/main/docs/observability/runbook.md#platformauditdeliverystalled"
+
+      - alert: PlatformAuditEntriesParked
+        expr: platform_audit:failed_entries:max > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }}: audit entries are parked as failed and need an operator's disposition"
+          description: "Audit entries are parked (rejected, invalid, or retry budget spent). Replay, discard or resolve them with the operator helpers."
+          runbook_url: "https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/blob/main/docs/observability/runbook.md#platformauditentriesparked"
+
+      - alert: PlatformAuditNotAdmitted
+        expr: sum by (domain, service, environment) (increase(platform_audit_deliveries_total{reason="not_admitted"}[10m])) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} is not admitted to Audit Log's direct-write ingest (401/403)"
+          description: "Audit Log refuses the caller; entries wait without consuming their retry budget and deliver once admission is fixed."
+          runbook_url: "https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/blob/main/docs/observability/runbook.md#platformauditnotadmitted"
+
+      - alert: PlatformAuditUnknownEntryType
+        expr: sum by (domain, service, environment) (increase(platform_audit_deliveries_total{reason="skew"}[1h])) > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} sends audit entry types Audit Log does not know (422 UNKNOWN_ENTRY_TYPE)"
+          description: "Entries wait as skew until Audit Log ships the type, or until an operator discards a mistyped one. Open a ticket with Audit Log."
+          runbook_url: "https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/blob/main/docs/observability/runbook.md#platformauditunknownentrytype"
+
+      - alert: PlatformAuditInvalidEntries
+        expr: sum by (domain, service, environment) (increase(platform_audit_invalid_entries_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} is losing audit entries: invalid entries were not recorded"
+          description: "Entries failed validation or their insert was rejected and were not written. This is data loss; record the gap window in the incident."
+          runbook_url: "https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/blob/main/docs/observability/runbook.md#platformauditinvalidentries"
+
+      - alert: PlatformAuditBufferDropping
+        expr: sum by (domain, service, environment) (increase(platform_audit_buffer_dropped_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }}: the fire-and-forget audit buffer is dropping entries"
+          description: "Entries were lost to overflow, exhausted attempts or shutdown. Every loss is an audit gap."
+          runbook_url: "https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/blob/main/docs/observability/runbook.md#platformauditbufferdropping"
+
+      - alert: PlatformAuditRunnerStalled
+        expr: time() - platform_audit_runner_last_tick_timestamp_seconds > on (domain, service, environment, pod, operation) platform_audit_runner_stall_threshold_seconds or platform_audit_runner_up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }}: the audit delivery loop ({{ $labels.operation }}) on {{ $labels.pod }} is hung or dead"
+          description: "The heartbeat is older than the stall threshold, or the loop exited. An Audit Log outage does not fire this alert; the backlog gauges are frozen while it fires."
+          runbook_url: "https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/blob/main/docs/observability/runbook.md#platformauditrunnerstalled"
+
+      - alert: PlatformAuditRunnerAbsent
+        expr: absent(platform_audit_runner_up{service="iam-realm-provisioner", environment="prod", operation="outbox_deliver"})
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "iam-realm-provisioner: the audit delivery loop (outbox_deliver) was never started"
+          description: "No pod of iam-realm-provisioner in prod exports platform_audit_runner_up for outbox_deliver: Start was never called, NewRunner/NewRecorder failed, or metrics go to another registry."
+          runbook_url: "https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/blob/main/docs/observability/runbook.md#platformauditrunnerabsent"
+
+      - alert: PlatformAuditDeliveryDisabled
+        expr: platform_audit:delivery_enabled:max{environment="prod"} == 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }}: audit delivery is disabled in production (AUDIT_LOG_BASE_URL not set)"
+          description: "Audit entries accumulate in pending_audit_entries and are never sent to Audit Log."
+          runbook_url: "https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/blob/main/docs/observability/runbook.md#platformauditdeliverydisabled"
+
+      - alert: PlatformAuditStoreErrors
+        expr: platform_audit:errors:increase10m > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }}: audit outbox store operation {{ $labels.operation }} is failing"
+          description: "Check the producer database, the runner pool's cross-tenant access and its grants."
+          runbook_url: "https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/blob/main/docs/observability/runbook.md#platformauditstoreerrors"
+
+      # ── SLO burn rate (§11.4, PA-D32; 20-delivery floor PA-D36) ─────────
+      - alert: PlatformAuditDeliveryErrorBudgetFastBurn
+        expr: platform_audit:delivery_lag_slo_error_ratio:rate1h > 14.4 * 0.001 and platform_audit:delivery_lag_slo_error_ratio:rate5m > 14.4 * 0.001 and sum by (domain, service, environment) (increase(platform_audit_delivery_lag_seconds_count{operation="outbox_deliver"}[1h])) >= 20
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} is burning its audit-delivery error budget fast (14.4×)"
+          description: "More than 1.44% of outbox deliveries in the last hour and the last 5 minutes took longer than 300 s from queueing (SLO 99.9% within 300 s over 30 days)."
+          runbook_url: "https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/blob/main/docs/observability/runbook.md#platformauditdeliveryerrorbudgetfastburn"
+
+      - alert: PlatformAuditDeliveryErrorBudgetSlowBurn
+        expr: platform_audit:delivery_lag_slo_error_ratio:rate6h > 6 * 0.001 and platform_audit:delivery_lag_slo_error_ratio:rate30m > 6 * 0.001 and sum by (domain, service, environment) (increase(platform_audit_delivery_lag_seconds_count{operation="outbox_deliver"}[6h])) >= 20
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} is burning its audit-delivery error budget (6×)"
+          description: "More than 0.6% of outbox deliveries in the last 6 hours and the last 30 minutes took longer than 300 s from queueing (SLO 99.9% within 300 s over 30 days)."
+          runbook_url: "https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/blob/main/docs/observability/runbook.md#platformauditdeliveryerrorbudgetslowburn"

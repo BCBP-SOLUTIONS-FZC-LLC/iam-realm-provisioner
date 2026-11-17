@@ -101,15 +101,21 @@ var (
 
 	// AuditEntryDeliveryTotal counts AL-5 direct-write delivery attempts
 	// of pending_audit_entries rows (TenantIdpConfigChanged, TermsAccepted;
-	// §10.6) by result (delivered|retry|unknown_entry_type|rejected).
-	// unknown_entry_type is Audit Log not knowing the type yet (deploy
-	// skew): the row stays pending and is retried, never parked.
+	// §10.6) by result (delivered|retry|unknown_entry_type|not_admitted|
+	// rejected). unknown_entry_type is Audit Log not knowing the type yet
+	// (deploy skew) and not_admitted a 401/403: both stay pending and are
+	// retried, never parked. Legacy: fed from platform-audit's Runner
+	// Observer (cmd/server/audit_delivery.go) during the library's
+	// compatibility period (its LLD §19.5); new monitoring reads
+	// platform_audit_deliveries_total.
 	AuditEntryDeliveryTotal *prometheus.CounterVec
 
 	// AuditEntryBacklogGauge is the current pending_audit_entries row
 	// count by status (pending|failed) — a growing pending count means
 	// Audit Log is unreachable or AUDIT_LOG_BASE_URL is unset; any failed
-	// row is an entry Audit permanently rejected.
+	// row is an entry parked for an operator. Legacy, like
+	// AuditEntryDeliveryTotal: set from the Runner's backlog sample; new
+	// monitoring reads platform_audit_pending_entries.
 	AuditEntryBacklogGauge *prometheus.GaugeVec
 
 	// ServiceAccountRegisterTotal counts the RP-1/RP-2/RP-3
@@ -360,7 +366,7 @@ func registerMetrics() {
 
 	AuditEntryDeliveryTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name:        prefix + "audit_entry_delivery_total",
-		Help:        "AL-5 direct-write audit-entry delivery attempts by result (delivered|retry|unknown_entry_type|rejected).",
+		Help:        "AL-5 direct-write audit-entry delivery attempts by result (delivered|retry|unknown_entry_type|not_admitted|rejected).",
 		ConstLabels: labels,
 	}, []string{"result"})
 
