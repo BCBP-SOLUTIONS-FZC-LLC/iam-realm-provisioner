@@ -10,7 +10,7 @@ We use [SemVer 2.0.0](https://semver.org/): `MAJOR.MINOR.PATCH` (e.g. `v1.2.3`).
 
 | Bump | When you change | Examples |
 |------|-----------------|----------|
-| **MAJOR** | Breaking change in the runtime contract (§ below) | Removing/renaming an RP-1..RP-16 path, a published event `type` or frozen payload field, a `processed_events.consumer` value, a required env var, the OpenBao IdP secret path, or an incompatible `values.yaml` restructure |
+| **MAJOR** | Breaking change in the runtime contract (§ below) | Removing/renaming an RP-1..RP-17 path, a published event `type` or frozen payload field, a `processed_events.consumer` value, a required env var, the OpenBao IdP secret path, or an incompatible `values.yaml` restructure |
 | **MINOR** | New backward-compatible capability | A new RP endpoint (new number, never reuse a retired one), a new optional env var / Helm value, a new produced or consumed event type, a new `iam_realm_provisioner_*` metric, an additive payload field |
 | **PATCH** | Backward-compatible fix | Bug fix, performance improvement, dependency bump with no observable behavior change, documentation-only correction |
 
@@ -20,7 +20,7 @@ This service has no Go package for another service to import — its "public API
 
 | In scope (SemVer applies) | Out of scope (may change without MAJOR) |
 |---------------------------|------------------------------------------|
-| The 16 mesh-only paths under `/api/v1/internal` (RP-1..RP-16) — method, path, and frozen request/response field names (LLD §5, §25) | `internal/*` package structure, exported Go identifiers, file layout — nothing here is imported by another module. Gin's internal capture name (`:keycloak_user_id` vs the LLD's `:uid` on RP-9) is not part of the wire contract |
+| The 17 mesh-only paths under `/api/v1/internal` (RP-1..RP-17) — method, path, and frozen request/response field names (LLD §5, §25) | `internal/*` package structure, exported Go identifiers, file layout — nothing here is imported by another module. Gin's internal capture name (`:keycloak_user_id` vs the LLD's `:uid` on RP-9) is not part of the wire contract |
 | The 9 produced event `type` names and frozen payload fields on `iam.tenant.events`; the three inbound queue names and their `EventType` filters (LLD §7, §25) | Envelope field order / JSON key sort; Glue wire-format header internals |
 | `processed_events.consumer` ∈ `{membership, tenant, billing}` and `TenantSuspended.source` / `TenantReactivated.source` enums | Additive `provisioning_operations.operation` discriminator values (new endpoint names) |
 | Domain error **codes** in LLD §17 (`keycloak_unavailable`, `operation_in_progress`, `idp_region_portability_failed`, …) and their HTTP statuses | Exact `ErrorResponse.message` wording |
@@ -30,7 +30,7 @@ This service has no Go package for another service to import — its "public API
 | OpenBao KV path `secret/data/iam/realm-provisioner/idp/<tenant_id>/<idp_alias>` and the `Idempotency-Key` header on the mutating routes that require it | In-process vs Valkey admin-token cache implementation (LLD §6.2 fallback is not a caller-visible contract) |
 | `GET /healthz` / `/readyz` (HTTP) — existence and meaning (`/readyz` checks Postgres, sys-Postgres, outbox, Keycloak token bootstrap) | `GET /asyncapi` / `/asyncapi.yaml` content shape — documentation, not a contract a caller must hold stable. Dedicated `/metrics` port number is a Helm `service.metricsPort` default, not a SemVer surface |
 
-Keycloak's Admin API and gocloak's client types are **not** owned by this repo — gocloak's version is tracked in the compatibility matrix below, not by this service's own SemVer. Callers never import gocloak; they hit RP-1..RP-16.
+Keycloak's Admin API and gocloak's client types are **not** owned by this repo — gocloak's version is tracked in the compatibility matrix below, not by this service's own SemVer. Callers never import gocloak; they hit RP-1..RP-17.
 
 ### Guarantees
 
@@ -164,7 +164,7 @@ Both should match a `v[0-9]*.[0-9]*.[0-9]*-*` tag trigger and produce a signed, 
 
 None of those libraries is re-exported — a consumer of this *service* never needs them as a direct dependency of *this* module. Callers depend on the HTTP/event contract, not on gocloak.
 
-Keycloak server version in production (`auth.bcbpsolutions.com`) is owned by Keycloak ops, not this repo. A gocloak major bump that changes Admin API call shapes this adapter relies on is a **MINOR** for this service if RP-1..RP-16 stay compatible, and a **MAJOR** if a frozen response field or error code changes.
+Keycloak server version in production (`auth.bcbpsolutions.com`) is owned by Keycloak ops, not this repo. A gocloak major bump that changes Admin API call shapes this adapter relies on is a **MINOR** for this service if RP-1..RP-17 stay compatible, and a **MAJOR** if a frozen response field or error code changes.
 
 ## Related files
 
