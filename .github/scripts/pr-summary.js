@@ -14,7 +14,7 @@ const coveragePct = needs['validate-test']?.outputs?.pct;
 const rows = [
   ['Tests & race detector', 'validate-test'],
   ['Image build + Dockerfile lint', 'build-image'],
-  ['Coverage ≥ 80%',         'validate-test'],
+  ['Coverage ≥ 95%',         'validate-test'],
   ['Trivy CVE scan',         'trivy'],
   ['Smoke tests',            'smoke'],
   ['Code quality + Helm + CD-19', 'validate-quality'],
@@ -25,7 +25,7 @@ const table = rows
     const label = row[0];
     const key   = row[1];
     const r     = needs[key]?.result || 'skipped';
-    const value = (label === 'Coverage ≥ 80%' && coveragePct)
+    const value = (label === 'Coverage ≥ 95%' && coveragePct)
       ? parseFloat(coveragePct).toFixed(1) + '%'
       : '`' + r + '`';
     return '| ' + icon(r) + ' | ' + label + ' | ' + value + ' |';
