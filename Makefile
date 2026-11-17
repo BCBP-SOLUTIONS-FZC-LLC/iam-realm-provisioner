@@ -211,13 +211,13 @@ lint:
 	$(GO) tool golangci-lint run --build-tags=$(ALL_TEST_TAGS) ./...
 
 # platform-audit's go/analysis lint of audit entry types against Audit Log's
-# taxonomy (platform-audit iam-adopters §4.5), at the library version go.mod
-# pins. Warnings (GitHub annotations), exit 0; add -strict to fail.
-PLATFORM_AUDIT_VERSION = $(shell $(GO) list -m -f '{{.Version}}' github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit)
-
+# taxonomy (platform-audit iam-adopters §4.5). A `tool` in go.mod, like
+# golangci-lint, so CI's `go mod download` fetches it with the private-module
+# credentials and this target needs no network. Warnings (GitHub
+# annotations), exit 0; add -strict to fail.
 .PHONY: audit-typecheck
 audit-typecheck:
-	$(GO) run github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/cmd/audittypecheck@$(PLATFORM_AUDIT_VERSION) -source-service iam-realm-provisioner ./...
+	$(GO) tool audittypecheck -source-service iam-realm-provisioner ./...
 
 .PHONY: arch-lint
 arch-lint:
