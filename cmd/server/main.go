@@ -164,8 +164,11 @@ func main() {
 
 	// sysPool: BYPASSRLS pool used by the reconciler jobs and cross-tenant
 	// sweeps. In production SYSTEM_DATABASE_URL must point to
-	// realm_provisioner_migrator (§10.1). Falls back to DSNFromEnv() for
-	// dev — cross-tenant queries then RLS-filter to zero rows (safe no-op).
+	// realm_provisioner_migrator (§10.1). Falls back to DSNFromEnv() when
+	// unset, but that is no longer a usable dev setup: platform-audit's
+	// NewRunner checks the pool can see every tenant's pending_audit_entries
+	// and fails startup (ErrNoCrossTenantAccess) on the RLS-bound app role.
+	// .env-example sets SYSTEM_DATABASE_URL for that reason.
 	sysDSN := pgadapter.SystemDSNFromEnv()
 	// SystemPoolConfig reads ConfigFromEnv internally, forces PGBouncerMode,
 	// and wires the gincommon logger — matching iam-org-membership. Tracer
@@ -178,7 +181,7 @@ func main() {
 	}
 	defer sysPool.Close()
 	if sysDSN == dsn {
-		log.Warn("SYSTEM_DATABASE_URL not set — sysPool reuses app DSN; cross-tenant queries will be RLS-filtered", nil)
+		log.Warn("SYSTEM_DATABASE_URL not set — sysPool reuses app DSN; cross-tenant queries are RLS-filtered and the platform-audit Runner will refuse to start", nil)
 	}
 
 	ctx, cancelBackground := context.WithCancel(context.Background())

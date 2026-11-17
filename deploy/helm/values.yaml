@@ -206,11 +206,12 @@ env:
   # Audit Log — AL-5 direct-write ingest for TenantIdpConfigChanged and
   # the owner's TermsAccepted (LLD §10.6/§18.7), delivered by
   # platform-audit's outbox Runner; every AUDIT_* key is read by its
-  # config.FromEnv (malformed → startup fails). Empty AUDIT_LOG_BASE_URL =
-  # delivery disabled (startup WARN); entries queue durably in
-  # pending_audit_entries and deliver once this is set, e.g.
-  # "http://iam-audit-log.iam.svc.cluster.local" when iam-audit-log ships.
-  AUDIT_LOG_BASE_URL: ""
+  # config.FromEnv (malformed → startup fails). AUDIT_LOG_BASE_URL is
+  # required outside APP_ENV=dev (validateRequiredEnv panics on an empty
+  # value); only in dev does empty mean delivery disabled (startup WARN,
+  # entries queue durably in pending_audit_entries). Audit Log's Service
+  # listens on 8080 (iam-audit-log chart service.port), not 80.
+  AUDIT_LOG_BASE_URL: "http://iam-audit-log.iam.svc.cluster.local:8080"
   # legal.terms.accepted is producer-restricted to this name.
   AUDIT_SOURCE_SERVICE: "iam-realm-provisioner"
   AUDIT_LOG_TIMEOUT: "5s"

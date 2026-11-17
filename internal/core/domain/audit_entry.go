@@ -64,4 +64,10 @@ type AuditEntry struct {
 	UserAgent       string          `json:"user_agent,omitempty"`
 	TraceID         string          `json:"trace_id,omitempty"`
 	Metadata        json.RawMessage `json:"metadata,omitempty"`
+	// ChangeID identifies the business change the entry records (for an
+	// IdP config: its row id and record_version). Never sent: the
+	// pending-audit adapter derives the Idempotency-Key from it, so a
+	// replay of the same change keys the same entry (platform-audit LLD
+	// §5.3). Empty falls back to OccurredAt.
+	ChangeID string `json:"-"`
 }

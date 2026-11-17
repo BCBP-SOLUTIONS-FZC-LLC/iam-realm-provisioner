@@ -120,14 +120,15 @@ func (r *IdpConfigRepository) ListAll(ctx context.Context) ([]*domain.IdpConfig,
 }
 
 // Upsert inserts c or, on a (tenant_id, idp_alias) conflict, updates it and
-// bumps record_version.
+// bumps record_version. It sets c.ID, c.RecordVersion and c.UpdatedAt from
+// the written row, so the caller can key and time the change's audit entry.
 func (r *IdpConfigRepository) Upsert(ctx context.Context, c *domain.IdpConfig) error {
 	cfg, err := json.Marshal(c.Config)
 	if err != nil {
 		return err
 	}
 	return withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
-		_, err := tx.Exec(ctx, `
+		return tx.QueryRow(ctx, `
 			INSERT INTO keycloak_idp_configs (id, tenant_id, idp_alias, protocol, display_name, enabled, config, status)
 			VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8)
 			ON CONFLICT (tenant_id, idp_alias) DO UPDATE SET
@@ -137,9 +138,10 @@ func (r *IdpConfigRepository) Upsert(ctx context.Context, c *domain.IdpConfig) e
 				config = EXCLUDED.config,
 				status = EXCLUDED.status,
 				record_version = keycloak_idp_configs.record_version + 1,
-				updated_at = now()`,
-			nilIfZeroUUID(c.ID), c.TenantID, c.IdpAlias, c.Protocol, c.DisplayName, c.Enabled, cfg, c.Status)
-		return err
+				updated_at = now()
+			RETURNING id, record_version, updated_at`,
+			nilIfZeroUUID(c.ID), c.TenantID, c.IdpAlias, c.Protocol, c.DisplayName, c.Enabled, cfg, c.Status).
+			Scan(&c.ID, &c.RecordVersion, &c.UpdatedAt)
 	})
 }
 

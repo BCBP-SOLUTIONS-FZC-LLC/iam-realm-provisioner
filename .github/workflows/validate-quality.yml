@@ -126,6 +126,12 @@ jobs:
       - name: Lint
         run: make lint
 
+      # platform-audit's entry-type lint against Audit Log's taxonomy
+      # (platform-audit iam-adopters §4.5): warnings only, as the library
+      # recommends; audittest.RequireKnownTypes is the blocking check.
+      - name: Audit entry-type check (audittypecheck)
+        run: make audit-typecheck
+
       # Enterprise Platform Observability Standard: every registered
       # Prometheus collector must follow the platform_*/iam_*/
       # iam_realm_provisioner_* naming hierarchy, the _total/_seconds

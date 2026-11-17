@@ -106,8 +106,10 @@ func (t *TermsAcceptance) ValidateShape() error {
 // one acceptance: one record per tenant, user and terms version. An RP-1
 // replay, the user-exists conflict resume path or a retry with a new
 // Idempotency-Key all produce the same key, so pending_audit_entries holds
-// one row and Audit Log one entry — a different accepted_at for the same
-// version still dedupes (the first one recorded wins).
+// one row and Audit Log one entry. A replay with a different accepted_at
+// (OccurredAt) dedupes only while Audit Log's idempotency ledger still holds
+// the key (at least 8 days, platform-audit LLD §9.3): a later replay with a
+// new accepted_at is stored as a second entry.
 func TermsAcceptedIdempotencyKey(tenantID, userID uuid.UUID, version string) string {
 	return AuditSourceTermsAccepted + ":" + tenantID.String() + ":" + userID.String() + ":" + version
 }

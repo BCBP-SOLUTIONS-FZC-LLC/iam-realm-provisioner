@@ -100,6 +100,7 @@ help:
 	@echo "  make vet              - go vet (default build + every test build tag)"
 	@echo "  make lint             - run golangci-lint (default build + every test build tag)"
 	@echo "  make arch-lint        - run go-arch-lint (dependency-rule enforcement, §3.4)"
+	@echo "  make audit-typecheck  - platform-audit's audittypecheck: entry types vs Audit Log's taxonomy (warnings)"
 	@echo "  make metrics-registry-lint - no removed metric names in rules/HPA; proposed-metric alerts labelled metric_status: proposed"
 	@echo "  make metric-naming-lint - enforce Platform Observability Standard naming/suffix/label/registry rules"
 	@echo "  make metrics-lint     - platform-gincommon metricslint (real scrape + refs + inventory drift)"
@@ -208,6 +209,15 @@ lint:
 	@echo "Running linter..."
 	$(GO) tool golangci-lint run ./...
 	$(GO) tool golangci-lint run --build-tags=$(ALL_TEST_TAGS) ./...
+
+# platform-audit's go/analysis lint of audit entry types against Audit Log's
+# taxonomy (platform-audit iam-adopters §4.5), at the library version go.mod
+# pins. Warnings (GitHub annotations), exit 0; add -strict to fail.
+PLATFORM_AUDIT_VERSION = $(shell $(GO) list -m -f '{{.Version}}' github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit)
+
+.PHONY: audit-typecheck
+audit-typecheck:
+	$(GO) run github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/cmd/audittypecheck@$(PLATFORM_AUDIT_VERSION) -source-service iam-realm-provisioner ./...
 
 .PHONY: arch-lint
 arch-lint:
