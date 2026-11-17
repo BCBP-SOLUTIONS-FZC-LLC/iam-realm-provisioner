@@ -335,7 +335,7 @@ func startPostgresContainer(ctx context.Context) (*tcpostgres.PostgresContainer,
 	var err error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		pgContainer, err = tcpostgres.Run(ctx,
-			"postgres:16-alpine",
+			"postgres:16.16-alpine",
 			tcpostgres.WithDatabase("provisioner"),
 			tcpostgres.WithUsername("postgres"),
 			tcpostgres.WithPassword("testpassword"),
