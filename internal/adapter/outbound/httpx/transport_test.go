@@ -75,3 +75,52 @@ func TestNewClient_WithoutAnActiveSpanStillSucceeds(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 }
+
+// TestParseRetryAfter covers the RFC 9110 §7.1.3 contract for the exported
+// httpx.ParseRetryAfter helper used by every outbound adapter in this service.
+func TestParseRetryAfter(t *testing.T) {
+	ceiling := 5 * time.Minute
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+
+	t.Run("delta seconds exceeding ceiling clamped", func(t *testing.T) {
+		got := httpx.ParseRetryAfter("3600", now, ceiling) // 1 hour >> 5 min
+		assert.Equal(t, ceiling, got, "delta-seconds above the ceiling must be clamped to ceiling")
+	})
+
+	t.Run("negative delta seconds returns zero", func(t *testing.T) {
+		assert.Zero(t, httpx.ParseRetryAfter("-10", now, ceiling))
+	})
+
+	t.Run("zero delta seconds returns zero", func(t *testing.T) {
+		assert.Zero(t, httpx.ParseRetryAfter("0", now, ceiling))
+	})
+
+	t.Run("empty string returns zero", func(t *testing.T) {
+		assert.Zero(t, httpx.ParseRetryAfter("", now, ceiling))
+	})
+
+	t.Run("HTTP date in the future returns duration until that time", func(t *testing.T) {
+		future := now.Add(90 * time.Second)
+		header := future.UTC().Format(http.TimeFormat)
+		got := httpx.ParseRetryAfter(header, now, ceiling)
+		// HTTP-date resolution is 1 second; allow up to 1s delta.
+		assert.InDelta(t, 90*time.Second, got, float64(time.Second))
+	})
+
+	t.Run("HTTP date in the past returns zero", func(t *testing.T) {
+		past := now.Add(-1 * time.Hour)
+		header := past.UTC().Format(http.TimeFormat)
+		assert.Zero(t, httpx.ParseRetryAfter(header, now, ceiling))
+	})
+
+	t.Run("HTTP date in the future exceeding ceiling clamped", func(t *testing.T) {
+		farFuture := now.Add(2 * time.Hour) // >> 5-min ceiling
+		header := farFuture.UTC().Format(http.TimeFormat)
+		got := httpx.ParseRetryAfter(header, now, ceiling)
+		assert.Equal(t, ceiling, got, "HTTP-date beyond ceiling must be clamped to ceiling")
+	})
+
+	t.Run("malformed value returns zero", func(t *testing.T) {
+		assert.Zero(t, httpx.ParseRetryAfter("not-a-date-or-number", now, ceiling))
+	})
+}

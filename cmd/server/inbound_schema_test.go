@@ -43,3 +43,16 @@ func TestConsumedValidator_BillingTenantReactivated_UsesConsumedSchema(t *testin
 	require.NoError(t, err)
 	assert.NoError(t, v.Validate("TenantReactivated", []byte(`{"tenant_id":"`+uuid.NewString()+`","source":"billing"}`)))
 }
+
+// A consumer name that is not in eventschema.ConsumedByConsumer yields a nil
+// schema map. NewConsumedValidator accepts a nil/empty map (the loop is a
+// no-op) so consumedValidator succeeds and returns a validator that treats
+// every event type as ErrNoSchema — the same forward-compat pass-through path
+// as an unknown event type on a real consumer.
+func TestConsumedValidator_UnknownConsumer_ReturnsNoError(t *testing.T) {
+	v, err := consumedValidator("does-not-exist")
+	require.NoError(t, err, "an unknown consumer name must not cause an error — it produces an empty-schema validator")
+	require.NotNil(t, v)
+	// Every event type is treated as ErrNoSchema → passes silently.
+	assert.NoError(t, v.Validate("AnyEventType", []byte(`{"anything":true}`)))
+}

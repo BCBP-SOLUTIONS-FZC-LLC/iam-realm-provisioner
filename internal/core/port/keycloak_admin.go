@@ -43,6 +43,15 @@ type KeycloakAdmin interface {
 	// trial user, HLD §5.4) and an admin-only tenant_id user-profile
 	// attribute. Idempotent; run at server startup (§12.2).
 	EnsureSharedRealm(ctx context.Context, realmName string) error
+	// EnsurePlatformRealm creates the operator platform realm when absent,
+	// then converges it (CD-52 item 2): platform_operator realm role,
+	// realm-wide OTP enforcement (browser flow conditional-OTP subflow set
+	// to REQUIRED so all logins require a second factor regardless of role
+	// assignment), and short sessions (5-min access tokens, 30-min idle,
+	// 8-h max). AuthZ Enrichment reads OPERATOR_REALM_ISSUER and injects
+	// x-tenant-roles: platform_operator for tokens that carry that role.
+	// Idempotent; run at server startup when PLATFORM_REALM_NAME is set.
+	EnsurePlatformRealm(ctx context.Context, realmName string) error
 
 	// ── User lifecycle (§8.1-8.3, §8.6-8.7, §8.13) ───────────────────────
 

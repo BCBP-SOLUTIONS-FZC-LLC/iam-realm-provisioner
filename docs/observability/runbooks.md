@@ -93,6 +93,22 @@ Common starting points:
 
 **Triage.** `SELECT tenant_id, setting_key, attempts, last_error FROM realm_config_reconciliations WHERE status='pending' ORDER BY created_at LIMIT 20;` (sysPool). Rows reaching `RECONCILER_MAX_ATTEMPTS` (20) move to `failed` and need an operator. See [`../runbook.md` §2](../runbook.md#2-realm-config-not-landing).
 
+### IAMRealmProvisionerSharedRealmNotConverged
+
+**Meaning.** The `ensureSharedRealm` background loop (`cmd/server/shared_realm.go`) has not set `iam_realm_provisioner_shared_realm_ready` to 1 within the first 5 minutes after server startup. The shared trial realm (SHARED_TRIAL_REALM) is either missing or not fully configured, so RP-1 trial provisioning is failing.
+
+**Triage.** Server logs for `"ensure shared trial realm failed"` with the specific error; Keycloak Admin API health from the pod (`kubectl exec`); confirm `SHARED_TRIAL_REALM`, `KEYCLOAK_BASE_URL`, and admin credentials are set. If the realm exists in Keycloak but convergence fails, the specific Keycloak operation in the error identifies which invariant (client, mapper, role, MFA flow) is drifting.
+
+**Mitigate.** Fix the underlying Keycloak or configuration issue; the loop retries every 30 s and sets the gauge to 1 on the next success. See [`../runbook.md` §1](../runbook.md#1-realm-template-drift).
+
+### IAMRealmProvisionerPlatformRealmNotConverged
+
+**Meaning.** The `ensurePlatformRealm` background loop (`cmd/server/platform_realm.go`, CD-52 item 2) has not set `iam_realm_provisioner_platform_realm_ready` to 1 within the first 5 minutes. The platform operator realm (PLATFORM_REALM_NAME) is missing or its invariants (platform_operator role, realm-wide MFA, short sessions) are not converged. Platform operator login and AuthZ Enrichment's `platform_operator` role injection will not work.
+
+**Triage.** Server logs for `"ensure platform realm failed"`; Keycloak Admin API health; confirm `PLATFORM_REALM_NAME`, `KEYCLOAK_BASE_URL`, and admin credentials are correct. The error message names the specific invariant that failed (create realm, create role, set OTP flow, set session settings).
+
+**Mitigate.** Fix the underlying issue; the loop retries every 30 s. This alert is severity=warning because tenant realm flows are unaffected; only operator-facing routes that require the platform realm are degraded. This alert only fires when `PLATFORM_REALM_NAME` is set (CD-52 OP-G3); it is absent in pre-CD-52 environments.
+
 ### IAMRealmProvisionerRealmExportFailure
 
 **Meaning.** RP-C3's offboard phase failed to export a realm to S3. By RP-EVT-4 the realm is never deleted without a confirmed export, so the tenant stays `suspended` — no data is lost, but offboarding is stuck. Pushgateway metric.

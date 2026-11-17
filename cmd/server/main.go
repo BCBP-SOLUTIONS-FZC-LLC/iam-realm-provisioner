@@ -406,6 +406,16 @@ func main() {
 	// ── 9d. Shared trial realm bootstrap (§12.2, RP-INV-2) ────────────────
 	startSharedRealmEnsure(ctx, keycloakAdmin, sharedRealm, log)
 
+	// ── 9e. Platform realm bootstrap (CD-52 item 2, LLD §12.3) ───────────
+	// Optional: skip when PLATFORM_REALM_NAME is unset so environments that
+	// have not yet completed the CD-52 gateway/issuer config are unaffected.
+	if platformRealm := os.Getenv("PLATFORM_REALM_NAME"); platformRealm != "" {
+		startPlatformRealmEnsure(ctx, keycloakAdmin, platformRealm, log)
+	} else {
+		log.Warn("platform realm bootstrap skipped — PLATFORM_REALM_NAME unset (CD-52 OP-G3 pending)", nil)
+		metrics.PlatformRealmReady.Set(1) // not applicable in this env; set 1 so the alert doesn't fire spuriously
+	}
+
 	// ── 10. Router ────────────────────────────────────────────────────────
 	router := httpadapter.NewRouter(httpadapter.RouterConfig{
 		GinConfig: cfg,

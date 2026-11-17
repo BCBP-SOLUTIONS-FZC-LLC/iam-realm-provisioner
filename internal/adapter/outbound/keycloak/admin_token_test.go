@@ -149,3 +149,46 @@ func TestTokenCache_ContextCanceledWhileWaitingOnInflight(t *testing.T) {
 	_, err := cache.Token(ctx)
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+// ── EnvSecretFn ───────────────────────────────────────────────────────────
+
+// TestEnvSecretFn_NonEmptyEnvVarReturnsValue verifies that when the named
+// environment variable is set to a non-empty value the returned closure
+// returns that value with a nil error.
+func TestEnvSecretFn_NonEmptyEnvVarReturnsValue(t *testing.T) {
+	const key = "TEST_KEYCLOAK_SECRET_VAR_A"
+	t.Setenv(key, "supersecret")
+
+	fn := EnvSecretFn(key)
+	got, err := fn(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "supersecret", got)
+}
+
+// TestEnvSecretFn_EmptyEnvVarReturnsError verifies that when the named
+// environment variable is explicitly set to an empty string the closure
+// returns an error whose message contains the variable name.
+func TestEnvSecretFn_EmptyEnvVarReturnsError(t *testing.T) {
+	const key = "TEST_KEYCLOAK_SECRET_VAR_B"
+	t.Setenv(key, "")
+
+	fn := EnvSecretFn(key)
+	_, err := fn(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), key,
+		"the error must mention the env-var name so operators can identify the missing config")
+}
+
+// TestEnvSecretFn_UnsetEnvVarReturnsError verifies that when the named
+// environment variable is not set at all (os.Getenv returns "") the closure
+// returns an error — same behavior as the empty-string case.
+func TestEnvSecretFn_UnsetEnvVarReturnsError(t *testing.T) {
+	const key = "TEST_KEYCLOAK_SECRET_VAR_C_UNSET"
+	// Explicitly unset it in case a previous test run left a value.
+	t.Setenv(key, "")
+
+	fn := EnvSecretFn(key)
+	_, err := fn(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), key)
+}

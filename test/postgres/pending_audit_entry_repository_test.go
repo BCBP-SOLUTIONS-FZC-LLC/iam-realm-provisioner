@@ -147,4 +147,44 @@ func TestPendingAuditEntryRepository(t *testing.T) {
 		require.Error(t, err, "WITH CHECK must reject an entry for a tenant other than the bound GUC")
 	})
 
+	// MarkRetryAfter with a positive delay covers the withPool branch in the
+	// delay > 0 path (lines 141-148 of pending_audit_entry_repository.go).
+	// A non-positive delay falls back to MarkRetry (which has no UPDATE to
+	// next_attempt_at), so this test specifically exercises the branch that
+	// sets next_attempt_at = now() + make_interval(secs => delay).
+	t.Run("MarkRetryAfter_PositiveDelay_SetsNextAttemptAt", func(t *testing.T) {
+		// Clear any rows left by prior subtests so ClaimDue returns exactly
+		// the one row this subtest enqueues.
+		_, err := rawPool.Exec(ctx, `DELETE FROM pending_audit_entries`)
+		require.NoError(t, err)
+
+		tenantID := uuid.New()
+		require.NoError(t, repo.Enqueue(withTenant(ctx, tenantID), newIdpAuditEntry(tenantID)))
+
+		claimed, err := sysRepo.ClaimDue(ctx, 10)
+		require.NoError(t, err)
+		require.Len(t, claimed, 1)
+
+		// MarkRetryAfter with a positive delay must succeed without error and
+		// must push next_attempt_at into the future (the row is therefore not
+		// immediately re-claimable).
+		require.NoError(t, sysRepo.MarkRetryAfter(ctx, claimed[0].ID, "429 too many requests", 5*time.Second))
+
+		// Row must still be pending (not failed or deleted).
+		var status, lastErr string
+		require.NoError(t, rawPool.QueryRow(ctx,
+			`SELECT status, last_error FROM pending_audit_entries WHERE id = $1`, claimed[0].ID).
+			Scan(&status, &lastErr))
+		assert.Equal(t, "pending", status)
+		assert.Equal(t, "429 too many requests", lastErr)
+
+		// next_attempt_at must be in the future — the row is not yet due.
+		notDue, err := sysRepo.ClaimDue(ctx, 10)
+		require.NoError(t, err)
+		assert.Empty(t, notDue, "row scheduled for the future must not be claimable immediately")
+
+		_, err = rawPool.Exec(ctx, `DELETE FROM pending_audit_entries`)
+		require.NoError(t, err)
+	})
+
 }

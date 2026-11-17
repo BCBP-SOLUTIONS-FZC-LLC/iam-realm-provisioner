@@ -315,3 +315,55 @@ func TestRetryTransport_BodyCloseErrorPropagatesWhenReadSucceeds(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "close boom")
 }
+
+// TestRetryTransport_ContextCancelledDuringRetryDelay covers the
+// waitForRetry ctx-cancelled path: the server always returns 500 (so a
+// retry is scheduled), but the context is cancelled while the inter-retry
+// delay is in progress.  RoundTrip must return ctx.Err() — not the 500
+// response — and must not make a second HTTP call.
+//
+// Lines covered: retry_transport.go 72.83-74.5 (waitForRetry error return)
+// and 100.2-100.18 (ctx.Err() inside waitForRetry).
+func TestRetryTransport_ContextCancelledDuringRetryDelay(t *testing.T) {
+	// Use a long inter-retry delay so cancellation definitely lands while the
+	// timer is still running (not after a real wait). retryBaseDelay is set to
+	// 500ms; the test cancels after 20ms, which is well within the first
+	// retry window on any CI runner.
+	withFastRetry(t, 4, 500*time.Millisecond, 2*time.Second)
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	rt := retryTransport{base: http.DefaultTransport}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+
+	// Cancel the context shortly after the first attempt lands so that the
+	// retry delay (500ms) is still in progress when ctx is done.
+	go func() {
+		// Give the first HTTP call just enough time to complete.
+		for atomic.LoadInt32(&calls) == 0 {
+			time.Sleep(time.Millisecond)
+		}
+		cancel()
+	}()
+
+	start := time.Now()
+	//nolint:bodyclose // waitForRetry returns (nil, ctx.Err()) — no response body
+	_, err = rt.RoundTrip(req)
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled,
+		"canceling the context during the inter-retry delay must surface ctx.Err()")
+	assert.EqualValues(t, 1, atomic.LoadInt32(&calls),
+		"only one HTTP attempt must be made before the delay is canceled")
+	assert.Less(t, elapsed, 400*time.Millisecond,
+		"must unblock well before the 500ms inter-retry delay expires")
+}

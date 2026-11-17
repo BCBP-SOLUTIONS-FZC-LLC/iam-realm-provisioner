@@ -212,6 +212,30 @@ func TestWriteEntry_UnknownEntryTypeIsNotAPermanentRejection(t *testing.T) {
 	require.ErrorIs(t, err, port.ErrAuditEntryRejected)
 }
 
+// TestProblemErrorCode exercises the RFC 9457 body parser directly — the
+// function is used to distinguish UNKNOWN_ENTRY_TYPE 422s (keep-and-retry)
+// from every other permanent rejection (delete-row).
+func TestProblemErrorCode(t *testing.T) {
+	t.Run("valid JSON with errorCode returns that code", func(t *testing.T) {
+		body := []byte(`{"type":"https://example.com/error","status":422,"errorCode":"UNKNOWN_ENTRY_TYPE"}`)
+		assert.Equal(t, "UNKNOWN_ENTRY_TYPE", problemErrorCode(body))
+	})
+
+	t.Run("valid JSON without errorCode returns empty string", func(t *testing.T) {
+		body := []byte(`{"type":"https://example.com/error","status":422}`)
+		assert.Equal(t, "", problemErrorCode(body))
+	})
+
+	t.Run("malformed JSON returns empty string", func(t *testing.T) {
+		body := []byte(`{not valid json`)
+		assert.Equal(t, "", problemErrorCode(body))
+	})
+
+	t.Run("empty byte slice returns empty string", func(t *testing.T) {
+		assert.Equal(t, "", problemErrorCode([]byte{}))
+	})
+}
+
 // The drainer's AL-5 body for RP-1/RP-2's TermsAccepted entry, exactly as
 // Audit Log rev 0.31 expects it, under the deterministic key.
 func TestWriteEntry_TermsAcceptedSendsAL5Contract(t *testing.T) {

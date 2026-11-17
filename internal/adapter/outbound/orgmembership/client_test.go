@@ -244,6 +244,35 @@ func TestNew_SetsBaseURLAndLogger(t *testing.T) {
 	require.NotNil(t, c.http)
 }
 
+// TestNew_ZeroTimeoutDefaultsTo5s verifies that when New is called with a
+// zero timeout the underlying http.Client is configured with a 5-second
+// deadline.  We access c.http.Timeout directly because Client is in the same
+// package and the field is exported as *http.Client.
+func TestNew_ZeroTimeoutDefaultsTo5s(t *testing.T) {
+	c := New("http://om.internal", 0, noopLogger{})
+	require.NotNil(t, c.http)
+	assert.Equal(t, 5*time.Second, c.http.Timeout,
+		"a zero timeout must default to 5s")
+}
+
+// TestNew_NegativeTimeoutDefaultsTo5s verifies that when New is called with a
+// negative timeout it also defaults to 5 seconds.
+func TestNew_NegativeTimeoutDefaultsTo5s(t *testing.T) {
+	c := New("http://om.internal", -1*time.Second, noopLogger{})
+	require.NotNil(t, c.http)
+	assert.Equal(t, 5*time.Second, c.http.Timeout,
+		"a negative timeout must default to 5s")
+}
+
+// TestNew_ExplicitTimeoutIsPreserved verifies that an explicit positive
+// timeout is not overridden by the defaulting logic.
+func TestNew_ExplicitTimeoutIsPreserved(t *testing.T) {
+	c := New("http://om.internal", 10*time.Second, noopLogger{})
+	require.NotNil(t, c.http)
+	assert.Equal(t, 10*time.Second, c.http.Timeout,
+		"an explicit positive timeout must be preserved")
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // ListLapsedSubscriptions (I-16, RP-C3's suspend-phase trigger) — same
 // shape/branch complexity as HasResidualMFARequirement above, mirrored

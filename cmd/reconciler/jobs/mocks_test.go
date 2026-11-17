@@ -57,6 +57,7 @@ type mockKeycloakAdmin struct {
 	DeleteRealmFn                        func(ctx context.Context, realmName string) error
 	DeleteRealmIfExistsFn                func(ctx context.Context, realmName string) error
 	EnsureSharedRealmFn                  func(ctx context.Context, realmName string) error
+	EnsurePlatformRealmFn                func(ctx context.Context, realmName string) error
 	CreateTrialUserFn                    func(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error)
 	CreateInvitedUserFn                  func(ctx context.Context, realmName string, req port.CreateUserRequest) (uuid.UUID, error)
 	SendActionsEmailFn                   func(ctx context.Context, realmName string, userID uuid.UUID, actions []string, lifespan time.Duration, link *port.ActionLink) error
@@ -107,6 +108,12 @@ func (m *mockKeycloakAdmin) DeleteRealmIfExists(ctx context.Context, realmName s
 }
 func (m *mockKeycloakAdmin) EnsureSharedRealm(ctx context.Context, realmName string) error {
 	return m.EnsureSharedRealmFn(ctx, realmName)
+}
+func (m *mockKeycloakAdmin) EnsurePlatformRealm(ctx context.Context, realmName string) error {
+	if m.EnsurePlatformRealmFn == nil {
+		return nil
+	}
+	return m.EnsurePlatformRealmFn(ctx, realmName)
 }
 func (m *mockKeycloakAdmin) CreateTrialUser(ctx context.Context, req port.CreateUserRequest) (uuid.UUID, error) {
 	return m.CreateTrialUserFn(ctx, req)

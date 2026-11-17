@@ -82,32 +82,54 @@ func (r *IdempotencyRepository) Begin(ctx context.Context, key string, tenantID 
 	var out *domain.ProvisioningOperation
 	var found bool
 	err := withPool(ctx, r.pool, func(tx pgcommon.Tx) error {
+		// Step 1: attempt a plain INSERT. ON CONFLICT DO NOTHING avoids the
+		// RLS violation that a DO UPDATE would trigger when the conflicting row
+		// belongs to a different tenant (RLS checks USING on the target row
+		// before evaluating the WHERE clause).
 		row := tx.QueryRow(ctx, `
 			INSERT INTO provisioning_operations (idempotency_key, tenant_id, operation, status)
 			VALUES ($1, $2, $3, 'in_progress')
-			ON CONFLICT (idempotency_key) DO UPDATE
-				SET status = 'in_progress', result = NULL, created_at = now(), completed_at = NULL
-				WHERE provisioning_operations.status = 'failed'
-				   OR (provisioning_operations.status = 'in_progress'
-				       AND provisioning_operations.created_at < now() - make_interval(secs => $4))
+			ON CONFLICT (idempotency_key) DO NOTHING
 			RETURNING idempotency_key, tenant_id, operation, status, result, created_at, completed_at`,
-			key, tenantID, operation, r.lease.Seconds())
+			key, tenantID, operation)
 		var op domain.ProvisioningOperation
 		var result []byte
-		scanErr := row.Scan(&op.IdempotencyKey, &op.TenantID, &op.Operation, &op.Status, &result, &op.CreatedAt, &op.CompletedAt)
-		if scanErr == nil {
-			// Fresh insert, or a reclaimed `failed` row — either way the
-			// caller proceeds with the operation.
+		if scanErr := row.Scan(&op.IdempotencyKey, &op.TenantID, &op.Operation, &op.Status, &result, &op.CreatedAt, &op.CompletedAt); scanErr == nil {
+			// Fresh insert — caller proceeds.
 			found = false
 			return nil
-		}
-		if !errors.Is(scanErr, pgcommon.ErrNoRows) {
+		} else if !errors.Is(scanErr, pgcommon.ErrNoRows) {
 			return scanErr
 		}
-		// The INSERT conflicted but the ON CONFLICT ... WHERE didn't match
-		// (existing status is `succeeded` or `in_progress`), so nothing was
-		// returned — fetch the existing row for the caller to inspect.
-		found = true
+
+		// Step 2: INSERT conflicted. Try to reclaim a same-tenant row that is
+		// reclaimable (failed, or in_progress past the lease). The WHERE
+		// tenant_id = $2 guard keeps us inside our own RLS partition; a
+		// cross-tenant collision simply produces 0 rows and falls through.
+		reclaimRow := tx.QueryRow(ctx, `
+			UPDATE provisioning_operations
+			SET status = 'in_progress', result = NULL, created_at = now(), completed_at = NULL
+			WHERE idempotency_key = $1
+			  AND tenant_id = $2
+			  AND (status = 'failed'
+			       OR (status = 'in_progress'
+			           AND created_at < now() - make_interval(secs => $3)))
+			RETURNING idempotency_key, tenant_id, operation, status, result, created_at, completed_at`,
+			key, tenantID, r.lease.Seconds())
+		var reclaimed domain.ProvisioningOperation
+		var reclaimedResult []byte
+		if scanErr := reclaimRow.Scan(&reclaimed.IdempotencyKey, &reclaimed.TenantID, &reclaimed.Operation, &reclaimed.Status, &reclaimedResult, &reclaimed.CreatedAt, &reclaimed.CompletedAt); scanErr == nil {
+			// Successfully reclaimed a failed/lease-expired row.
+			found = false
+			return nil
+		} else if !errors.Is(scanErr, pgcommon.ErrNoRows) {
+			return scanErr
+		}
+
+		// Step 3: neither a fresh insert nor a reclaim succeeded. Fetch the
+		// existing row (RLS-filtered: a cross-tenant collision returns no rows,
+		// which looks like a fresh key to this tenant — idempotency is simply
+		// not guaranteed across tenants for the same raw key string).
 		selRow := tx.QueryRow(ctx, `
 			SELECT idempotency_key, tenant_id, operation, status, result, created_at, completed_at
 			FROM provisioning_operations WHERE idempotency_key = $1`, key)
@@ -120,6 +142,7 @@ func (r *IdempotencyRepository) Begin(ctx context.Context, key string, tenantID 
 			}
 			return scanErr
 		}
+		found = true
 		existing.Result = json.RawMessage(existingResult)
 		out = &existing
 		return nil

@@ -1,10 +1,12 @@
 package http
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/puddle/v2"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
@@ -112,4 +114,24 @@ func TestDomainErrToProblem_StatementOrLockTimeout_Returns503RequestTimeout(t *t
 func TestDomainErrToProblem_MessagePropagated(t *testing.T) {
 	pe := domainErrToProblem(domain.NewError(domain.ErrTenantRealmNotFound, "realm abc not found"))
 	assert.Equal(t, "realm abc not found", pe.Detail)
+}
+
+// pgcommon.IsPoolClosed is satisfied by puddle.ErrClosedPool (the
+// underlying pgxpool sentinel) as well as by pgcommon's own coredomain
+// ErrPoolClosed — either must map to 503 DB_UNAVAILABLE, never 500.
+func TestDomainErrToProblem_PoolClosed_Returns503DBUnavailable(t *testing.T) {
+	// puddle.ErrClosedPool is exported and passes IsPoolClosed — no internal
+	// package required.
+	pe := domainErrToProblem(puddle.ErrClosedPool)
+	assert.Equal(t, http.StatusServiceUnavailable, pe.Status())
+	assert.Equal(t, "DB_UNAVAILABLE", pe.ErrorCode())
+}
+
+// A wrapped puddle.ErrClosedPool also satisfies pgcommon.IsPoolClosed
+// (errors.Is traversal) and must still map to 503 DB_UNAVAILABLE.
+func TestDomainErrToProblem_WrappedPoolClosed_Returns503DBUnavailable(t *testing.T) {
+	wrapped := fmt.Errorf("acquire: %w", puddle.ErrClosedPool)
+	pe := domainErrToProblem(wrapped)
+	assert.Equal(t, http.StatusServiceUnavailable, pe.Status())
+	assert.Equal(t, "DB_UNAVAILABLE", pe.ErrorCode())
 }

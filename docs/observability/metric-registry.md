@@ -80,6 +80,7 @@ Registered for the `iam` domain but not emitted by this service: `iam_auth_event
 | `iam_realm_provisioner_mfa_role_sync_total` | counter | `action` | requires-mfa realm-role sync operations by action (assign\|revoke). |
 | `iam_realm_provisioner_openbao_errors_total` | counter | `op`, `result` | OpenBao KV/auth operation errors by op (write_secret\|read_secret\|delete_secret\|kubernetes_login) and result. |
 | `iam_realm_provisioner_orphaned_signup_reap_total` | counter | `result` | orphaned-signup-reap per-tenant outcomes: signups that never received TrialStarted, by result (reaped\|skipped\|deferred). |
+| `iam_realm_provisioner_platform_realm_ready` | gauge | - | 1 when EnsurePlatformRealm (CD-52 item 2) has converged, or when PLATFORM_REALM_NAME is unset (bootstrap skipped — not applicable). 0 only while actively retrying a failing convergence. |
 | `iam_realm_provisioner_processed_events_duplicates_total` | counter | `consumer` | SQS redeliveries filtered by processed_events composite PK (IDEMP-4). |
 | `iam_realm_provisioner_provision_total` | counter | `kind`, `result` | Provisioning attempts by kind (trial\|direct\|convert) and result. |
 | `iam_realm_provisioner_prune_rows_total` | counter | `job`, `table` | Rows deleted by prune jobs by job (outbox\|processed_events\|ledger) and table. |
@@ -90,6 +91,7 @@ Registered for the `iam` domain but not emitted by this service: `iam_auth_event
 | `iam_realm_provisioner_service_account_key_refresh_total` | counter | `result` | RP-17 service-account key-cache refresh calls by result. |
 | `iam_realm_provisioner_service_account_register_total` | counter | `result` | RP-1/RP-2/RP-3 automation-principal mint-tail attempts by result (success\|warn\|failure). |
 | `iam_realm_provisioner_session_revoke_total` | counter | `result` | RP-16 session-revoke calls by result. |
+| `iam_realm_provisioner_shared_realm_ready` | gauge | - | 1 when EnsureSharedRealm has converged at least once since startup, 0 while the background retry loop is still running. 0 sustained beyond startup means trial signups (RP-1) are failing. |
 | `iam_realm_provisioner_template_drift` | gauge | `realm_version` | Report-only count of dedicated realms whose realm_template_version differs from the current REALM_TEMPLATE_VERSION, by realm_version. |
 | `iam_realm_provisioner_trial_expiry_deferred_total` | counter | - | RP-C1 trial-expiry rows deferred to the next tick. |
 | `iam_realm_provisioner_trial_expiry_processed_total` | counter | - | RP-C1 trial-expiry rows successfully processed. |

@@ -122,6 +122,7 @@ func (h *InternalHandler) RemoveIdp(c *gin.Context) {
 // @Failure      403  {object}  ProblemResponse  "INSUFFICIENT_ROLE (operator role required)"
 // @Failure      500  {object}  ProblemResponse
 // @Security     SystemRole
+// @Security     OperatorRole
 // @Router       /audit/idp-region-portability [post]
 func (h *InternalHandler) PortabilityAudit(c *gin.Context) {
 	if h.Idp == nil {

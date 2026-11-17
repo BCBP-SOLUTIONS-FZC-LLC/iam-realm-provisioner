@@ -73,6 +73,8 @@ func TestRegister_SucceedsAndPopulatesAllVars(t *testing.T) {
 	assert.NotNil(t, UnknownEventAcknowledged)
 	assert.NotNil(t, ConsumedSchemaViolationsTotal)
 	assert.NotNil(t, ProcessedEventsDuplicates)
+	assert.NotNil(t, SharedRealmReady)
+	assert.NotNil(t, PlatformRealmReady)
 	assert.NotNil(t, DependencyRequestDuration)
 }
 
@@ -448,6 +450,8 @@ func TestNamingConvention_ConformsToPlatformObservabilityStandard(t *testing.T) 
 	UnknownEventAcknowledged.WithLabelValues("topic", "Type").Add(0)
 	ConsumedSchemaViolationsTotal.WithLabelValues("billing", "TenantReactivated").Add(0)
 	ProcessedEventsDuplicates.WithLabelValues("tenant").Add(0)
+	SharedRealmReady.Set(0)
+	PlatformRealmReady.Set(0)
 	DependencyRequestDuration.WithLabelValues("keycloak", "create_realm", "success").Observe(0)
 	DependencyRequestDuration.WithLabelValues("keycloak", "token", "error").Observe(0)
 

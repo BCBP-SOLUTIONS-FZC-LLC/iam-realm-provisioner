@@ -184,6 +184,19 @@ var (
 	// while that registry entry is proposed.
 	ProcessedEventsDuplicates *prometheus.CounterVec
 
+	// SharedRealmReady is 1 when EnsureSharedRealm (LLD §12.2) has
+	// converged at least once since startup, 0 while the background retry
+	// loop is still running. 0 at startup means trial signups (RP-1) may
+	// fail; 0 beyond the first few minutes is an alert condition.
+	SharedRealmReady prometheus.Gauge
+
+	// PlatformRealmReady is 1 when EnsurePlatformRealm (CD-52 item 2,
+	// LLD §12.3) has converged at least once since startup, and also 1
+	// when PLATFORM_REALM_NAME is unset (bootstrap skipped — not
+	// applicable in this environment). It is 0 only while the bootstrap
+	// loop is actively retrying a failing convergence.
+	PlatformRealmReady prometheus.Gauge
+
 	// DependencyRequestDuration is the Tier 1
 	// platform_dependency_request_seconds histogram (registry status
 	// "proposed"): one sample per outbound Keycloak Admin API call, labeled
@@ -429,6 +442,18 @@ func registerMetrics() {
 		ConstLabels: labels,
 	}, []string{"consumer"})
 
+	SharedRealmReady = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name:        prefix + "shared_realm_ready",
+		Help:        "1 when EnsureSharedRealm has converged at least once since startup, 0 while the background retry loop is still running. 0 sustained beyond startup means trial signups (RP-1) are failing.",
+		ConstLabels: labels,
+	})
+
+	PlatformRealmReady = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name:        prefix + "platform_realm_ready",
+		Help:        "1 when EnsurePlatformRealm (CD-52 item 2) has converged, or when PLATFORM_REALM_NAME is unset (bootstrap skipped — not applicable). 0 only while actively retrying a failing convergence.",
+		ConstLabels: labels,
+	})
+
 	gincommon.MetricsRegisterer().MustRegister(
 		ProvisionTotal,
 		UsersMigratedTotal,
@@ -461,6 +486,8 @@ func registerMetrics() {
 		UnknownEventAcknowledged,
 		ConsumedSchemaViolationsTotal,
 		ProcessedEventsDuplicates,
+		SharedRealmReady,
+		PlatformRealmReady,
 	)
 
 	DependencyRequestDuration = sharedHistogram("platform_dependency_request_seconds")

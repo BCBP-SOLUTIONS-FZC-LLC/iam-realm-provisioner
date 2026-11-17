@@ -26,6 +26,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "SystemRole": []
+                    },
+                    {
+                        "OperatorRole": []
                     }
                 ],
                 "description": "Operator-only. Runs the §11.6 Region-Agnostic IdP Configuration Checklist across every tenant with an active IdP configuration and returns a per-tenant validation report. Not tenant-scoped — scans the full estate. Used for pre-migration and compliance audits.",
@@ -843,6 +846,9 @@ const docTemplate = `{
                     },
                     {
                         "IdempotencyKey": []
+                    },
+                    {
+                        "OperatorRole": []
                     }
                 ],
                 "description": "Operator-only. Immediately disables the tenant's Keycloak realm and transitions status to suspended. Reason is required for the audit trail. Reversed by RP-10 Reactivate. Idempotent on Idempotency-Key reuse.",
@@ -1733,6 +1739,12 @@ const docTemplate = `{
             "description": "Caller-supplied UUID v4. Required on all mutating endpoints. Reusing a key for a completed operation replays the stored result.",
             "type": "apiKey",
             "name": "Idempotency-Key",
+            "in": "header"
+        },
+        "OperatorRole": {
+            "description": "Requires the x-tenant-roles header to contain \"platform_operator\" (injected by AuthZ Enrichment for operator realm tokens, CD-52). Used by RP-13 (whole-estate IdP portability audit) and RP-14 (emergency operator suspend).",
+            "type": "apiKey",
+            "name": "x-tenant-roles",
             "in": "header"
         },
         "SystemRole": {

@@ -159,9 +159,68 @@ func TestMustEnv_MissingOutsideDev_Dies(t *testing.T) {
 	assert.Equal(t, 1, *exitCode)
 }
 
+// TestRun_UnreachableDB_Returns1 covers the die("connect to postgres")
+// error path introduced by the return-after-die hardening. 127.0.0.1:1 is
+// always closed, so pgcommon.NewPool fails fast with connection refused.
+// APP_ENV=test lets gincommon's ObservabilityMiddlewares init pass.
+// SYSTEM_DATABASE_URL is set to a distinct port so the sys-DSN equality
+// check does not fire before the pool connection is attempted.
+func TestRun_UnreachableDB_Returns1(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("DATABASE_URL", "postgres://user:pass@127.0.0.1:1/db?sslmode=disable")
+	t.Setenv("SYSTEM_DATABASE_URL", "postgres://user:pass@127.0.0.1:2/db?sslmode=disable")
+	t.Setenv("KEYCLOAK_BASE_URL", "http://localhost:8091")
+	t.Setenv("KEYCLOAK_ADMIN_CLIENT_SECRET", "test-secret")
+	t.Setenv("ORPHAN_SIGNUP_AFTER", "48h")
+	resetFlags(t, "reconciler", "--job=trial-expiry")
+	exitCode := stubExit(t)
+
+	got := run()
+
+	assert.Equal(t, 1, got)
+	assert.Equal(t, 1, *exitCode)
+}
+
 func TestDie(t *testing.T) {
 	exitCode := stubExit(t)
 	die("boom %d", 42)
 	require.NotNil(t, exitCode)
+	assert.Equal(t, 1, *exitCode)
+}
+
+// subscription-lapse requires ORG_MEMBERSHIP_BASE_URL in non-dev
+// environments (M7 fail-fast). The check runs before any logger, tracing, or
+// database initialisation, so the test does not need any infrastructure.
+func TestRun_SubscriptionLapse_MissingOrgMembershipURL_NonDev_Returns1(t *testing.T) {
+	t.Setenv("APP_ENV", "staging")
+	t.Setenv("ORG_MEMBERSHIP_BASE_URL", "")
+	// Ensure ORPHAN_SIGNUP_AFTER is valid so orphan-reap's earlier check does
+	// not interfere (this job is subscription-lapse, so that guard is a no-op
+	// regardless, but clear the env to be explicit).
+	t.Setenv("ORPHAN_SIGNUP_AFTER", "")
+	resetFlags(t, "reconciler", "--job=subscription-lapse")
+	exitCode := stubExit(t)
+
+	got := run()
+
+	assert.Equal(t, 1, got)
+	assert.Equal(t, 1, *exitCode)
+}
+
+// orphaned-signup-reap requires TOKEN_SERVICE_BASE_URL in non-dev
+// environments (M7 fail-fast). The check runs before any logger, tracing, or
+// database initialisation.
+func TestRun_OrphanedSignupReap_MissingTokenServiceURL_NonDev_Returns1(t *testing.T) {
+	t.Setenv("APP_ENV", "staging")
+	t.Setenv("TOKEN_SERVICE_BASE_URL", "")
+	// Provide a valid ORPHAN_SIGNUP_AFTER so the earlier orphan-after guard
+	// does not fire first.
+	t.Setenv("ORPHAN_SIGNUP_AFTER", "48h")
+	resetFlags(t, "reconciler", "--job=orphaned-signup-reap")
+	exitCode := stubExit(t)
+
+	got := run()
+
+	assert.Equal(t, 1, got)
 	assert.Equal(t, 1, *exitCode)
 }

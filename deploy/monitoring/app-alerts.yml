@@ -197,6 +197,58 @@ groups:
   - name: iam_realm_provisioner_lifecycle
     rules:
 
+      # ── Shared trial realm not converged (LLD §12.2) ────────────────────────
+      #    SharedRealmReady is set to 1 by ensureSharedRealm (cmd/server/
+      #    shared_realm.go) on first successful convergence. A sustained 0
+      #    beyond the warm-up window means EnsureSharedRealm keeps failing
+      #    and trial signups (RP-1) will error.
+      #    `and on ()` suppresses the alert while the pod is down (stale=0
+      #    metric) — `up` carries {job,instance}, not {service,environment},
+      #    so the cross-product join `on ()` is the correct form.
+      - alert: IAMRealmProvisionerSharedRealmNotConverged
+        expr: |
+          iam_realm_provisioner_shared_realm_ready == 0
+            and on ()
+          up{job="iam-realm-provisioner"} == 1
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          runbook: "docs/observability/runbooks.md#iamrealmprovisionersharedrealmnotconverged"
+          summary: iam-realm-provisioner shared trial realm has not converged
+          description: >-
+            The shared trial realm (SHARED_TRIAL_REALM) has not been
+            successfully ensured since server startup. RP-1 trial provisioning
+            will fail until EnsureSharedRealm succeeds. Check Keycloak
+            connectivity and server logs for "ensure shared trial realm failed".
+
+      # ── Platform operator realm not converged (CD-52 item 2, LLD §12.3) ─────
+      #    PlatformRealmReady is set to 1 by ensurePlatformRealm (cmd/server/
+      #    platform_realm.go) on first successful convergence. When
+      #    PLATFORM_REALM_NAME is unset, main.go sets the gauge to 1 immediately
+      #    so this alert is silent in pre-CD-52 environments.
+      #    `and on ()` suppresses the alert while the pod is down — see note
+      #    on IAMRealmProvisionerSharedRealmNotConverged for the join rationale.
+      - alert: IAMRealmProvisionerPlatformRealmNotConverged
+        expr: |
+          iam_realm_provisioner_platform_realm_ready == 0
+            and on ()
+          up{job="iam-realm-provisioner"} == 1
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          runbook: "docs/observability/runbooks.md#iamrealmprovisionerplatformrealmnotconverged"
+          summary: iam-realm-provisioner platform operator realm has not converged
+          description: >-
+            The platform operator realm (PLATFORM_REALM_NAME) has not been
+            successfully ensured since server startup (CD-52 item 2). Platform
+            operator login and the platform_operator role injection by AuthZ
+            Enrichment will not work. Check Keycloak connectivity and server
+            logs for "ensure platform realm failed".
+
       # ── RP-C1 trial-expiry deferrals (§11.5) ───────────────────────────────
       #    Reconciler metrics arrive through the Pushgateway (cmd/reconciler
       #    pushMetrics, grouping label cronjob=<job>): each run is a fresh

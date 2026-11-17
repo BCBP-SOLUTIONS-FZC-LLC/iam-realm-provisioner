@@ -349,6 +349,33 @@ func TestGetRealm_IdpRepoError_Propagates(t *testing.T) {
 	assert.Equal(t, domain.ErrDBUnavailable, de.Code)
 }
 
+// CD-20: when WithIdpConfigs was never called (idpCfg == nil) and the
+// tenant uses a dedicated realm, GetRealm must return an internal
+// configuration error rather than silently returning idp_count=0
+// (which would permit a harmful SSO-losing downgrade undetected).
+func TestGetRealm_DedicatedTenant_NilIdpCfgRepo_ReturnsError(t *testing.T) {
+	// Construct the service WITHOUT calling WithIdpConfigs so idpCfg stays nil.
+	kc := &mockKeycloakAdmin{}
+	realms := newMockTenantRealmRepository()
+	idem := newMockIdempotencyStore()
+	tx, _ := newMockTxRunner()
+	svc := service.NewLifecycleService(realms, idem, kc, tx, "trial")
+	// idpCfg is intentionally NOT wired via svc.WithIdpConfigs(...)
+
+	tenantID := uuid.New()
+	realms.rows[tenantID] = &domain.TenantRealm{
+		TenantID: tenantID, RealmName: "tenant-x", Strategy: domain.RealmStrategyDedicated,
+		Status: domain.RealmStatusActive,
+	}
+
+	_, err := svc.GetRealm(context.Background(), tenantID)
+	require.Error(t, err, "a nil idpCfg repo for a dedicated-realm tenant must return an error")
+	de, ok := err.(*domain.Error)
+	require.True(t, ok, "error must be a *domain.Error, got %T: %v", err, err)
+	assert.Equal(t, domain.ErrDBUnavailable, de.Code,
+		"a misconfigured idpCfg repo is reported as db_unavailable (misconfiguration signal)")
+}
+
 // ── RP-16: RevokeSessions ────────────────────────────────────────────────
 
 func TestRevokeSessions_Idempotent(t *testing.T) {

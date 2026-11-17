@@ -149,6 +149,7 @@ type suspendRequest struct {
 // @Security     SystemRole
 // @Security     TenantID
 // @Security     IdempotencyKey
+// @Security     OperatorRole
 // @Router       /tenants/{id}/suspend [post]
 func (h *InternalHandler) Suspend(c *gin.Context) {
 	if h.Lifecycle == nil {
