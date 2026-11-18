@@ -2199,7 +2199,7 @@ All tenant-lifecycle state changes are captured as outbox events on `iam.tenant.
 | `outbox_events` (published) | 8 days (`OUTBOX_RETENTION_DAYS`) | `outbox-prune` CronJob, daily `0 4 * * *` |
 | `rls_violation_log` | 90 days (`RLS_VIOLATION_LOG_TTL_DAYS`) | `ledger-prune` CronJob, daily `0 5 * * *` (rev 1.21), batched deletes on `idx_rls_violation_log_occurred_at`; long enough for incident triage (§20.2) |
 | `provisioning_operations` | 30 days (`PROVISIONING_OPERATIONS_TTL_DAYS`) — far beyond any client retry window; `result` can carry `admin_email` (§15.8) | `ledger-prune` CronJob (rev 1.21), batched deletes on `idx_provops_created_at` |
-| `pending_audit_entries` | Deleted on delivery; `failed` rows kept until an operator resolves them. Not deleted by the GDPR scrub (rev 1.41): an undelivered `TermsAccepted` carries the owner's IP address/user agent only until Audit Log has it | AL-5 drainer (§10.6) — never pruned automatically; `failed` rows alert |
+| `pending_audit_entries` | Deleted on delivery; `failed` rows kept until an operator requeues, discards or resolves them (`iam-realm-provisioner-server audit-admin`, platform-audit's audited operator helpers). Not deleted by the GDPR scrub (rev 1.41): an undelivered `TermsAccepted` carries the owner's IP address/user agent only until Audit Log has it | AL-5 drainer (§10.6) — never pruned automatically; `failed` rows alert |
 | `tenant_realms` (live) | Tenant lifetime | Soft-deleted at trial hard-delete / paid offboard; `tenant_id` retained for audit-FK |
 | `keycloak_idp_config_validations` | Append-only audit | No prune CronJob |
 | Realm exports (S3) | Compliance schedule (7 y for approval/signature-adjacent) | SSE-KMS; never deleted by this service's CronJobs |

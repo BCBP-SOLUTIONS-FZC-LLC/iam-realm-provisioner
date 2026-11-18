@@ -65,6 +65,15 @@ const (
 )
 
 func main() {
+	// `iam-realm-provisioner-server audit-admin …`: the operator tool for
+	// parked and waiting audit entries (auditadmin.go); it never starts the
+	// service.
+	if len(os.Args) > 1 && os.Args[1] == "audit-admin" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		code := runAuditAdmin(ctx, os.Args[2:], os.Stdout, os.Stderr)
+		stop()
+		os.Exit(code)
+	}
 	appEnv := resolveAppEnv()
 	if !isDevEnv(appEnv) {
 		gin.SetMode(gin.ReleaseMode)

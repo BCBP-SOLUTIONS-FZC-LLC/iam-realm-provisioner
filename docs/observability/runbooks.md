@@ -207,8 +207,24 @@ These alerts read platform-library metrics that are still `proposed` in the regi
 ### Audit delivery (platform-audit)
 
 The service's own `IAMRealmProvisionerAuditEntriesRejected` / `…Undelivered` alerts and the `iam_realm_provisioner_audit_entry_*` metrics were retired with platform-audit release N+1. Audit delivery is monitored by the library's rules (`deploy/helm/templates/prometheusrule-platform-audit.yaml`) on `platform_audit_*`, and runbooks are the library's ([platform-audit runbook](https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/blob/main/docs/observability/runbook.md)):
-- **Parked rows** (`PlatformAuditEntriesParked`): `SELECT id, tenant_id, entry->>'entry_type' AS entry_type, last_outcome, last_error, failed_at FROM pending_audit_entries WHERE status='failed'`. Never `UPDATE` these rows by hand: the library's constraints tie `status` to `failed_at`, and every disposition must be audited through platform-audit's operator helpers (`auditoutbox.Requeue` / `Discard` / `Resolve`).
-- **Undelivered rows** (`PlatformAuditDeliveryStalled`, `PlatformAuditNotAdmitted`, `PlatformAuditUnknownEntryType`, `PlatformAuditDeliveryDisabled`): Audit Log unreachable, not admitting this service, not knowing the entry type yet, or `AUDIT_LOG_BASE_URL` unset. Nothing is lost; the backlog drains once the cause is fixed.
+- **Parked rows** (`PlatformAuditEntriesParked`): Audit Log rejected the entry (`last_outcome = rejected`, `last_error` `"<status> <errorCode>"`) or the retry budget ran out (`last_outcome = retry`). Use the server binary's `audit-admin` subcommand (below): `list` them, fix the cause, then `requeue` (replay), `discard` (give up) or `resolve` (delivered out of band). Never `UPDATE` or `DELETE` these rows by hand: the library's constraints tie `status` to `failed_at`, and every disposition must write its own `config.audit_delivery.*` audit entry, which the tool does in the same transaction.
+- **Waiting rows** (`PlatformAuditNotAdmitted`, `PlatformAuditUnknownEntryType`): `not_admitted` (`401`/`403`: Audit Log's admission of this service's principal) and `skew` (`422 UNKNOWN_ENTRY_TYPE`: Audit Log does not know the entry type yet) are never parked; they wait, and drain on their own once the cause is fixed. `audit-admin list-waiting` shows them. Only when one will never be deliverable (a retired entry type, say) dispose of it with `discard -waiting` or `resolve -waiting`.
+- **Undelivered rows** (`PlatformAuditDeliveryStalled`, `PlatformAuditDeliveryDisabled`): Audit Log unreachable or `AUDIT_LOG_BASE_URL` unset. Nothing is lost; the backlog drains once the cause is fixed.
+
+**`audit-admin`** runs in a server pod (`kubectl exec` into the Deployment named by the Helm fullname, container `iam-realm-provisioner`; the image is distroless, so the binary is invoked directly, and the subcommand starts nothing but itself) and connects as the Runner does, with `SYSTEM_DATABASE_URL` (`realm_provisioner_migrator`, BYPASSRLS, PgBouncer mode). It refuses to run when `SYSTEM_DATABASE_URL` is unset or equals `DATABASE_URL`: the app role is RLS-bound and would see no rows. Exit codes: `0` done, `1` the operation failed (nothing changed: each command is one transaction), `2` usage error.
+
+```bash
+kubectl exec -n <namespace> deploy/iam-realm-provisioner -c iam-realm-provisioner -- /iam-realm-provisioner-server audit-admin list
+kubectl exec -n <namespace> deploy/iam-realm-provisioner -c iam-realm-provisioner -- /iam-realm-provisioner-server audit-admin list-waiting -last-outcome not_admitted
+kubectl exec -n <namespace> deploy/iam-realm-provisioner -c iam-realm-provisioner -- /iam-realm-provisioner-server audit-admin requeue \
+  -last-outcome rejected -entry-type legal.terms.accepted -operator <your user UUID> -reason "INC-123: Audit Log fix deployed"
+kubectl exec -n <namespace> deploy/iam-realm-provisioner -c iam-realm-provisioner -- /iam-realm-provisioner-server audit-admin discard \
+  -id <row id>[,<row id>...] -operator <your user UUID> -reason "INC-123: superseded"
+```
+
+- Selectors: `-id` (comma-separated), `-entry-type`, `-last-outcome`, `-failed-before` (RFC 3339, parked rows only); `-limit` (default 100) caps each run. `requeue`, `discard` and `resolve` need at least one selector, `-operator` (your user UUID; the entry's actor) and `-reason` (1..512 bytes, **no personal data**: the `config.audit_delivery.*` entry is kept for its retention tier and never redacted).
+- `-waiting` (discard/resolve only, not with `-failed-before`) takes waiting rows instead of parked ones. It is refused with `auditoutbox.ErrAdoptionPending` (exit 1) while platform-audit's as-built compatibility trigger exists, which on this service is only after `auditoutbox.ReinstallCompat` (a rollback to pre-library code) until the next migrate run's `FinishAdoption`.
+- Output never shows entry content: id, tenant, entry type, last outcome, attempts, failed at and last error only. Discarded and resolved rows are scrubbed at once, kept `AUDIT_DISPOSED_RETENTION` (90d) and purged by the Runner.
 
 ## Tenant isolation
 

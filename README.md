@@ -743,11 +743,24 @@ Three DB-state gauges (`realm_active_gauge`, `realm_config_pending_gauge`, `temp
 
 Structured log fields: `tenant_id`, `operation`, `idempotency_key`, `keycloak_realm`, `actor` — **never** the admin token, a password seed, or an IdP secret. Slow queries (> 200ms) log at WARN with `tenant_id` redacted; RLS violations log at ERROR, 1% sampled.
 
+### Audit entries: parked and waiting rows
+
+platform-audit's Runner parks a `pending_audit_entries` row (`failed`, alert `PlatformAuditEntriesParked`) when Audit Log rejects it or its retry budget runs out, and keeps `skew` / `not_admitted` rows waiting (never parked). Operators handle them with the server binary's **`audit-admin`** subcommand, in a server pod:
+
+```bash
+kubectl exec -n <namespace> deploy/iam-realm-provisioner -c iam-realm-provisioner -- /iam-realm-provisioner-server audit-admin list            # parked rows
+kubectl exec -n <namespace> deploy/iam-realm-provisioner -c iam-realm-provisioner -- /iam-realm-provisioner-server audit-admin list-waiting    # skew / not_admitted
+kubectl exec -n <namespace> deploy/iam-realm-provisioner -c iam-realm-provisioner -- /iam-realm-provisioner-server audit-admin requeue \
+  -id <row id> -operator <your user UUID> -reason "<ticket>: cause fixed"
+```
+
+`requeue` replays parked rows; `discard` gives up on them and `resolve` records them as delivered out of band (with `-waiting`, on waiting rows instead). Each change needs a selector (`-id`, `-entry-type`, `-last-outcome`, `-failed-before`), `-operator` and `-reason` (1..512 bytes, no personal data: the `config.audit_delivery.*` entry it writes is never redacted), and runs in one transaction with that entry. The tool connects like the Runner, with `SYSTEM_DATABASE_URL` (BYPASSRLS), and refuses to run without it. Exit codes: `0` ok, `1` operation failed, `2` usage. Procedure: [`docs/observability/runbooks.md`](docs/observability/runbooks.md#audit-delivery-platform-audit).
+
 ---
 
 ## Production go-live checklist
 
-Before the first production deploy, work through the eleven one-time platform/ops steps in [`.claude/operations.md`](.claude/operations.md#production-go-live-checklist): Terraform grants for the migrator role, the `existingSecret` keys, IRSA, queue RedrivePolicies, Glue schema registration, the OpenBao role, the Pushgateway (`honor_labels: true`), NetworkPolicy database ports, `AUDIT_LOG_BASE_URL`, trial size vs `CONVERT_TIMEOUT`, and the release deploy gate.
+Before the first production deploy, work through the one-time platform/ops steps in [`.claude/operations.md`](.claude/operations.md#production-go-live-checklist): Terraform grants for the migrator role, the `existingSecret` keys, IRSA, queue RedrivePolicies, Glue schema registration, the OpenBao role, the Pushgateway (`honor_labels: true`), NetworkPolicy database ports, `AUDIT_LOG_BASE_URL`, trial size vs `CONVERT_TIMEOUT`, the release deploy gate, and an owner for parked audit entries (who answers `PlatformAuditEntriesParked` with `audit-admin`, [below](#audit-entries-parked-and-waiting-rows)).
 
 ## Deployment
 
@@ -755,7 +768,7 @@ Before the first production deploy, work through the eleven one-time platform/op
 
 | Binary | Path in image | Purpose |
 |---|---|---|
-| `iam-realm-provisioner-server` | `/iam-realm-provisioner-server` | HTTP server (`cmd/server`) — the image's `ENTRYPOINT`. Serves `/api/v1/internal/*`, runs the outbox runner + 3 SQS consumers. |
+| `iam-realm-provisioner-server` | `/iam-realm-provisioner-server` | HTTP server (`cmd/server`) — the image's `ENTRYPOINT`. Serves `/api/v1/internal/*`, runs the outbox runner + 3 SQS consumers. `iam-realm-provisioner-server audit-admin …` is the operator tool for parked/waiting audit entries (starts nothing else). |
 | `iam-realm-provisioner-reconciler` | `/iam-realm-provisioner-reconciler` | One-shot reconciler (`cmd/reconciler`), dispatched via `--job=<name>` by the 7 K8s CronJobs. |
 | `migrate` | `/migrate` | Schema migration (`cmd/migrate`) — run by the Helm pre-install/pre-upgrade hook Job before replicas roll, so they start with `RUN_MIGRATIONS=false`. |
 
@@ -927,7 +940,7 @@ This service sits on **no synchronous request-path dependency for any other serv
 | MFA reset (O&M → RP-9) | Keycloak Admin API | fail-closed | `502` → O&M `503`; no `MFAReset` — no reconciler |
 | Realm-config (O&M → RP-8) | Keycloak Admin API | fail-open + durable reconcile | `pending` row, RP-C4 converges (RP-INV-6) |
 | RP-6 / RP-7 IdP | OpenBao KV + Keycloak | fail-closed | No partial `keycloak_idp_configs` row |
-| RP-6 / RP-7 IdP audit entry; RP-1 / RP-2 `TermsAccepted` | Audit Log AL-5 direct-write (`POST /api/v1/internal/audit-entries`) | async, retried from `pending_audit_entries` by `platform-audit`'s outbox Runner | Rows accumulate if `AUDIT_LOG_BASE_URL` unset (dev only — WARN, no client; required elsewhere); 429/5xx/timeout → backoff retry (50 attempts, then parked); 422 `UNKNOWN_ENTRY_TYPE` (Audit Log older than rev 0.31) → `skew`, kept pending with no budget; 401/403 → `not_admitted`, kept pending; any other Audit Log verdict → `rejected`, parked `failed` for an operator (`metadata_too_large` is guarded at 8192 bytes before send) |
+| RP-6 / RP-7 IdP audit entry; RP-1 / RP-2 `TermsAccepted` | Audit Log AL-5 direct-write (`POST /api/v1/internal/audit-entries`) | async, retried from `pending_audit_entries` by `platform-audit`'s outbox Runner | Rows accumulate if `AUDIT_LOG_BASE_URL` unset (dev only — WARN, no client; required elsewhere); 429/5xx/timeout → backoff retry (50 attempts, then parked); 422 `UNKNOWN_ENTRY_TYPE` (Audit Log older than rev 0.31) → `skew`, kept pending with no budget; 401/403 → `not_admitted`, kept pending; any other Audit Log verdict → `rejected`, parked `failed` for an operator (`audit-admin`; `metadata_too_large` is guarded at 8192 bytes before send) |
 | Offboarding export | S3 | fail-closed | Tenant stays `suspended`; `realm_export_total{result="fail"}` is critical |
 | Outbox publish | SNS | retried, then DLQ | Local commit already happened — delay, not loss |
 | RP-C3 suspend phase | O&M's I-16 (`SubscriptionLapseReader`) | fail-open, degrade to WARN | Skips the suspend phase only if `ORG_MEMBERSHIP_BASE_URL` is unset; offboard phase still runs unconditionally |

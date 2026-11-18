@@ -6,6 +6,11 @@ This service has never been deployed to any environment — there is no released
 
 ## [Unreleased]
 
+### Added
+
+- **`iam-realm-provisioner-server audit-admin`** (`cmd/server/auditadmin.go`): the operator tool for `pending_audit_entries` rows platform-audit's Runner parked (`failed`) or keeps waiting (`skew`, `not_admitted`), ported from Catalog Admin's. Commands `list`, `list-waiting`, `requeue`, `discard`, `resolve` (`-waiting` for waiting rows; not with `-failed-before`), each change audited by the library's operator helpers in the same transaction (`config.audit_delivery.*`). Changes need a selector (`-id`, `-entry-type`, `-last-outcome`, `-failed-before`), `-operator` (user UUID) and `-reason` (1..512 bytes, no personal data). Exit codes 0 / 1 (operation failed) / 2 (usage). It is dispatched before anything else in the server binary (the image's entrypoint, so `kubectl exec` into a server pod) and connects like the Runner: `SYSTEM_DATABASE_URL` through `SystemPoolConfig` (PgBouncer mode), one connection, pool `audit_admin`; it refuses an unset `SYSTEM_DATABASE_URL` or one equal to `DATABASE_URL` (RLS-filtered). `newAuditOutbox`'s AUDIT_* loading and `AUDIT_SOURCE_SERVICE` check moved to `loadAuditConfig`, which the tool shares. Runbook: `docs/observability/runbooks.md` § Audit delivery (replacing the raw-SQL listing); go-live checklist item 13 (`.claude/operations.md`): parked rows have an owner.
+- **Tests:** flag and usage validation (`cmd/server/auditadmin_test.go`); `TestRunAuditAdmin_RealSchema` (in process, for coverage) and `TestAudit_AdminTool` (`test/postgres`, builds and runs the real binary as `realm_provisioner_migrator`): park, `list`, `list-waiting`, `requeue` with its `config.audit_delivery.requeued` entry, `discard`, `discard -waiting`, and `-waiting` refused with `ErrAdoptionPending` after `ReinstallCompat`.
+
 ### Changed (platform-audit release N+1 — the contract)
 
 > No environment runs this service in production (all are dev), so no pre-library pod can still be running anywhere that matters: the release-N-then-N+1 wait (platform-audit LLD §19.3) does not apply. In a dev database rolled back to pre-library code, run `auditoutbox.ReinstallCompat` or recreate the database.
