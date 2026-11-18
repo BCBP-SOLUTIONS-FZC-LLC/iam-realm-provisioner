@@ -19,7 +19,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2/pkg/gincommon"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/port"
 )
@@ -85,9 +84,7 @@ func newAuditOutbox(ctx context.Context, appPool, sysPool *pgcommon.Pool, log po
 	if client == nil {
 		log.Warn("audit-entry delivery disabled — AUDIT_LOG_BASE_URL unset; TenantIdpConfigChanged and TermsAccepted entries accumulate in pending_audit_entries until it is set", nil)
 	}
-	rc := cfg.RunnerConfig(sysPool, client, enq, log)
-	rc.Observer = legacyAuditMetrics{}
-	runner, err := auditoutbox.NewRunner(rc)
+	runner, err := auditoutbox.NewRunner(cfg.RunnerConfig(sysPool, client, enq, log))
 	if err != nil {
 		return nil, err
 	}
@@ -110,30 +107,4 @@ func (a *auditOutbox) stop(timeout time.Duration, log port.Logger) {
 	if err := a.runner.Stop(ctx); err != nil {
 		log.Error("platform-audit runner stop error", map[string]any{"error": err.Error()})
 	}
-}
-
-// legacyAuditMetrics feeds this service's pre-library audit metrics from the
-// Runner during platform-audit's compatibility period (LLD §19.5), so the
-// IAMRealmProvisionerAuditEntries* alerts and dashboards keep working. New
-// monitoring uses platform_audit_*.
-type legacyAuditMetrics struct{}
-
-// Delivered maps the library outcome onto audit_entry_delivery_total's
-// result label: skew keeps its old name unknown_entry_type, an invalid
-// stored row is a rejection, and not_admitted (401/403, retried) is new.
-func (legacyAuditMetrics) Delivered(_ string, reason audit.Outcome) {
-	result := string(reason)
-	switch reason {
-	case audit.OutcomeSkew:
-		result = "unknown_entry_type"
-	case audit.OutcomeInvalid:
-		result = "rejected"
-	}
-	metrics.AuditEntryDeliveryTotal.WithLabelValues(result).Inc()
-}
-
-// Backlog sets audit_entry_backlog_gauge{status} from the Runner's sample.
-func (legacyAuditMetrics) Backlog(pending, failed int, _ time.Duration) {
-	metrics.AuditEntryBacklogGauge.WithLabelValues("pending").Set(float64(pending))
-	metrics.AuditEntryBacklogGauge.WithLabelValues("failed").Set(float64(failed))
 }

@@ -95,8 +95,6 @@ func exerciseEveryCollector() {
 	UserDeleteTotal.WithLabelValues("success").Add(0)
 	SessionRevokeTotal.WithLabelValues("success").Add(0)
 	MfaResetTotal.WithLabelValues("success").Add(0)
-	AuditEntryDeliveryTotal.WithLabelValues("delivered").Add(0)
-	AuditEntryBacklogGauge.WithLabelValues("pending").Set(0)
 	ServiceAccountRegisterTotal.WithLabelValues("success").Add(0)
 	ServiceAccountKeyRefreshTotal.WithLabelValues("success").Add(0)
 	OpenBaoErrorsTotal.WithLabelValues("write_secret", "error").Add(0)

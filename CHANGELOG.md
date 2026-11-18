@@ -4,6 +4,17 @@ All notable changes to this service are documented here. Format follows [Keep a 
 
 This service has never been deployed to any environment — there is no released version yet, so everything lives under `[Unreleased]`. Because of that, this file tracks only what is currently true and what is still outstanding, not a phase-by-phase build history; the full development diary is available via `git log` if it's ever needed.
 
+## [Unreleased]
+
+### Changed (platform-audit release N+1 — the contract)
+
+> No environment runs this service in production (all are dev), so no pre-library pod can still be running anywhere that matters: the release-N-then-N+1 wait (platform-audit LLD §19.3) does not apply. In a dev database rolled back to pre-library code, run `auditoutbox.ReinstallCompat` or recreate the database.
+
+- **`AdoptAuditOutbox` runs `auditoutbox.FinishAdoption` between `AdoptAsBuilt` and `ApplySchema`.** It drops release N's compatibility trigger, so a pre-library pod's insert (no `idempotency_key`) is now refused. **Rollback to pre-library code needs `auditoutbox.ReinstallCompat` first.** `AdoptAsBuilt` stays: a fresh database (CI, dev, a new environment) gets the as-built shape from `000000_initial_schema`, and `ApplySchema` refuses it unconverted; on a converted table it is a no-op.
+- **Correction:** release N's CHANGELOG said this release drops the `AdoptAsBuilt` call. It cannot, for the reason above.
+- **Tests:** the schema test asserts the trigger is gone; `FinishedAdoption_RefusesOldInserts_ReinstallCompatRestores` covers the refusal, the `ReinstallCompat` rollback and the next migrate run dropping the trigger again.
+- **Legacy audit metrics and alerts retired.** `iam_realm_provisioner_audit_entry_delivery_total`, `iam_realm_provisioner_audit_entry_backlog_gauge`, the Runner `Observer` that fed them, and the `IAMRealmProvisionerAuditEntriesRejected` / `…Undelivered` alerts (Helm and `deploy/monitoring/app-alerts.yml`) are removed; `docs/observability/metric-registry.md` regenerated. The compatibility period (platform-audit LLD §19.5) protects production dashboards and alerts during a switch-over; this service has never run in production, so there is nothing to switch. Audit delivery is monitored by platform-audit's rules on `platform_audit_*` (`PlatformAuditEntriesParked`, `PlatformAuditDeliveryStalled`, …); the runbook section now points there.
+
 ## [Unreleased — 2026-11-17]
 
 ### Changed

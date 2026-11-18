@@ -58,22 +58,29 @@ func MigrateSchema(ctx context.Context, dsn string, log port.Logger) error {
 	return nil
 }
 
-// AdoptAuditOutbox converts the as-built pending_audit_entries table (created
-// by 000000_initial_schema) to platform-audit's outbox shape and applies the
-// library's own migrations (platform-audit iam-adopters §5.1, release N, the
-// expand). Order matters: AdoptAsBuilt first, since ApplySchema refuses an
-// as-built table it has not expanded (auditoutbox.ErrAsBuiltNotAdopted).
-// Both are idempotent, so every startup and every migrate Job run calls them.
+// AdoptAuditOutbox brings pending_audit_entries to platform-audit's outbox
+// shape and applies the library's own migrations (platform-audit iam-adopters
+// §5.1, LLD §19.3). Release N+1, the contract:
 //
-// AdoptAsBuilt runs on its own single-connection pool over dsn, which must
-// be the migrator role: it owns the table and holds BYPASSRLS (without it the
-// backfill under FORCE RLS would update 0 rows, auditoutbox.ErrNotBypassRLS).
-// The compatibility trigger it installs keeps an older pod's inserts and
-// parking valid during a rollout or rollback; ApplySchema holds at version 1
-// while it exists. Release N+1 runs auditoutbox.FinishAdoption to drop it,
-// and drops the AdoptAsBuilt call too: once adopted it changes nothing, but
-// still takes a brief ACCESS EXCLUSIVE lock on pending_audit_entries
-// (bounded by lock_timeout) on every run.
+//  1. AdoptAsBuilt converts the as-built table that 000000_initial_schema
+//     creates. Still required: a fresh database (CI, dev, a new environment)
+//     gets the as-built shape from 000000, and ApplySchema refuses it
+//     (auditoutbox.ErrAsBuiltNotAdopted). On a converted table it is a no-op.
+//  2. FinishAdoption drops release N's compatibility trigger: no pod running
+//     the pre-library adapter remains once release N has run in production
+//     without rollback. Idempotent. To roll back to pre-library code after
+//     this, run auditoutbox.ReinstallCompat first.
+//  3. ApplySchema applies the library's migrations, which no longer hold at
+//     version 1.
+//
+// Every step is idempotent, so every startup and every migrate Job run calls
+// them. Each takes a brief ACCESS EXCLUSIVE lock on the table (bounded by
+// lock_timeout), once per migrate run.
+//
+// AdoptAsBuilt and FinishAdoption run on their own single-connection pool
+// over dsn, which must be the migrator role: it owns the table and holds
+// BYPASSRLS (without it the backfill under FORCE RLS would update 0 rows,
+// auditoutbox.ErrNotBypassRLS).
 func AdoptAuditOutbox(ctx context.Context, dsn string, logger pgdomain.Logger) error {
 	pool, err := pgcommon.NewPool(ctx, pgcommon.Config{DSN: dsn, MaxConns: 1, PoolName: "platform_audit_adopt"})
 	if err != nil {
@@ -82,6 +89,9 @@ func AdoptAuditOutbox(ctx context.Context, dsn string, logger pgdomain.Logger) e
 	defer pool.Close()
 	if err := auditoutbox.AdoptAsBuilt(ctx, pool, auditoutbox.AsBuiltRealmProvisioner, auditoutbox.AdoptOptions{}); err != nil {
 		return fmt.Errorf("adopt as-built pending_audit_entries: %w", err)
+	}
+	if err := auditoutbox.FinishAdoption(ctx, pool); err != nil {
+		return fmt.Errorf("finish adoption of pending_audit_entries: %w", err)
 	}
 	return auditoutbox.ApplySchema(ctx, &pgmigrate.Runner{DSN: dsn, Logger: logger})
 }
