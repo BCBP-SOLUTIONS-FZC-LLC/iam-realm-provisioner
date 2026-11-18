@@ -226,6 +226,10 @@ This service has never been deployed to any environment — there is no released
 
 ## [Unreleased]
 
+### Changed (2026-11-18 — platform-audit v0.1.2)
+
+- **`platform-audit` and `cmd/audittypecheck` v0.1.1 → v0.1.2.** The PATCH pins iam-audit-log v0.2.0 (one new entry type, Catalog's `config.plan.trial_profile.updated`); no API, schema or behaviour change here.
+
 ### Changed (2026-11-18 — platform-audit v0.1.1)
 
 - **`platform-audit` and `cmd/audittypecheck` v0.1.0 → v0.1.1.** The PATCH fixes uuid array parameters on PgBouncer-mode pools: on v0.1.0 the Runner's purge of disposed rows and the operator helpers (`Requeue` / `Discard` / `Resolve`) failed there. Delivery itself was unaffected. No code change in this service.

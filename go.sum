@@ -32,10 +32,10 @@ github.com/Antonboom/testifylint v1.6.4 h1:gs9fUEy+egzxkEbq9P4cpcMB6/G0DYdMeiFS8
 github.com/Antonboom/testifylint v1.6.4/go.mod h1:YO33FROXX2OoUfwjz8g+gUxQXio5i9qpVy7nXGbxDD4=
 github.com/Azure/go-ansiterm v0.0.0-20261013165250-51075c6ea6bc h1:58s5YzGPNAP7+e1uemaL0ax/NPSeJOHdRpRIowd+JDk=
 github.com/Azure/go-ansiterm v0.0.0-20261013165250-51075c6ea6bc/go.mod h1:DMNF6Kxv+EcuUvVuNkvC3f+BjEEmc/Fn9aU+qiD8zpU=
-github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit v0.1.1 h1:KKF2+RnGN+XFeZiyngmm3JplnEAHTCLr1y7e9lTpFjE=
-github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit v0.1.1/go.mod h1:/beXETmNwMDffe5mhQsWFnM+eLY+Rb8IY0hA8i3zZFE=
-github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/cmd/audittypecheck v0.1.1 h1:L2Al8+e4YArfQtaiC3qJB/K750Jr51Dw2ucB7mS7rkU=
-github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/cmd/audittypecheck v0.1.1/go.mod h1:yE2qmusnl6Bm05kr0NMOrhF7MB19F2R4LQ2eO/zZlOQ=
+github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit v0.1.2 h1:SGeiZJ/9h4LLdYrP1O+SjXV3IxK9FU8L2pfVq9R0PiI=
+github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit v0.1.2/go.mod h1:/beXETmNwMDffe5mhQsWFnM+eLY+Rb8IY0hA8i3zZFE=
+github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/cmd/audittypecheck v0.1.2 h1:SfYBghTFEGc6gdka8w3Dd1X/y10btbeQ99YqqJRDctA=
+github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/cmd/audittypecheck v0.1.2/go.mod h1:dk9ATQFHjh1G578JxurAwcDQM7hAajgyywDLD4ukbfc=
 github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2 v2.3.0 h1:BC9HAEi/yk4DuvaPtQx+V2xOpO4AvI4Ik0ynN0jaFws=
 github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/v2 v2.3.0/go.mod h1:VTDG0P8wYnKGGKKRY8mAFicBt93g9AiRqbAI68aiH+U=
 github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/v2 v2.6.0 h1:H3YNwQtbpNB7iG4WhfsJTXI5GwGtDdfITS9Ul6a8fss=
