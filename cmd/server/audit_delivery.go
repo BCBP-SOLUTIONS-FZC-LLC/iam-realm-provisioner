@@ -44,6 +44,23 @@ func auditEnvLookup(name string) (string, bool) {
 	return v, ok
 }
 
+// loadAuditConfig reads the AUDIT_* environment (auditEnvLookup) and
+// refuses an AUDIT_SOURCE_SERVICE other than domain.Source. Both the
+// server's outbox and the audit-admin tool build their Enqueuer from it, so
+// the operator's own audit entries carry the same source service and key
+// namespace as the Runner's.
+func loadAuditConfig() (auditconfig.Config, error) {
+	cfg, err := auditconfig.FromLookup("", auditEnvLookup)
+	if err != nil {
+		return cfg, err
+	}
+	if cfg.SourceService != domain.Source {
+		return cfg, fmt.Errorf("%w: AUDIT_SOURCE_SERVICE must be %q (legal.terms.accepted is producer-restricted to it), got %q",
+			audit.ErrConfig, domain.Source, cfg.SourceService)
+	}
+	return cfg, nil
+}
+
 // newAuditOutbox builds the Enqueuer and Runner. Every failure is fatal for
 // the caller: a malformed AUDIT_* value, an app role that cannot INSERT into
 // pending_audit_entries (Enqueue would otherwise swallow SQLSTATE 42501 and
@@ -52,13 +69,9 @@ func auditEnvLookup(name string) (string, bool) {
 // entries queue durably and the backlog gauges report them. Outside
 // APP_ENV=dev, validateRequiredEnv refuses to start without it first.
 func newAuditOutbox(ctx context.Context, appPool, sysPool *pgcommon.Pool, log port.Logger) (*auditOutbox, error) {
-	cfg, err := auditconfig.FromLookup("", auditEnvLookup)
+	cfg, err := loadAuditConfig()
 	if err != nil {
 		return nil, err
-	}
-	if cfg.SourceService != domain.Source {
-		return nil, fmt.Errorf("%w: AUDIT_SOURCE_SERVICE must be %q (legal.terms.accepted is producer-restricted to it), got %q",
-			audit.ErrConfig, domain.Source, cfg.SourceService)
 	}
 	labels := gincommon.MetricsConstLabels()
 	warnings, err := audit.InitMetrics(audit.MetricsIdentity{
