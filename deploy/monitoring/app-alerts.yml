@@ -574,32 +574,6 @@ groups:
           description: >-
             Transactions kept hitting deadlocks or serialization failures through every pgcommon retry.
 
-      - alert: IAMRealmProvisionerAuditEntriesRejected
-        expr: |
-          max by (domain, service, environment) (iam_realm_provisioner_audit_entry_backlog_gauge{service="iam-realm-provisioner", status="failed"}) > 0
-        for: 15m
-        labels:
-          severity: warning
-          team: platform
-        annotations:
-          runbook: "docs/observability/runbooks.md#iamrealmprovisionerauditentriesrejected"
-          summary: "Audit-log entries (TenantIdpConfigChanged, TermsAccepted) were permanently rejected by Audit Log"
-          description: >-
-            pending_audit_entries holds rows Audit Log parked as failed (AL-5 rejection, or retry budget spent). Those IdP-configuration changes or terms acceptances have no audit record until the cause is fixed and the rows are re-queued. A 422 UNKNOWN_ENTRY_TYPE is not parked here — it stays pending and retries.
-
-      - alert: IAMRealmProvisionerAuditEntriesUndelivered
-        expr: |
-          max by (domain, service, environment) (iam_realm_provisioner_audit_entry_backlog_gauge{service="iam-realm-provisioner", status="pending"}) > 0
-        for: 30m
-        labels:
-          severity: warning
-          team: platform
-        annotations:
-          runbook: "docs/observability/runbooks.md#iamrealmprovisionerauditentriesundelivered"
-          summary: "Audit-log entries (TenantIdpConfigChanged, TermsAccepted) are not reaching Audit Log"
-          description: >-
-            pending_audit_entries has held undelivered rows for 30 minutes: Audit Log is unreachable, does not know the entry type yet (422 UNKNOWN_ENTRY_TYPE, retried), this service is not admitted (401/403, retried), or AUDIT_LOG_BASE_URL is unset (delivery is then disabled). Nothing is lost — rows deliver once the cause is fixed.
-
       # ── OpenBao auth/KV errors (C2 — no prior alert existed) ─────────────
       # iam_realm_provisioner_openbao_errors_total is defined in
       # internal/adapter/outbound/metrics/metrics.go.

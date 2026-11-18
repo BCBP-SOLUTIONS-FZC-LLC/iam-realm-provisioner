@@ -3,16 +3,13 @@ package main
 import (
 	"context"
 	"testing"
-	"time"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/pkg/audit"
 	auditconfig "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-audit/pkg/config"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-realm-provisioner/internal/core/domain"
 )
 
@@ -50,25 +47,4 @@ func TestNewAuditOutbox_ConfigErrorsAreFatal(t *testing.T) {
 		require.ErrorIs(t, err, audit.ErrConfig)
 		assert.ErrorContains(t, err, "producer-restricted")
 	})
-}
-
-func TestLegacyAuditMetrics_MapsOutcomes(t *testing.T) {
-	ensureMetricsRegistered(t)
-	cases := map[audit.Outcome]string{
-		audit.OutcomeDelivered:   "delivered",
-		audit.OutcomeRetry:       "retry",
-		audit.OutcomeSkew:        "unknown_entry_type",
-		audit.OutcomeNotAdmitted: "not_admitted",
-		audit.OutcomeRejected:    "rejected",
-		audit.OutcomeInvalid:     "rejected",
-	}
-	for outcome, label := range cases {
-		before := testutil.ToFloat64(metrics.AuditEntryDeliveryTotal.WithLabelValues(label))
-		legacyAuditMetrics{}.Delivered("config.idp.changed", outcome)
-		assert.InDelta(t, before+1, testutil.ToFloat64(metrics.AuditEntryDeliveryTotal.WithLabelValues(label)), 0, "outcome %s", outcome)
-	}
-
-	legacyAuditMetrics{}.Backlog(7, 2, time.Minute)
-	assert.InDelta(t, 7, testutil.ToFloat64(metrics.AuditEntryBacklogGauge.WithLabelValues("pending")), 0)
-	assert.InDelta(t, 2, testutil.ToFloat64(metrics.AuditEntryBacklogGauge.WithLabelValues("failed")), 0)
 }
