@@ -33,7 +33,7 @@ Commands:
   list-waiting  rows waiting on skew or not_admitted (never parked)
   requeue       replay parked rows (failed -> pending)
   discard       give up on parked rows, or waiting rows with -waiting
-                (kept, scrubbed after AUDIT_DISPOSED_RETENTION)
+                (scrubbed at once, purged after AUDIT_DISPOSED_RETENTION)
   resolve       mark parked rows (or waiting rows with -waiting) as
                 delivered out of band
 
