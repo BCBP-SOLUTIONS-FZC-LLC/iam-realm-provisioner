@@ -226,6 +226,10 @@ This service has never been deployed to any environment — there is no released
 
 ## [Unreleased]
 
+### Changed (2026-11-18 — platform-audit v0.1.1)
+
+- **`platform-audit` and `cmd/audittypecheck` v0.1.0 → v0.1.1.** The PATCH fixes uuid array parameters on PgBouncer-mode pools: on v0.1.0 the Runner's purge of disposed rows and the operator helpers (`Requeue` / `Discard` / `Resolve`) failed there. Delivery itself was unaffected. No code change in this service.
+
 ### Fixed
 
 - **Test Postgres image pinned to `postgres:16.16-alpine`; cross-tenant idempotency-key collision test updated.** PostgreSQL 16.16 now checks the UPDATE policy's USING expression against the conflicting row of `INSERT ... ON CONFLICT DO UPDATE` even when the `ON CONFLICT ... WHERE` doesn't match. `IdempotencyRepository.Begin` therefore fails with SQLSTATE 42501 when a second tenant reuses another tenant's literal `Idempotency-Key`, where before it silently reported the call "fresh" and stripped idempotency from that operation. The floating `postgres:16-alpine` tag picked up 16.16 and broke `Begin_CrossTenantKeyCollision_DefeatsIdempotency`; the subtest is now `Begin_CrossTenantKeyCollision_FailsClosed`, and every test/CI/compose image reference names the exact minor.
