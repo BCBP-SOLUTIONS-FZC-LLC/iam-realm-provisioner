@@ -73,14 +73,14 @@ func TestPendingAuditEntryRepository(t *testing.T) {
 		var trig bool
 		require.NoError(t, rawPool.QueryRow(ctx,
 			`SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'platform_audit_compat')`).Scan(&trig))
-		assert.True(t, trig, "release N keeps the compatibility trigger until FinishAdoption")
+		assert.False(t, trig, "release N+1 drops the compatibility trigger (FinishAdoption)")
 		var keyNotNull bool
 		require.NoError(t, rawPool.QueryRow(ctx, `SELECT attnotnull FROM pg_attribute
 			WHERE attrelid = 'pending_audit_entries'::regclass AND attname = 'idempotency_key'`).Scan(&keyNotNull))
 		assert.True(t, keyNotNull)
 		var version int64
 		require.NoError(t, rawPool.QueryRow(ctx, `SELECT version FROM `+auditoutbox.MigrationsTable).Scan(&version))
-		assert.Equal(t, int64(1), version, "ApplySchema holds at version 1 while the compatibility trigger exists")
+		assert.Equal(t, int64(1), version, "the library's latest migration (000001)")
 
 		superDSN := rawPool.Config().ConnString()
 		require.NoError(t, pgadapter.AdoptAuditOutbox(ctx, superDSN, nil), "a second run is a no-op")
@@ -171,22 +171,33 @@ func TestPendingAuditEntryRepository(t *testing.T) {
 		assert.Zero(t, count(t, tenantID))
 	})
 
-	// An old pod (pre-adoption code) inserts without a key and parks
-	// without failed_at: the compatibility trigger fills both.
-	t.Run("CompatTrigger_AcceptsOldCodeInserts", func(t *testing.T) {
+	// After FinishAdoption a pre-library insert (no idempotency_key) is
+	// refused, and ReinstallCompat (the rollback path to pre-library code)
+	// restores the trigger that accepts it; the next AdoptAuditOutbox drops it
+	// again.
+	t.Run("FinishedAdoption_RefusesOldInserts_ReinstallCompatRestores", func(t *testing.T) {
 		tenantID := uuid.New()
+		_, err := rawPool.Exec(ctx, `INSERT INTO pending_audit_entries (tenant_id, entry) VALUES ($1, '{}')`, tenantID)
+		require.Error(t, err, "no compatibility trigger: a row without a key violates NOT NULL")
+
+		superDSN := rawPool.Config().ConnString()
+		pool, err := pgcommon.NewPool(ctx, pgcommon.Config{DSN: superDSN, MaxConns: 1})
+		require.NoError(t, err)
+		defer pool.Close()
+		require.NoError(t, auditoutbox.ReinstallCompat(ctx, pool, auditoutbox.AsBuiltRealmProvisioner))
 		var id uuid.UUID
 		var key string
 		require.NoError(t, rawPool.QueryRow(ctx,
 			`INSERT INTO pending_audit_entries (tenant_id, entry) VALUES ($1, '{}') RETURNING id, idempotency_key`, tenantID).Scan(&id, &key))
-		assert.Equal(t, id.String(), key)
-		_, err := rawPool.Exec(ctx, `UPDATE pending_audit_entries SET status = 'failed', last_error = 'audit entry rejected by audit log: 422' WHERE id = $1`, id)
-		require.NoError(t, err)
-		var outcome string
-		require.NoError(t, rawPool.QueryRow(ctx, `SELECT last_outcome FROM pending_audit_entries WHERE id = $1`, id).Scan(&outcome))
-		assert.Equal(t, "rejected", outcome)
+		assert.Equal(t, id.String(), key, "the reinstalled trigger fills the key from the id")
 		_, err = rawPool.Exec(ctx, `DELETE FROM pending_audit_entries WHERE id = $1`, id)
 		require.NoError(t, err)
+
+		require.NoError(t, pgadapter.AdoptAuditOutbox(ctx, superDSN, nil))
+		var trig bool
+		require.NoError(t, rawPool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'platform_audit_compat')`).Scan(&trig))
+		assert.False(t, trig, "the next migrate run drops it again")
 	})
 
 	t.Run("AppRole_HasEnqueueAccess", func(t *testing.T) {

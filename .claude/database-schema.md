@@ -79,7 +79,7 @@ RLS-6 (no session-scoped `SET app.tenant_id`) is additionally enforced structura
 
 `trg_outbox_normalize_payload` — `BEFORE INSERT ON outbox_events`, decodes pgx's bytea-hex encoding of the `payload` text column back to UTF-8 (see `outbox_events` above).
 
-`platform_audit_compat` — `BEFORE INSERT OR UPDATE ON pending_audit_entries` → `platform_audit_compat_fill()`, installed by `auditoutbox.AdoptAsBuilt` so pre-adoption code's inserts (no key) and parking (no `failed_at`) stay valid; removed by `auditoutbox.FinishAdoption` in a later release.
+`platform_audit_compat` — `BEFORE INSERT OR UPDATE ON pending_audit_entries` → `platform_audit_compat_fill()`, installed by `auditoutbox.AdoptAsBuilt` so pre-adoption code's inserts (no key) and parking (no `failed_at`) stay valid; removed by `auditoutbox.FinishAdoption` in release N+1 (`AdoptAuditOutbox`: `AdoptAsBuilt` → `FinishAdoption` → `ApplySchema`; `AdoptAsBuilt` stays because a fresh database gets the as-built shape from `000000`). Rolling back to pre-library code after that needs `auditoutbox.ReinstallCompat` first.
 
 ## Migrations
 
