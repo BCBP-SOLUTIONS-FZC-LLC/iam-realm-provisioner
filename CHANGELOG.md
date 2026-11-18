@@ -226,6 +226,10 @@ This service has never been deployed to any environment — there is no released
 
 ## [Unreleased]
 
+### Fixed (2026-11-18 — `audittypecheck` checked nothing)
+
+- **`make audit-typecheck` passed without checking any entry type.** The adapter builds its one `audit.Entry` with a variable `EntryType`, which platform-audit's analyzer cannot see (it checks string constants only). `internal/adapter/outbound/postgres/audit_entry_types_test.go` now lists each emitted type as a constant `audit.Entry` literal, which the analyzer checks against Audit Log's taxonomy and producer restrictions, and `TestAuditEntryTypes_AreComplete` requires every `AuditEntryType*` constant in `internal/core/domain`. Verified: a mistyped constant now produces an `audittypecheck` warning.
+
 ### Changed (2026-11-18 — platform-audit v0.1.2)
 
 - **`platform-audit` and `cmd/audittypecheck` v0.1.1 → v0.1.2.** The PATCH pins iam-audit-log v0.2.0 (one new entry type, Catalog's `config.plan.trial_profile.updated`); no API, schema or behaviour change here.
