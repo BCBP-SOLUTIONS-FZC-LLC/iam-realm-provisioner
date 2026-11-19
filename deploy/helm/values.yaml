@@ -168,7 +168,13 @@ env:
   KEYCLOAK_RATE_LIMIT_RPS: "20"
   KEYCLOAK_TIMEOUT_MS: "8s"
   SHARED_TRIAL_REALM: "trial"
-  # PLATFORM_REALM_NAME: "bcbp-platform"  # CD-52 item 2 — set once KC realm is provisioned
+  # Operator platform realm (CD-52; AuthZ Enrichment LLD §8.9.1 OP-G1). The
+  # server creates and converges it at startup (EnsurePlatformRealm, LLD §12.3):
+  # platform_operator role, realm-wide OTP, short sessions. Its issuer,
+  # https://auth.bcbpsolutions.com/realms/bcbp-platform, becomes AuthZ
+  # Enrichment's OPERATOR_REALM_ISSUER (OP-G3) and the gateway's platform-realm
+  # jwt_authn provider (OP-G2, platform edge). Unset to skip the bootstrap.
+  PLATFORM_REALM_NAME: "bcbp-platform"
   REALM_TEMPLATE_VERSION: "v1"
   # The versioned template the image ships (Dockerfile copies
   # deploy/keycloak/realm-template.json here; LLD §12.2). Without it the code
