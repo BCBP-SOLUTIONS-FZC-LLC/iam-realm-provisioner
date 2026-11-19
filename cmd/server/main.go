@@ -435,7 +435,7 @@ func main() {
 	if platformRealm := os.Getenv("PLATFORM_REALM_NAME"); platformRealm != "" {
 		startPlatformRealmEnsure(ctx, keycloakAdmin, platformRealm, log)
 	} else {
-		log.Warn("platform realm bootstrap skipped — PLATFORM_REALM_NAME unset (CD-52 OP-G3 pending)", nil)
+		log.Warn("platform realm bootstrap skipped — PLATFORM_REALM_NAME unset (CD-52 OP-G1)", nil)
 		metrics.PlatformRealmReady.Set(1) // not applicable in this env; set 1 so the alert doesn't fire spuriously
 	}
 

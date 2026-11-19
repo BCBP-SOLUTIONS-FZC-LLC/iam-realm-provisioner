@@ -6,6 +6,12 @@ This service has never been deployed to any environment — there is no released
 
 ## [Unreleased]
 
+### Changed (2026-11-19 — operator platform realm enabled, CD-52 OP-G1)
+
+- `PLATFORM_REALM_NAME: "bcbp-platform"` is set in the chart's base values, so every environment's server creates and converges the operator platform realm at startup (`EnsurePlatformRealm`, LLD §12.3): `platform_operator` role, realm-wide OTP, short sessions. Issuer `https://auth.bcbpsolutions.com/realms/bcbp-platform`, for AuthZ Enrichment's `OPERATOR_REALM_ISSUER` (OP-G3) and platform edge's gateway provider (OP-G2). No code change; the service account already holds master `create-realm`.
+- OP-G numbering in LLD §12.3 and the skip log line aligned with AuthZ Enrichment LLD §8.9.1. LLD rev 1.51.
+- Still manual: create operator user accounts in the realm and grant `platform_operator`.
+
 ### Added
 
 - **`iam-realm-provisioner-server audit-admin`** (`cmd/server/auditadmin.go`): the operator tool for `pending_audit_entries` rows platform-audit's Runner parked (`failed`) or keeps waiting (`skew`, `not_admitted`), ported from Catalog Admin's. Commands `list`, `list-waiting`, `requeue`, `discard`, `resolve` (`-waiting` for waiting rows; not with `-failed-before`), each change audited by the library's operator helpers in the same transaction (`config.audit_delivery.*`). Changes need a selector (`-id`, `-entry-type`, `-last-outcome`, `-failed-before`), `-operator` (user UUID) and `-reason` (1..512 bytes, no personal data). Exit codes 0 / 1 (operation failed) / 2 (usage). It is dispatched before anything else in the server binary (the image's entrypoint, so `kubectl exec` into a server pod) and connects like the Runner: `SYSTEM_DATABASE_URL` through `SystemPoolConfig` (PgBouncer mode), one connection, pool `audit_admin`; it refuses an unset `SYSTEM_DATABASE_URL` or one equal to `DATABASE_URL` (RLS-filtered). `newAuditOutbox`'s AUDIT_* loading and `AUDIT_SOURCE_SERVICE` check moved to `loadAuditConfig`, which the tool shares. Runbook: `docs/observability/runbooks.md` § Audit delivery (replacing the raw-SQL listing); go-live checklist item 13 (`.claude/operations.md`): parked rows have an owner.
